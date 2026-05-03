@@ -38,7 +38,7 @@ from .detection import (
     UrlDetection,
 )
 from .handoff import CompletionResult, GuardedSession, Handoff, HandoffError
-from .notifiers import EmailNotifier, Notifier, SlackNotifier
+from .notifiers import DiscordNotifier, EmailNotifier, Notifier, SlackNotifier
 from .server import ServerConfig, StreamingServer
 
 __version__ = "0.1.0"
@@ -65,5 +65,6 @@ __all__ = [
     # Notifiers
     "Notifier",
     "SlackNotifier",
+    "DiscordNotifier",
     "EmailNotifier",
 ]

@@ -7,7 +7,7 @@ A standalone library that provides human-in-the-loop fallback for browser automa
 - **Detection System**: Flexible rules to detect when automation is blocked (CAPTCHAs, login pages, security challenges)
 - **CDP Streaming**: Real-time browser streaming via Chrome DevTools Protocol
 - **Event-Driven**: Efficient event-based detection instead of polling
-- **Notifications**: Alert humans via Slack, email, or custom notifiers
+- **Notifications**: Alert humans via Slack, Discord, email, or custom notifiers
 - **Config Files**: JSON/YAML configuration with environment variable interpolation
 - **LLM Detection**: Optional AI-powered detection using vision models
 
@@ -248,6 +248,18 @@ notifier = SlackNotifier(
     webhook_url="https://hooks.slack.com/services/...",
     channel="#alerts",  # Optional
     username="Browser Bot",  # Optional
+)
+```
+
+### Discord
+
+```python
+from browser_handoff import DiscordNotifier
+
+notifier = DiscordNotifier(
+    webhook_url="https://discord.com/api/webhooks/...",
+    username="Browser Bot",  # Optional
+    avatar_url="https://example.com/avatar.png",  # Optional
 )
 ```
 

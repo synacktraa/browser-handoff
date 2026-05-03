@@ -3,6 +3,7 @@
 import pytest
 
 from browser_handoff.notifiers import (
+    DiscordNotifier,
     EmailNotifier,
     SlackNotifier,
     notifier_from_dict,
@@ -61,6 +62,59 @@ class TestSlackNotifier:
         notifier = SlackNotifier.from_dict(data)
         assert notifier.webhook_url == "https://hooks.slack.com/services/xxx"
         assert notifier.channel == "#notifications"
+
+
+class TestDiscordNotifier:
+    """Tests for DiscordNotifier."""
+
+    def test_creation(self):
+        """Test creating a Discord notifier."""
+        notifier = DiscordNotifier(
+            webhook_url="https://discord.com/api/webhooks/123/abc",
+            username="TestBot",
+        )
+        assert notifier.webhook_url == "https://discord.com/api/webhooks/123/abc"
+        assert notifier.username == "TestBot"
+        assert notifier.notifier_type == "discord"
+
+    def test_default_values(self):
+        """Test default values."""
+        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/123/abc")
+        assert notifier.username == "Browser Handoff"
+        assert notifier.avatar_url is None
+
+    def test_to_dict(self):
+        """Test serialization to dict."""
+        notifier = DiscordNotifier(
+            webhook_url="https://discord.com/api/webhooks/123/abc",
+            username="CustomBot",
+            avatar_url="https://example.com/avatar.png",
+        )
+        data = notifier.to_dict()
+        assert data["type"] == "discord"
+        assert data["webhook_url"] == "https://discord.com/api/webhooks/123/abc"
+        assert data["username"] == "CustomBot"
+        assert data["avatar_url"] == "https://example.com/avatar.png"
+
+    def test_to_dict_minimal(self):
+        """Test serialization with only required fields."""
+        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/123/abc")
+        data = notifier.to_dict()
+        assert data == {
+            "type": "discord",
+            "webhook_url": "https://discord.com/api/webhooks/123/abc",
+        }
+
+    def test_from_dict(self):
+        """Test deserialization from dict."""
+        data = {
+            "type": "discord",
+            "webhook_url": "https://discord.com/api/webhooks/456/xyz",
+            "username": "MyBot",
+        }
+        notifier = DiscordNotifier.from_dict(data)
+        assert notifier.webhook_url == "https://discord.com/api/webhooks/456/xyz"
+        assert notifier.username == "MyBot"
 
 
 class TestEmailNotifier:
@@ -134,6 +188,16 @@ class TestNotifierFromDict:
         notifier = notifier_from_dict(data)
         assert isinstance(notifier, SlackNotifier)
         assert notifier.webhook_url == "https://hooks.slack.com/test"
+
+    def test_discord_notifier(self):
+        """Test creating Discord notifier from dict."""
+        data = {
+            "type": "discord",
+            "webhook_url": "https://discord.com/api/webhooks/123/abc",
+        }
+        notifier = notifier_from_dict(data)
+        assert isinstance(notifier, DiscordNotifier)
+        assert notifier.webhook_url == "https://discord.com/api/webhooks/123/abc"
 
     def test_email_notifier(self):
         """Test creating email notifier from dict."""
