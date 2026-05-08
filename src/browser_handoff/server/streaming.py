@@ -80,8 +80,8 @@ class StreamingServer:
             allow_headers=["*"],
         )
 
-        @app.get("/", response_class=HTMLResponse)
-        async def index(session: str = "default") -> str | HTMLResponse:
+        @app.get("/", response_class=HTMLResponse, response_model=None)
+        async def index(session: str = "default"):
             """Serve the HTML client."""
             session_state = self.sessions.get(session)
             if not session_state:
@@ -92,8 +92,8 @@ class StreamingServer:
 
             return self._get_html_client(session, session_state.reason)
 
-        @app.get("/stream")
-        async def stream(session: str = "default") -> HTMLResponse | StreamingResponse:
+        @app.get("/stream", response_model=None)
+        async def stream(session: str = "default"):
             """MJPEG stream endpoint."""
             session_state = self.sessions.get(session)
             if not session_state:
