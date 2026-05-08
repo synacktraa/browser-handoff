@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -137,14 +140,17 @@ class StreamingServer:
                         message = json.loads(data)
                         msg_type = message.get("type")
 
-                        if msg_type == "mouse":
-                            await self._handle_mouse(cdp, message)
-                        elif msg_type == "keyboard":
-                            await self._handle_keyboard(cdp, message)
-                        elif msg_type == "navigate":
-                            await self._handle_navigate(page, message)
-            except Exception:
-                pass
+                        try:
+                            if msg_type == "mouse":
+                                await self._handle_mouse(cdp, message)
+                            elif msg_type == "keyboard":
+                                await self._handle_keyboard(cdp, message)
+                            elif msg_type == "navigate":
+                                await self._handle_navigate(page, message)
+                        except Exception as e:
+                            logger.error(f"Error handling {msg_type} event: {e}")
+            except Exception as e:
+                logger.error(f"WebSocket error: {e}")
             finally:
                 if websocket in session_state.websockets:
                     session_state.websockets.remove(websocket)
