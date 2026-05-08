@@ -6,6 +6,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .base import Notifier, Urgency
@@ -99,6 +100,26 @@ class DiscordNotifier(Notifier):
             with urlopen(request, timeout=10) as response:
                 # Discord returns 204 No Content on success
                 return response.status in (200, 204)
+        except HTTPError as e:
+            if e.code == 403:
+                logger.error(
+                    "DiscordNotifier: Webhook returned 403 Forbidden. "
+                    "The webhook URL may be invalid or revoked. "
+                    "Please create a new webhook in Discord server settings."
+                )
+            elif e.code == 404:
+                logger.error(
+                    "DiscordNotifier: Webhook not found (404). "
+                    "The webhook may have been deleted."
+                )
+            elif e.code == 429:
+                logger.error(
+                    "DiscordNotifier: Rate limited by Discord (429). "
+                    "Too many requests sent."
+                )
+            else:
+                logger.error(f"DiscordNotifier: HTTP error {e.code}: {e.reason}")
+            return False
         except Exception as e:
             logger.error(f"DiscordNotifier: Failed to send notification: {e}")
             return False
