@@ -101,24 +101,34 @@ class DiscordNotifier(Notifier):
                 # Discord returns 204 No Content on success
                 return response.status in (200, 204)
         except HTTPError as e:
+            # Try to read response body for more details
+            error_body = ""
+            try:
+                error_body = e.read().decode("utf-8")
+            except Exception:
+                pass
+
             if e.code == 403:
                 logger.error(
                     "DiscordNotifier: Webhook returned 403 Forbidden. "
                     "The webhook URL may be invalid or revoked. "
-                    "Please create a new webhook in Discord server settings."
+                    f"Response: {error_body}"
                 )
             elif e.code == 404:
                 logger.error(
                     "DiscordNotifier: Webhook not found (404). "
-                    "The webhook may have been deleted."
+                    f"The webhook may have been deleted. Response: {error_body}"
                 )
             elif e.code == 429:
                 logger.error(
                     "DiscordNotifier: Rate limited by Discord (429). "
-                    "Too many requests sent."
+                    f"Too many requests sent. Response: {error_body}"
                 )
             else:
-                logger.error(f"DiscordNotifier: HTTP error {e.code}: {e.reason}")
+                logger.error(
+                    f"DiscordNotifier: HTTP error {e.code}: {e.reason}. "
+                    f"Response: {error_body}"
+                )
             return False
         except Exception as e:
             logger.error(f"DiscordNotifier: Failed to send notification: {e}")
