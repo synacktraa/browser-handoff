@@ -241,9 +241,17 @@ class Handoff:
                     viewport_size = actual_viewport
                     logger.info(f"Using page viewport size: {viewport_size}")
                 else:
-                    logger.info(f"Page has no viewport, using default: {viewport_size}")
-            except Exception:
-                logger.info(f"Could not get viewport, using default: {viewport_size}")
+                    # No viewport set, get actual window dimensions via JS
+                    dimensions = await page.evaluate(
+                        "() => ({ width: window.innerWidth, height: window.innerHeight })"
+                    )
+                    if dimensions and dimensions.get("width") and dimensions.get("height"):
+                        viewport_size = dimensions
+                        logger.info(f"Using window dimensions: {viewport_size}")
+                    else:
+                        logger.info(f"Could not get window size, using default: {viewport_size}")
+            except Exception as e:
+                logger.info(f"Could not get viewport: {e}, using default: {viewport_size}")
 
             # Register session
             await server.register_session(

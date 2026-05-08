@@ -100,7 +100,7 @@ class DiscordNotifier(Notifier):
                 },
                 method="POST",
             )
-            with urlopen(request, timeout=10) as response:
+            with urlopen(request, timeout=30) as response:
                 # Discord returns 204 No Content on success
                 return response.status in (200, 204)
         except HTTPError as e:
