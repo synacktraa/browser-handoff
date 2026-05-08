@@ -94,7 +94,10 @@ class DiscordNotifier(Notifier):
             request = Request(
                 self.webhook_url,
                 data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "BrowserHandoff/1.0",
+                },
                 method="POST",
             )
             with urlopen(request, timeout=10) as response:
