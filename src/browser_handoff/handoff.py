@@ -233,13 +233,25 @@ class Handoff:
             # Wait for server to start
             await asyncio.sleep(0.5)
 
+            # Get actual viewport size from page, fallback to configured size
+            viewport_size = self.viewport_size
+            try:
+                actual_viewport = page.viewport_size
+                if actual_viewport:
+                    viewport_size = actual_viewport
+                    logger.info(f"Using page viewport size: {viewport_size}")
+                else:
+                    logger.info(f"Page has no viewport, using default: {viewport_size}")
+            except Exception:
+                logger.info(f"Could not get viewport, using default: {viewport_size}")
+
             # Register session
             await server.register_session(
                 session_id=session_id,
                 page=page,
                 context=context,
                 reason=reason,
-                viewport_size=self.viewport_size,
+                viewport_size=viewport_size,
             )
 
             # Register completion listeners

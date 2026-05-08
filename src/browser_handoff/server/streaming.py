@@ -286,6 +286,7 @@ class StreamingServer:
         button_map = {0: "left", 1: "middle", 2: "right"}
 
         if action in ["mousedown", "mouseup"]:
+            logger.info(f"Mouse {action} at ({x}, {y})")
             await cdp.send(
                 "Input.dispatchMouseEvent",
                 {
