@@ -1,10 +1,21 @@
 # browser-handoff
 
-A standalone library that provides human-in-the-loop fallback for browser automation via CDP-based streaming when automation gets blocked.
+A standalone library that provides human-in-the-loop fallback for browser automation. Seamlessly hand off control to humans for tasks that require genuine human interaction - authentication, payments, identity verification, or any workflow where automation isn't appropriate.
+
+## Why browser-handoff?
+
+Some tasks simply require a human:
+- **Authentication flows** - Login with 2FA, OAuth consent screens, SSO
+- **Payment processing** - Entering payment details, confirming purchases
+- **Identity verification** - Document uploads, biometric checks
+- **Account setup** - Registration forms, consent agreements
+- **Sensitive actions** - Approving transactions, confirming deletions
+
+Browser-handoff detects when your automation reaches these points and streams the browser to a human operator who can complete the task, then seamlessly returns control to your automation.
 
 ## Features
 
-- **Detection System**: Flexible rules to detect when automation is blocked (CAPTCHAs, login pages, security challenges)
+- **Detection System**: Flexible rules to detect when human intervention is needed
 - **CDP Streaming**: Real-time browser streaming via Chrome DevTools Protocol
 - **Event-Driven**: Efficient event-based detection instead of polling
 - **Notifications**: Alert humans via Slack, Discord, email, or custom notifiers
@@ -35,22 +46,36 @@ from browser_handoff import Handoff, Detection, Scenario, ServerConfig
 handoff = Handoff(
     scenarios=[
         Scenario(
-            name="cloudflare_challenge",
-            # Trigger on ANY of these conditions
+            name="login_required",
+            # Trigger when login page is detected
             trigger=Detection.any([
-                Detection.content(title_contains=["Just a moment"]),
-                Detection.element(present=[".cf-turnstile"]),
+                Detection.url(path_contains=["/login", "/signin"]),
+                Detection.element(present=["form[action*=login]"]),
             ]),
-            # Complete when the turnstile element is gone
-            complete=Detection.element(missing=[".cf-turnstile"]),
+            # Complete when redirected to dashboard
+            complete=Detection.url(path_contains=["/dashboard", "/home"]),
         ),
         Scenario(
-            name="oauth_callback",
-            trigger=Detection.element(present=["#captcha"]),
-            # Complete when ALL conditions are met
+            name="oauth_consent",
+            # Trigger on OAuth consent screens
+            trigger=Detection.url(host_equals=["accounts.google.com"]),
+            # Complete when redirected back with auth code
             complete=Detection.all([
                 Detection.url(host_equals=["localhost"]),
                 Detection.url(query_contains=["code="]),
+            ]),
+        ),
+        Scenario(
+            name="payment_flow",
+            # Trigger on payment pages
+            trigger=Detection.any([
+                Detection.url(path_contains=["/checkout", "/payment"]),
+                Detection.element(present=["#card-number", ".payment-form"]),
+            ]),
+            # Complete when payment confirmed
+            complete=Detection.any([
+                Detection.url(path_contains=["/confirmation", "/success"]),
+                Detection.element(present=[".payment-success"]),
             ]),
         ),
     ],
@@ -64,13 +89,13 @@ async with async_playwright() as p:
     browser = await p.chromium.launch(headless=False)
     page = await browser.new_page()
 
-    await page.goto("https://example.com/oauth/authorize")
+    await page.goto("https://example.com/start")
 
-    # Guard monitors for blockers and streams to human if needed
+    # Guard monitors and streams to human when needed
     async with handoff.guard(page) as session:
-        await page.click("#login")
-        # If a blocker is detected, streams to human
-        # Uses the matched scenario's completion condition
+        await page.click("#begin-checkout")
+        # If login/payment is needed, streams to human
+        # Human completes the task, automation resumes
 
     if session.was_blocked:
         print(f"Scenario: {session.scenario_name}")
@@ -170,37 +195,49 @@ from browser_handoff import Handoff, Detection, Scenario, ServerConfig
 handoff = Handoff(
     scenarios=[
         Scenario(
-            name="cloudflare_challenge",
-            # Trigger when ANY of these conditions match
+            name="login_flow",
+            # Trigger on login pages
             trigger=Detection.any([
-                Detection.content(title_contains=["Just a moment"]),
-                Detection.element(present=[".cf-turnstile"]),
-                Detection.content(body_contains=["challenges.cloudflare.com"]),
+                Detection.url(path_contains=["/login", "/signin", "/auth"]),
+                Detection.element(present=["input[type=password]"]),
             ]),
-            # Complete when the challenge element disappears
-            complete=Detection.element(missing=[".cf-turnstile"]),
+            # Complete when logged in
+            complete=Detection.any([
+                Detection.url(path_contains=["/dashboard", "/home", "/account"]),
+                Detection.element(present=[".user-menu", ".logout-button"]),
+            ]),
         ),
         Scenario(
-            name="recaptcha",
-            # Trigger when ANY captcha element is present
+            name="two_factor_auth",
+            # Trigger on 2FA/MFA pages
             trigger=Detection.any([
-                Detection.element(present=[".g-recaptcha"]),
-                Detection.element(present=[".h-captcha"]),
+                Detection.url(path_contains=["/2fa", "/mfa", "/verify"]),
+                Detection.element(present=[".otp-input", "#authenticator-code"]),
             ]),
-            # Complete when ALL captcha elements are gone
+            # Complete when verification done
+            complete=Detection.url(path_contains=["/dashboard", "/home"]),
+        ),
+        Scenario(
+            name="payment_checkout",
+            # Trigger on payment pages
+            trigger=Detection.any([
+                Detection.url(path_contains=["/checkout", "/payment", "/billing"]),
+                Detection.element(present=[".stripe-card", "#card-element"]),
+            ]),
+            # Complete when order confirmed
             complete=Detection.all([
-                Detection.element(missing=[".g-recaptcha"]),
-                Detection.element(missing=[".h-captcha"]),
+                Detection.url(path_contains=["/confirmation", "/thank-you"]),
+                Detection.not_(Detection.element(present=[".payment-error"])),
             ]),
         ),
         Scenario(
-            name="oauth_flow",
+            name="oauth_consent",
+            # Trigger on OAuth provider consent screens
             trigger=Detection.url(host_equals=["accounts.google.com"]),
             # Complete when redirected back with auth code
             complete=Detection.all([
                 Detection.url(host_equals=["localhost"]),
                 Detection.url(query_contains=["code="]),
-                Detection.not_(Detection.element(present=[".error"])),
             ]),
         ),
     ],
@@ -221,23 +258,41 @@ async with handoff.guard(page) as session:
 
 ```yaml
 scenarios:
-  - name: cloudflare_challenge
+  - name: login_flow
     # Use 'any' to trigger on multiple conditions (OR logic)
     trigger:
       type: any
       conditions:
-        - type: content
-          title_contains:
-            - "Just a moment"
+        - type: url
+          path_contains:
+            - "/login"
+            - "/signin"
         - type: element
           present:
-            - ".cf-turnstile"
+            - "input[type=password]"
     complete:
-      type: element
-      missing:
-        - ".cf-turnstile"
+      type: url
+      path_contains:
+        - "/dashboard"
+        - "/home"
 
-  - name: google_oauth
+  - name: two_factor_auth
+    trigger:
+      type: any
+      conditions:
+        - type: url
+          path_contains:
+            - "/2fa"
+            - "/mfa"
+        - type: element
+          present:
+            - ".otp-input"
+    complete:
+      type: url
+      path_contains:
+        - "/dashboard"
+
+  - name: oauth_consent
     trigger:
       type: url
       host_equals:
@@ -253,25 +308,23 @@ scenarios:
           query_contains:
             - "code="
 
-  - name: captcha
+  - name: payment_checkout
     trigger:
       type: any
       conditions:
+        - type: url
+          path_contains:
+            - "/checkout"
+            - "/payment"
         - type: element
           present:
-            - ".g-recaptcha"
-        - type: element
-          present:
-            - ".h-captcha"
+            - "#card-element"
+            - ".stripe-card"
     complete:
-      type: all
-      conditions:
-        - type: element
-          missing:
-            - ".g-recaptcha"
-        - type: element
-          missing:
-            - ".h-captcha"
+      type: url
+      path_contains:
+        - "/confirmation"
+        - "/thank-you"
 
 server:
   port: 8080
@@ -284,21 +337,21 @@ server:
 {
   "scenarios": [
     {
-      "name": "cloudflare_challenge",
+      "name": "login_flow",
       "trigger": {
         "type": "any",
         "conditions": [
-          { "type": "content", "title_contains": ["Just a moment"] },
-          { "type": "element", "present": [".cf-turnstile"] }
+          { "type": "url", "path_contains": ["/login", "/signin"] },
+          { "type": "element", "present": ["input[type=password]"] }
         ]
       },
       "complete": {
-        "type": "element",
-        "missing": [".cf-turnstile"]
+        "type": "url",
+        "path_contains": ["/dashboard", "/home"]
       }
     },
     {
-      "name": "oauth_flow",
+      "name": "oauth_consent",
       "trigger": {
         "type": "url",
         "host_equals": ["accounts.google.com"]
@@ -326,31 +379,30 @@ server:
 {
   "scenarios": [
     {
-      "name": "cloudflare_challenge",
+      "name": "login_flow",
       "trigger": {
         "type": "any",
         "conditions": [
-          { "type": "content", "title_contains": ["Just a moment"] },
-          { "type": "element", "present": [".cf-turnstile"] }
+          { "type": "url", "path_contains": ["/login", "/signin"] },
+          { "type": "element", "present": ["input[type=password]"] }
         ]
       },
       "complete": {
-        "type": "element",
-        "missing": [".cf-turnstile"]
+        "type": "url",
+        "path_contains": ["/dashboard", "/home"]
       }
     },
     {
-      "name": "oauth_flow",
+      "name": "payment_checkout",
       "trigger": {
-        "type": "element",
-        "present": ["#captcha"]
+        "type": "url",
+        "path_contains": ["/checkout", "/payment"]
       },
       "complete": {
         "type": "all",
         "conditions": [
-          { "type": "url", "host_equals": ["localhost"] },
-          { "type": "url", "path_matches": ["/callback"] },
-          { "type": "url", "query_contains": ["code="] }
+          { "type": "url", "path_contains": ["/confirmation"] },
+          { "type": "not", "condition": { "type": "element", "present": [".error"] } }
         ]
       }
     }
@@ -374,39 +426,34 @@ server:
 
 ```yaml
 scenarios:
-  - name: cloudflare_challenge
+  - name: login_flow
     trigger:
       type: any
       conditions:
-        - type: content
-          title_contains:
-            - "Just a moment"
-            - "Access Denied"
+        - type: url
+          path_contains:
+            - "/login"
+            - "/signin"
         - type: element
           present:
-            - ".cf-turnstile"
+            - "input[type=password]"
     complete:
-      type: element
-      missing:
-        - ".cf-turnstile"
+      type: url
+      path_contains:
+        - "/dashboard"
+        - "/home"
 
-  - name: oauth_flow
+  - name: payment_checkout
     trigger:
-      type: element
-      present:
-        - "#captcha"
+      type: url
+      path_contains:
+        - "/checkout"
+        - "/payment"
     complete:
-      type: all
-      conditions:
-        - type: url
-          host_equals:
-            - localhost
-        - type: url
-          path_matches:
-            - "/callback"
-        - type: url
-          query_contains:
-            - "code="
+      type: url
+      path_contains:
+        - "/confirmation"
+        - "/thank-you"
 
 server:
   port: 8080
