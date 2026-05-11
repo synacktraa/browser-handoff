@@ -27,24 +27,28 @@ pip install browser-handoff[llm]
 
 ```python
 from playwright.async_api import async_playwright
-from browser_handoff import Handoff, Detection, ServerConfig
+from browser_handoff import Handoff, Detection, Scenario, ServerConfig
 
-# Create handoff configuration
+# Create handoff configuration with scenarios
+# Each scenario pairs a trigger with its specific completion condition
 handoff = Handoff(
-    trigger_on=[
-        Detection.content(
-            title_contains=["Just a moment", "Access Denied"],
-            body_contains=["challenges.cloudflare.com"],
+    scenarios=[
+        Scenario(
+            name="cloudflare_challenge",
+            trigger=Detection.content(
+                title_contains=["Just a moment", "Access Denied"],
+                body_contains=["challenges.cloudflare.com"],
+            ),
+            complete=Detection.element(missing=[".cf-turnstile"]),
         ),
-        Detection.element(
-            present=[".cf-turnstile", "#captcha"],
-        ),
-    ],
-    complete_on=[
-        Detection.url(
-            host_equals=["localhost"],
-            path_matches=["/callback"],
-            query_contains=["code="],
+        Scenario(
+            name="oauth_callback",
+            trigger=Detection.element(present=["#captcha"]),
+            complete=Detection.url(
+                host_equals=["localhost"],
+                path_matches=["/callback"],
+                query_contains=["code="],
+            ),
         ),
     ],
     server=ServerConfig(
@@ -63,9 +67,10 @@ async with async_playwright() as p:
     async with handoff.guard(page) as session:
         await page.click("#login")
         # If a blocker is detected, streams to human
-        # Waits for completion condition automatically
+        # Uses the matched scenario's completion condition
 
     if session.was_blocked:
+        print(f"Scenario: {session.scenario_name}")
         print(f"Human helped! Completed via: {session.completion_result.detection_type}")
 ```
 
@@ -263,52 +268,37 @@ server:
 }
 ```
 
-### Mixing Scenarios with Global Triggers
-
-You can use scenarios alongside global `trigger_on` and `complete_on`. Scenarios are checked first, and global triggers serve as a fallback:
-
-```python
-handoff = Handoff(
-    scenarios=[
-        Scenario(
-            name="cloudflare",
-            trigger=Detection.content(title_contains=["Just a moment"]),
-            complete=Detection.element(missing=[".cf-turnstile"]),
-        ),
-    ],
-    # Fallback for unknown blockers
-    trigger_on=[
-        Detection.element(present=[".unknown-captcha"]),
-    ],
-    complete_on=[
-        Detection.url(query_contains=["success=true"]),
-    ],
-)
-```
-
 ## Configuration Files
 
 ### JSON Configuration
 
 ```json
 {
-  "trigger_on": [
+  "scenarios": [
     {
-      "type": "content",
-      "title_contains": ["Just a moment"],
-      "body_contains": ["challenges.cloudflare.com"]
+      "name": "cloudflare_challenge",
+      "trigger": {
+        "type": "content",
+        "title_contains": ["Just a moment"],
+        "body_contains": ["challenges.cloudflare.com"]
+      },
+      "complete": {
+        "type": "element",
+        "missing": [".cf-turnstile"]
+      }
     },
     {
-      "type": "element",
-      "present": [".cf-turnstile", "#captcha"]
-    }
-  ],
-  "complete_on": [
-    {
-      "type": "url",
-      "host_equals": ["localhost"],
-      "path_matches": ["/callback"],
-      "query_contains": ["code="]
+      "name": "oauth_flow",
+      "trigger": {
+        "type": "element",
+        "present": ["#captcha"]
+      },
+      "complete": {
+        "type": "url",
+        "host_equals": ["localhost"],
+        "path_matches": ["/callback"],
+        "query_contains": ["code="]
+      }
     }
   ],
   "server": {
@@ -329,27 +319,33 @@ handoff = Handoff(
 ### YAML Configuration
 
 ```yaml
-trigger_on:
-  - type: content
-    title_contains:
-      - "Just a moment"
-      - "Access Denied"
-    body_contains:
-      - "challenges.cloudflare.com"
+scenarios:
+  - name: cloudflare_challenge
+    trigger:
+      type: content
+      title_contains:
+        - "Just a moment"
+        - "Access Denied"
+      body_contains:
+        - "challenges.cloudflare.com"
+    complete:
+      type: element
+      missing:
+        - ".cf-turnstile"
 
-  - type: element
-    present:
-      - ".cf-turnstile"
-      - "#captcha"
-
-complete_on:
-  - type: url
-    host_equals:
-      - localhost
-    path_matches:
-      - "/callback"
-    query_contains:
-      - "code="
+  - name: oauth_flow
+    trigger:
+      type: element
+      present:
+        - "#captcha"
+    complete:
+      type: url
+      host_equals:
+        - localhost
+      path_matches:
+        - "/callback"
+      query_contains:
+        - "code="
 
 server:
   port: 8080

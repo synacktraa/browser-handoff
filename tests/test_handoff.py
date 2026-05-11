@@ -16,25 +16,29 @@ from browser_handoff import (
 class TestHandoffCreation:
     """Tests for Handoff class creation."""
 
-    def test_default_creation(self):
-        """Test creating Handoff with defaults."""
-        handoff = Handoff()
-        assert handoff.trigger_on == []
-        assert handoff.complete_on == []
-        assert isinstance(handoff.server, ServerConfig)
-        assert handoff.notifiers == []
+    def test_requires_scenarios(self):
+        """Test that Handoff requires at least one scenario."""
+        with pytest.raises(ValueError, match="At least one scenario must be provided"):
+            Handoff()
+
+    def test_requires_scenarios_empty_list(self):
+        """Test that Handoff requires at least one scenario (empty list)."""
+        with pytest.raises(ValueError, match="At least one scenario must be provided"):
+            Handoff(scenarios=[])
 
     def test_programmatic_creation(self):
         """Test creating Handoff programmatically."""
         handoff = Handoff(
-            trigger_on=[
-                Detection.content(title_contains=["Just a moment"]),
-                Detection.element(present=[".captcha"]),
-            ],
-            complete_on=[
-                Detection.url(
-                    host_equals=["localhost"],
-                    query_contains=["code="],
+            scenarios=[
+                Scenario(
+                    name="cloudflare",
+                    trigger=Detection.content(title_contains=["Just a moment"]),
+                    complete=Detection.element(missing=[".cf-turnstile"]),
+                ),
+                Scenario(
+                    name="captcha",
+                    trigger=Detection.element(present=[".captcha"]),
+                    complete=Detection.element(missing=[".captcha"]),
                 ),
             ],
             server=ServerConfig(port=3000),
@@ -42,19 +46,21 @@ class TestHandoffCreation:
                 SlackNotifier(webhook_url="https://hooks.slack.com/test"),
             ],
         )
-        assert len(handoff.trigger_on) == 2
-        assert len(handoff.complete_on) == 1
+        assert len(handoff.scenarios) == 2
+        assert handoff.scenarios[0].name == "cloudflare"
+        assert handoff.scenarios[1].name == "captcha"
         assert handoff.server.port == 3000
         assert len(handoff.notifiers) == 1
 
     def test_from_dict(self):
         """Test creating Handoff from dictionary."""
         config = {
-            "trigger_on": [
-                {"type": "content", "title_contains": ["Challenge"]},
-            ],
-            "complete_on": [
-                {"type": "url", "path_matches": ["/callback"]},
+            "scenarios": [
+                {
+                    "name": "challenge",
+                    "trigger": {"type": "content", "title_contains": ["Challenge"]},
+                    "complete": {"type": "url", "path_matches": ["/callback"]},
+                },
             ],
             "server": {
                 "port": 8080,
@@ -65,68 +71,84 @@ class TestHandoffCreation:
             ],
         }
         handoff = Handoff.from_dict(config)
-        assert len(handoff.trigger_on) == 1
-        assert len(handoff.complete_on) == 1
+        assert len(handoff.scenarios) == 1
+        assert handoff.scenarios[0].name == "challenge"
         assert handoff.server.port == 8080
         assert handoff.server.timeout == 300
         assert len(handoff.notifiers) == 1
 
+    def test_from_dict_requires_scenarios(self):
+        """Test that from_dict requires scenarios."""
+        with pytest.raises(ValueError, match="At least one scenario must be provided"):
+            Handoff.from_dict({})
+
     def test_from_json(self):
         """Test creating Handoff from JSON string."""
         json_str = json.dumps({
-            "trigger_on": [
-                {"type": "element", "present": ["#captcha"]},
-            ],
-            "complete_on": [
-                {"type": "content", "body_contains": ["Success"]},
+            "scenarios": [
+                {
+                    "name": "captcha",
+                    "trigger": {"type": "element", "present": ["#captcha"]},
+                    "complete": {"type": "content", "body_contains": ["Success"]},
+                },
             ],
         })
         handoff = Handoff.from_json(json_str)
-        assert len(handoff.trigger_on) == 1
-        assert len(handoff.complete_on) == 1
+        assert len(handoff.scenarios) == 1
+        assert handoff.scenarios[0].name == "captcha"
 
     def test_from_yaml(self):
         """Test creating Handoff from YAML string."""
         yaml_str = """
-trigger_on:
-  - type: content
-    title_contains:
-      - "Security Check"
-complete_on:
-  - type: url
-    host_equals:
-      - localhost
+scenarios:
+  - name: security_check
+    trigger:
+      type: content
+      title_contains:
+        - "Security Check"
+    complete:
+      type: url
+      host_equals:
+        - localhost
 """
         handoff = Handoff.from_yaml(yaml_str)
-        assert len(handoff.trigger_on) == 1
-        assert len(handoff.complete_on) == 1
+        assert len(handoff.scenarios) == 1
+        assert handoff.scenarios[0].name == "security_check"
 
     def test_from_file_json(self, tmp_path):
         """Test loading from JSON file."""
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({
-            "trigger_on": [{"type": "content", "title_contains": ["Test"]}],
-            "complete_on": [{"type": "url", "path_matches": ["/done"]}],
+            "scenarios": [
+                {
+                    "name": "test_scenario",
+                    "trigger": {"type": "content", "title_contains": ["Test"]},
+                    "complete": {"type": "url", "path_matches": ["/done"]},
+                },
+            ],
         }))
         handoff = Handoff.from_file(config_file)
-        assert len(handoff.trigger_on) == 1
+        assert len(handoff.scenarios) == 1
+        assert handoff.scenarios[0].name == "test_scenario"
 
     def test_from_file_yaml(self, tmp_path):
         """Test loading from YAML file."""
         config_file = tmp_path / "config.yaml"
         config_file.write_text("""
-trigger_on:
-  - type: element
-    present:
-      - ".blocker"
-complete_on:
-  - type: element
-    present:
-      - "#success"
+scenarios:
+  - name: blocker
+    trigger:
+      type: element
+      present:
+        - ".blocker"
+    complete:
+      type: element
+      present:
+        - "#success"
 """)
         handoff = Handoff.from_file(config_file)
-        assert len(handoff.trigger_on) == 1
-        assert len(handoff.complete_on) == 1
+        assert len(handoff.scenarios) == 1
+        assert handoff.scenarios[0].name == "blocker"
 
 
 class TestHandoffWithEnvVars:
@@ -139,8 +161,13 @@ class TestHandoffWithEnvVars:
 
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps({
-            "trigger_on": [],
-            "complete_on": [],
+            "scenarios": [
+                {
+                    "name": "test",
+                    "trigger": {"type": "content", "title_contains": ["Test"]},
+                    "complete": {"type": "content", "body_contains": ["Done"]},
+                },
+            ],
             "server": {
                 "port": "${HANDOFF_PORT}",
                 "public_base": "${HANDOFF_URL}",
@@ -158,8 +185,16 @@ class TestHandoffWithEnvVars:
 
         config_file = tmp_path / "config.yaml"
         config_file.write_text("""
-trigger_on: []
-complete_on: []
+scenarios:
+  - name: test
+    trigger:
+      type: content
+      title_contains:
+        - Test
+    complete:
+      type: content
+      body_contains:
+        - Done
 notifiers:
   - type: slack
     webhook_url: ${SLACK_WEBHOOK}
@@ -202,43 +237,49 @@ class TestComplexConfig:
     def test_nested_combinators(self):
         """Test loading config with nested combinators."""
         config = {
-            "trigger_on": [
+            "scenarios": [
                 {
-                    "type": "any",
-                    "conditions": [
-                        {"type": "content", "title_contains": ["Challenge"]},
-                        {
-                            "type": "all",
-                            "conditions": [
-                                {"type": "url", "path_contains": ["/login"]},
-                                {"type": "element", "present": [".auth-form"]},
-                            ],
-                        },
-                    ],
-                },
-            ],
-            "complete_on": [
-                {
-                    "type": "all",
-                    "conditions": [
-                        {"type": "url", "query_contains": ["code="]},
-                        {
-                            "type": "not",
-                            "condition": {"type": "element", "present": [".error"]},
-                        },
-                    ],
+                    "name": "complex_trigger",
+                    "trigger": {
+                        "type": "any",
+                        "conditions": [
+                            {"type": "content", "title_contains": ["Challenge"]},
+                            {
+                                "type": "all",
+                                "conditions": [
+                                    {"type": "url", "path_contains": ["/login"]},
+                                    {"type": "element", "present": [".auth-form"]},
+                                ],
+                            },
+                        ],
+                    },
+                    "complete": {
+                        "type": "all",
+                        "conditions": [
+                            {"type": "url", "query_contains": ["code="]},
+                            {
+                                "type": "not",
+                                "condition": {"type": "element", "present": [".error"]},
+                            },
+                        ],
+                    },
                 },
             ],
         }
         handoff = Handoff.from_dict(config)
-        assert len(handoff.trigger_on) == 1
-        assert len(handoff.complete_on) == 1
+        assert len(handoff.scenarios) == 1
+        assert handoff.scenarios[0].name == "complex_trigger"
 
     def test_multiple_notifiers(self):
         """Test loading config with multiple notifiers."""
         config = {
-            "trigger_on": [],
-            "complete_on": [],
+            "scenarios": [
+                {
+                    "name": "test",
+                    "trigger": {"type": "content", "title_contains": ["Test"]},
+                    "complete": {"type": "content", "body_contains": ["Done"]},
+                },
+            ],
             "notifiers": [
                 {"type": "slack", "webhook_url": "https://slack.com/webhook1"},
                 {"type": "slack", "webhook_url": "https://slack.com/webhook2"},
@@ -306,10 +347,10 @@ class TestScenario:
 
 
 class TestHandoffWithScenarios:
-    """Tests for Handoff with scenarios."""
+    """Tests for Handoff with multiple scenarios."""
 
-    def test_handoff_with_scenarios_programmatic(self):
-        """Test creating Handoff with scenarios programmatically."""
+    def test_handoff_with_multiple_scenarios(self):
+        """Test creating Handoff with multiple scenarios."""
         handoff = Handoff(
             scenarios=[
                 Scenario(
@@ -397,28 +438,6 @@ server:
         assert handoff.scenarios[0].name == "cloudflare_challenge"
         assert handoff.scenarios[1].name == "hcaptcha"
         assert handoff.server.port == 8080
-
-    def test_handoff_with_mixed_scenarios_and_globals(self):
-        """Test Handoff with both scenarios and global triggers/completions."""
-        config = {
-            "scenarios": [
-                {
-                    "name": "cloudflare",
-                    "trigger": {"type": "content", "title_contains": ["Just a moment"]},
-                    "complete": {"type": "element", "missing": [".cf-turnstile"]},
-                },
-            ],
-            "trigger_on": [
-                {"type": "element", "present": [".unknown-captcha"]},
-            ],
-            "complete_on": [
-                {"type": "url", "query_contains": ["success=true"]},
-            ],
-        }
-        handoff = Handoff.from_dict(config)
-        assert len(handoff.scenarios) == 1
-        assert len(handoff.trigger_on) == 1
-        assert len(handoff.complete_on) == 1
 
     def test_handoff_with_scenarios_from_file(self, tmp_path):
         """Test loading Handoff with scenarios from file."""

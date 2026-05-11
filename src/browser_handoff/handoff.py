@@ -53,25 +53,13 @@ class Handoff:
     """Main handoff orchestrator.
 
     Monitors a Playwright page for trigger conditions and hands off to humans
-    when automation gets blocked.
+    when automation gets blocked. Each scenario defines a trigger-completion
+    pair - when a trigger is detected, its corresponding completion condition
+    is used.
 
-    Example with global triggers/completions:
-        handoff = Handoff(
-            trigger_on=[
-                Detection.content(title_contains=["Just a moment"]),
-                Detection.element(present=[".captcha-container"]),
-            ],
-            complete_on=[
-                Detection.url(
-                    host_equals=["localhost"],
-                    path_matches=["/callback"],
-                    query_contains=["code="],
-                ),
-            ],
-            server=ServerConfig(port=8080),
-        )
+    At least one scenario must be provided.
 
-    Example with scenarios (trigger-completion pairs):
+    Example:
         handoff = Handoff(
             scenarios=[
                 Scenario(
@@ -93,12 +81,15 @@ class Handoff:
             # Auto-detects blockers and streams if needed
     """
 
-    trigger_on: list[BaseDetection] = field(default_factory=list)
-    complete_on: list[BaseDetection] = field(default_factory=list)
     scenarios: list[Scenario] = field(default_factory=list)
     server: ServerConfig = field(default_factory=ServerConfig)
     notifiers: list[Notifier] = field(default_factory=list)
     viewport_size: dict[str, int] = field(default_factory=lambda: DEFAULT_VIEWPORT.copy())
+
+    def __post_init__(self):
+        """Validate that at least one scenario is provided."""
+        if not self.scenarios:
+            raise ValueError("At least one scenario must be provided")
 
     @classmethod
     def from_file(cls, path: str | Path) -> "Handoff":
@@ -152,9 +143,10 @@ class Handoff:
 
         Returns:
             Configured Handoff instance.
+
+        Raises:
+            ValueError: If no scenarios are provided.
         """
-        trigger_on = [Detection.from_dict(d) for d in data.get("trigger_on", [])]
-        complete_on = [Detection.from_dict(d) for d in data.get("complete_on", [])]
         scenarios = [Scenario.from_dict(s) for s in data.get("scenarios", [])]
 
         server_data = data.get("server", {})
@@ -164,8 +156,6 @@ class Handoff:
         notifiers = [notifier_from_dict(n) for n in notifiers_data]
 
         return cls(
-            trigger_on=trigger_on,
-            complete_on=complete_on,
             scenarios=scenarios,
             server=server,
             notifiers=notifiers,
@@ -174,69 +164,52 @@ class Handoff:
     async def is_blocked(
         self, page: "Page"
     ) -> tuple[bool, DetectionResult | None, Scenario | None]:
-        """Check if the page is currently blocked by any trigger condition.
+        """Check if the page is currently blocked by any scenario trigger.
 
         Args:
             page: Playwright page to check.
 
         Returns:
             Tuple of (is_blocked, detection_result, matched_scenario).
-            matched_scenario is None when using global trigger_on/complete_on.
         """
-        # Check scenario triggers first
         for scenario in self.scenarios:
             result = await scenario.trigger.check(page)
             if result.matched:
                 return True, result, scenario
 
-        # Fall back to global triggers
-        for detection in self.trigger_on:
-            result = await detection.check(page)
-            if result.matched:
-                return True, result, None
-
         return False, None, None
 
     async def is_complete(
-        self, page: "Page", scenario: Scenario | None = None
+        self, page: "Page", scenario: Scenario
     ) -> tuple[bool, DetectionResult | None]:
-        """Check if any completion condition is met.
+        """Check if the scenario's completion condition is met.
 
         Args:
             page: Playwright page to check.
-            scenario: If provided, use the scenario's completion condition.
+            scenario: The scenario whose completion condition to check.
 
         Returns:
             Tuple of (is_complete, detection_result).
         """
-        # If scenario provided, use its completion condition
-        if scenario is not None:
-            result = await scenario.complete.check(page)
-            if result.matched:
-                return True, result
-            return False, None
-
-        # Fall back to global completions
-        for detection in self.complete_on:
-            result = await detection.check(page)
-            if result.matched:
-                return True, result
+        result = await scenario.complete.check(page)
+        if result.matched:
+            return True, result
         return False, None
 
     async def wait_for_human(
         self,
         page: "Page",
         context: "BrowserContext",
+        scenario: Scenario,
         reason: str = "Human intervention required",
-        scenario: Scenario | None = None,
     ) -> CompletionResult:
         """Start handoff session and wait for human completion.
 
         Args:
             page: Playwright page to stream.
             context: Browser context for CDP session.
+            scenario: The scenario that triggered the handoff.
             reason: Reason shown to human.
-            scenario: If provided, use the scenario's completion condition.
 
         Returns:
             CompletionResult with details of completion.
@@ -307,19 +280,10 @@ class Handoff:
                 viewport_size=viewport_size,
             )
 
-            # Determine which completion conditions to use
-            if scenario is not None:
-                # Use scenario's completion condition
-                completion_detections = [scenario.complete]
-                logger.info(f"Using scenario '{scenario.name}' completion condition")
-            else:
-                # Use global completion conditions
-                completion_detections = self.complete_on
-
-            # Register completion listeners
-            for detection in completion_detections:
-                cleanup = detection.register_listeners(page, on_completion_detected)
-                listener_cleanups.append(cleanup)
+            # Register completion listener for the scenario's completion condition
+            logger.info(f"Using scenario '{scenario.name}' completion condition")
+            cleanup = scenario.complete.register_listeners(page, on_completion_detected)
+            listener_cleanups.append(cleanup)
 
             # Generate stream URL
             stream_url = server.get_stream_url(session_id)
@@ -329,8 +293,7 @@ class Handoff:
             logger.info("HANDOFF: Human intervention required")
             logger.info("=" * 70)
             logger.info("Reason: %s", reason)
-            if scenario:
-                logger.info("Scenario: %s", scenario.name)
+            logger.info("Scenario: %s", scenario.name)
             logger.info("Stream URL: %s", stream_url)
             logger.info("=" * 70)
 
@@ -459,63 +422,52 @@ class Handoff:
                 session.in_handoff = True
                 session.trigger_reason = result.reason
 
-                # Find the matched scenario if any
-                matched_scenario = detection_to_scenario.get(id(detection))
+                # Find the matched scenario
+                matched_scenario = detection_to_scenario[id(detection)]
                 session.matched_scenario = matched_scenario
 
-                if matched_scenario:
-                    logger.info(
-                        "Trigger detected (scenario '%s'): %s",
-                        matched_scenario.name,
-                        result.reason,
-                    )
-                else:
-                    logger.info("Trigger detected: %s", result.reason)
+                logger.info(
+                    "Trigger detected (scenario '%s'): %s",
+                    matched_scenario.name,
+                    result.reason,
+                )
 
                 # Perform handoff with matched scenario
                 try:
                     completion = await self.wait_for_human(
                         page=page,
                         context=context,
-                        reason=result.reason,
                         scenario=matched_scenario,
+                        reason=result.reason,
                     )
                     session.completion_result = completion
                 finally:
                     session.in_handoff = False
 
         try:
-            # Register trigger listeners for scenarios
+            # Register trigger listeners for all scenarios
             for scenario in self.scenarios:
                 cleanup = scenario.trigger.register_listeners(page, on_trigger_detected)
                 listener_cleanups.append(cleanup)
 
-            # Register trigger listeners for global triggers
-            for detection in self.trigger_on:
-                cleanup = detection.register_listeners(page, on_trigger_detected)
-                listener_cleanups.append(cleanup)
-
             # Check for triggers immediately
             is_blocked, result, matched_scenario = await self.is_blocked(page)
-            if is_blocked and result:
+            if is_blocked and result and matched_scenario:
                 session.in_handoff = True
                 session.trigger_reason = result.reason
                 session.matched_scenario = matched_scenario
 
-                if matched_scenario:
-                    logger.info(
-                        "Initial trigger detected (scenario '%s'): %s",
-                        matched_scenario.name,
-                        result.reason,
-                    )
-                else:
-                    logger.info("Initial trigger detected: %s", result.reason)
+                logger.info(
+                    "Initial trigger detected (scenario '%s'): %s",
+                    matched_scenario.name,
+                    result.reason,
+                )
 
                 completion = await self.wait_for_human(
                     page=page,
                     context=context,
-                    reason=result.reason,
                     scenario=matched_scenario,
+                    reason=result.reason,
                 )
                 session.completion_result = completion
                 session.in_handoff = False
