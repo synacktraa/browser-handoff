@@ -38,6 +38,7 @@ from .detection import (
     UrlDetection,
 )
 from .handoff import CompletionResult, GuardedSession, Handoff, HandoffError
+from .scenario import Scenario
 from .notifiers import DiscordNotifier, EmailNotifier, Notifier, SlackNotifier
 from .server import ServerConfig, StreamingServer
 
@@ -49,6 +50,7 @@ __all__ = [
     "HandoffError",
     "CompletionResult",
     "GuardedSession",
+    "Scenario",
     # Detection
     "Detection",
     "DetectionResult",

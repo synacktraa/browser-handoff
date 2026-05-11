@@ -148,6 +148,144 @@ Detection.not_(
 )
 ```
 
+## Scenarios
+
+Scenarios allow you to define trigger-completion pairs where each trigger has its own specific completion condition. Only one scenario can be active at a time - when a scenario's trigger is detected, its corresponding completion condition is used.
+
+### Programmatic Usage
+
+```python
+from browser_handoff import Handoff, Detection, Scenario, ServerConfig
+
+handoff = Handoff(
+    scenarios=[
+        Scenario(
+            name="cloudflare_challenge",
+            trigger=Detection.content(title_contains=["Just a moment"]),
+            complete=Detection.element(missing=[".cf-turnstile"]),
+        ),
+        Scenario(
+            name="login_required",
+            trigger=Detection.url(path_contains=["/login"]),
+            complete=Detection.url(path_contains=["/dashboard"]),
+        ),
+        Scenario(
+            name="recaptcha",
+            trigger=Detection.element(present=[".g-recaptcha"]),
+            complete=Detection.element(missing=[".g-recaptcha"]),
+        ),
+    ],
+    server=ServerConfig(port=8080),
+)
+
+async with handoff.guard(page) as session:
+    await page.click("#login")
+    # Automatically detects which scenario matched
+    # Uses that scenario's completion condition
+
+    if session.was_blocked:
+        print(f"Scenario: {session.scenario_name}")
+        print(f"Completed via: {session.completion_result.detection_type}")
+```
+
+### YAML Configuration
+
+```yaml
+scenarios:
+  - name: cloudflare_challenge
+    trigger:
+      type: content
+      title_contains:
+        - "Just a moment"
+    complete:
+      type: element
+      missing:
+        - ".cf-turnstile"
+
+  - name: google_oauth
+    trigger:
+      type: url
+      host_equals:
+        - accounts.google.com
+    complete:
+      type: url
+      host_equals:
+        - localhost
+      query_contains:
+        - "code="
+
+  - name: recaptcha
+    trigger:
+      type: element
+      present:
+        - ".g-recaptcha"
+    complete:
+      type: element
+      missing:
+        - ".g-recaptcha"
+
+server:
+  port: 8080
+  timeout: 600
+```
+
+### JSON Configuration
+
+```json
+{
+  "scenarios": [
+    {
+      "name": "cloudflare_challenge",
+      "trigger": {
+        "type": "content",
+        "title_contains": ["Just a moment"]
+      },
+      "complete": {
+        "type": "element",
+        "missing": [".cf-turnstile"]
+      }
+    },
+    {
+      "name": "hcaptcha",
+      "trigger": {
+        "type": "element",
+        "present": [".h-captcha"]
+      },
+      "complete": {
+        "type": "element",
+        "missing": [".h-captcha"]
+      }
+    }
+  ],
+  "server": {
+    "port": 8080
+  }
+}
+```
+
+### Mixing Scenarios with Global Triggers
+
+You can use scenarios alongside global `trigger_on` and `complete_on`. Scenarios are checked first, and global triggers serve as a fallback:
+
+```python
+handoff = Handoff(
+    scenarios=[
+        Scenario(
+            name="cloudflare",
+            trigger=Detection.content(title_contains=["Just a moment"]),
+            complete=Detection.element(missing=[".cf-turnstile"]),
+        ),
+    ],
+    # Fallback for unknown blockers
+    trigger_on=[
+        Detection.element(present=[".unknown-captcha"]),
+    ],
+    complete_on=[
+        Detection.url(query_contains=["success=true"]),
+    ],
+)
+```
+
 ## Configuration Files
 
 ### JSON Configuration
