@@ -110,10 +110,10 @@ Check page title or body for substrings or regex patterns:
 
 ```python
 Detection.content(
-    title_contains=["Just a moment", "Access Denied"],
-    title_matches=[r"Challenge \d+"],
-    body_contains=["captcha", "security check"],
-    body_matches=[r"verify.*human"],
+    title_contains=["Sign In", "Login"],
+    title_matches=[r"Step \d+ of \d+"],
+    body_contains=["enter your password", "verify your identity"],
+    body_matches=[r"welcome.*back"],
 )
 ```
 
@@ -127,7 +127,7 @@ Detection.url(
     host_equals=["localhost", "accounts.google.com"],
     host_not_equals=["blocked-domain.com"],
     path_matches=["/callback", "/oauth/.*"],
-    path_contains=["/auth/"],
+    path_contains=["/auth/", "/login"],
     query_contains=["code=", "token="],
 )
 ```
@@ -138,8 +138,8 @@ Check for DOM element presence, absence, or visibility:
 
 ```python
 Detection.element(
-    present=[".captcha-container", "#challenge-form"],
-    missing=["button#submit", ".main-content"],
+    present=["input[type=password]", "#login-form"],
+    missing=[".user-menu", ".logout-button"],
     visible=[".modal-overlay"],
     hidden=[".loading-spinner"],
 )
@@ -152,7 +152,7 @@ Use AI vision to analyze screenshots:
 ```python
 Detection.llm(
     model="anthropic/claude-sonnet-4-20250514",
-    condition="The page is showing a CAPTCHA or security challenge",
+    condition="The page is showing a login form or asking for user credentials",
 )
 ```
 
