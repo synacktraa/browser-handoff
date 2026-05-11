@@ -31,24 +31,27 @@ from browser_handoff import Handoff, Detection, Scenario, ServerConfig
 
 # Create handoff configuration with scenarios
 # Each scenario pairs a trigger with its specific completion condition
+# Use Detection.any() or Detection.all() to combine multiple conditions
 handoff = Handoff(
     scenarios=[
         Scenario(
             name="cloudflare_challenge",
-            trigger=Detection.content(
-                title_contains=["Just a moment", "Access Denied"],
-                body_contains=["challenges.cloudflare.com"],
-            ),
+            # Trigger on ANY of these conditions
+            trigger=Detection.any([
+                Detection.content(title_contains=["Just a moment"]),
+                Detection.element(present=[".cf-turnstile"]),
+            ]),
+            # Complete when the turnstile element is gone
             complete=Detection.element(missing=[".cf-turnstile"]),
         ),
         Scenario(
             name="oauth_callback",
             trigger=Detection.element(present=["#captcha"]),
-            complete=Detection.url(
-                host_equals=["localhost"],
-                path_matches=["/callback"],
-                query_contains=["code="],
-            ),
+            # Complete when ALL conditions are met
+            complete=Detection.all([
+                Detection.url(host_equals=["localhost"]),
+                Detection.url(query_contains=["code="]),
+            ]),
         ),
     ],
     server=ServerConfig(
@@ -155,7 +158,9 @@ Detection.not_(
 
 ## Scenarios
 
-Scenarios allow you to define trigger-completion pairs where each trigger has its own specific completion condition. Only one scenario can be active at a time - when a scenario's trigger is detected, its corresponding completion condition is used.
+Scenarios define trigger-completion pairs where each trigger has its own specific completion condition. Only one scenario can be active at a time - when a scenario's trigger is detected, its corresponding completion condition is used.
+
+Use `Detection.any()` to trigger on multiple conditions (OR logic), and `Detection.all()` when all conditions must be met (AND logic).
 
 ### Programmatic Usage
 
@@ -166,18 +171,37 @@ handoff = Handoff(
     scenarios=[
         Scenario(
             name="cloudflare_challenge",
-            trigger=Detection.content(title_contains=["Just a moment"]),
+            # Trigger when ANY of these conditions match
+            trigger=Detection.any([
+                Detection.content(title_contains=["Just a moment"]),
+                Detection.element(present=[".cf-turnstile"]),
+                Detection.content(body_contains=["challenges.cloudflare.com"]),
+            ]),
+            # Complete when the challenge element disappears
             complete=Detection.element(missing=[".cf-turnstile"]),
         ),
         Scenario(
-            name="login_required",
-            trigger=Detection.url(path_contains=["/login"]),
-            complete=Detection.url(path_contains=["/dashboard"]),
+            name="recaptcha",
+            # Trigger when ANY captcha element is present
+            trigger=Detection.any([
+                Detection.element(present=[".g-recaptcha"]),
+                Detection.element(present=[".h-captcha"]),
+            ]),
+            # Complete when ALL captcha elements are gone
+            complete=Detection.all([
+                Detection.element(missing=[".g-recaptcha"]),
+                Detection.element(missing=[".h-captcha"]),
+            ]),
         ),
         Scenario(
-            name="recaptcha",
-            trigger=Detection.element(present=[".g-recaptcha"]),
-            complete=Detection.element(missing=[".g-recaptcha"]),
+            name="oauth_flow",
+            trigger=Detection.url(host_equals=["accounts.google.com"]),
+            # Complete when redirected back with auth code
+            complete=Detection.all([
+                Detection.url(host_equals=["localhost"]),
+                Detection.url(query_contains=["code="]),
+                Detection.not_(Detection.element(present=[".error"])),
+            ]),
         ),
     ],
     server=ServerConfig(port=8080),
@@ -198,10 +222,16 @@ async with handoff.guard(page) as session:
 ```yaml
 scenarios:
   - name: cloudflare_challenge
+    # Use 'any' to trigger on multiple conditions (OR logic)
     trigger:
-      type: content
-      title_contains:
-        - "Just a moment"
+      type: any
+      conditions:
+        - type: content
+          title_contains:
+            - "Just a moment"
+        - type: element
+          present:
+            - ".cf-turnstile"
     complete:
       type: element
       missing:
@@ -212,22 +242,36 @@ scenarios:
       type: url
       host_equals:
         - accounts.google.com
+    # Use 'all' when all conditions must be met (AND logic)
     complete:
-      type: url
-      host_equals:
-        - localhost
-      query_contains:
-        - "code="
+      type: all
+      conditions:
+        - type: url
+          host_equals:
+            - localhost
+        - type: url
+          query_contains:
+            - "code="
 
-  - name: recaptcha
+  - name: captcha
     trigger:
-      type: element
-      present:
-        - ".g-recaptcha"
+      type: any
+      conditions:
+        - type: element
+          present:
+            - ".g-recaptcha"
+        - type: element
+          present:
+            - ".h-captcha"
     complete:
-      type: element
-      missing:
-        - ".g-recaptcha"
+      type: all
+      conditions:
+        - type: element
+          missing:
+            - ".g-recaptcha"
+        - type: element
+          missing:
+            - ".h-captcha"
 
 server:
   port: 8080
@@ -242,8 +286,11 @@ server:
     {
       "name": "cloudflare_challenge",
       "trigger": {
-        "type": "content",
-        "title_contains": ["Just a moment"]
+        "type": "any",
+        "conditions": [
+          { "type": "content", "title_contains": ["Just a moment"] },
+          { "type": "element", "present": [".cf-turnstile"] }
+        ]
       },
       "complete": {
         "type": "element",
@@ -251,14 +298,17 @@ server:
       }
     },
     {
-      "name": "hcaptcha",
+      "name": "oauth_flow",
       "trigger": {
-        "type": "element",
-        "present": [".h-captcha"]
+        "type": "url",
+        "host_equals": ["accounts.google.com"]
       },
       "complete": {
-        "type": "element",
-        "missing": [".h-captcha"]
+        "type": "all",
+        "conditions": [
+          { "type": "url", "host_equals": ["localhost"] },
+          { "type": "url", "query_contains": ["code="] }
+        ]
       }
     }
   ],
@@ -278,9 +328,11 @@ server:
     {
       "name": "cloudflare_challenge",
       "trigger": {
-        "type": "content",
-        "title_contains": ["Just a moment"],
-        "body_contains": ["challenges.cloudflare.com"]
+        "type": "any",
+        "conditions": [
+          { "type": "content", "title_contains": ["Just a moment"] },
+          { "type": "element", "present": [".cf-turnstile"] }
+        ]
       },
       "complete": {
         "type": "element",
@@ -294,10 +346,12 @@ server:
         "present": ["#captcha"]
       },
       "complete": {
-        "type": "url",
-        "host_equals": ["localhost"],
-        "path_matches": ["/callback"],
-        "query_contains": ["code="]
+        "type": "all",
+        "conditions": [
+          { "type": "url", "host_equals": ["localhost"] },
+          { "type": "url", "path_matches": ["/callback"] },
+          { "type": "url", "query_contains": ["code="] }
+        ]
       }
     }
   ],
@@ -322,12 +376,15 @@ server:
 scenarios:
   - name: cloudflare_challenge
     trigger:
-      type: content
-      title_contains:
-        - "Just a moment"
-        - "Access Denied"
-      body_contains:
-        - "challenges.cloudflare.com"
+      type: any
+      conditions:
+        - type: content
+          title_contains:
+            - "Just a moment"
+            - "Access Denied"
+        - type: element
+          present:
+            - ".cf-turnstile"
     complete:
       type: element
       missing:
@@ -339,13 +396,17 @@ scenarios:
       present:
         - "#captcha"
     complete:
-      type: url
-      host_equals:
-        - localhost
-      path_matches:
-        - "/callback"
-      query_contains:
-        - "code="
+      type: all
+      conditions:
+        - type: url
+          host_equals:
+            - localhost
+        - type: url
+          path_matches:
+            - "/callback"
+        - type: url
+          query_contains:
+            - "code="
 
 server:
   port: 8080
