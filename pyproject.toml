@@ -9,7 +9,7 @@ authors = [
     { name = "synacktra", email = "synacktra.work@gmail.com" }
 ]
 requires-python = ">=3.10"
-keywords = ["browser", "automation", "playwright", "handoff", "captcha", "human-in-the-loop"]
+keywords = ["browser", "automation", "playwright", "handoff", "human-in-the-loop", "streaming"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
