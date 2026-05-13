@@ -63,7 +63,8 @@ async with async_playwright() as p:
     await page.goto("https://example.com/start")
 
     # Check if human intervention needed, wait if so
-    result = await handoff.wait_if_blocked(page)
+    # trigger_timeout allows time for redirects to complete (default: 5s)
+    result = await handoff.wait_if_blocked(page, trigger_timeout=5)
 
     if result.was_blocked:
         print(f"Human completed: {result.scenario_name}")

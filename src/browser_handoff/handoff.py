@@ -218,6 +218,8 @@ class Handoff:
         self,
         page: "Page",
         context: "BrowserContext | None" = None,
+        *,
+        trigger_timeout: float = 5.0,
     ) -> "HandoffResult":
         """Check if page needs human intervention and wait if so.
 
@@ -232,6 +234,8 @@ class Handoff:
         Args:
             page: Playwright page to check and potentially hand off.
             context: Optional browser context (auto-detected if not provided).
+            trigger_timeout: Seconds to wait for page to settle before checking
+                triggers. This allows time for redirects to complete. Default: 5.0
 
         Returns:
             HandoffResult with details about what happened.
@@ -239,41 +243,29 @@ class Handoff:
         if context is None:
             context = page.context
 
-        # Wait for page to settle (redirects, etc.) before checking
-        # Try multiple times in case redirects are still in progress
-        is_blocked = False
-        result = None
-        matched_scenario = None
-
-        for attempt in range(3):
-            try:
-                await page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception:
-                pass  # Timeout is OK, just proceed with check
-
-            logger.info(
-                "wait_if_blocked: attempt %d, checking page at URL=%s",
-                attempt + 1,
-                page.url,
+        # Wait for page to settle (redirects, etc.) before checking triggers
+        try:
+            await page.wait_for_load_state(
+                "networkidle", timeout=int(trigger_timeout * 1000)
             )
+        except Exception:
+            pass  # Timeout is OK, just proceed with check
 
-            # Check if any trigger condition is met
-            is_blocked, result, matched_scenario = await self.is_blocked(page)
+        logger.info("wait_if_blocked: checking page at URL=%s", page.url)
 
-            if is_blocked:
-                logger.info(
-                    "wait_if_blocked: is_blocked=True, scenario=%s",
-                    matched_scenario.name if matched_scenario else None,
-                )
-                break
+        # Check if any trigger condition is met
+        is_blocked, result, matched_scenario = await self.is_blocked(page)
 
-            # Wait a bit before retrying (redirects may still be happening)
-            if attempt < 2:
-                await asyncio.sleep(1)
+        if is_blocked:
+            logger.info(
+                "wait_if_blocked: trigger matched, scenario=%s",
+                matched_scenario.name if matched_scenario else None,
+            )
+        else:
+            logger.info("wait_if_blocked: no trigger matched")
 
         if not is_blocked or not result or not matched_scenario:
             # No intervention needed
-            logger.info("wait_if_blocked: no trigger matched, continuing")
             return HandoffResult(
                 was_blocked=False,
                 scenario_name=None,
