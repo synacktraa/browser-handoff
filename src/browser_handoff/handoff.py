@@ -240,21 +240,36 @@ class Handoff:
             context = page.context
 
         # Wait for page to settle (redirects, etc.) before checking
-        try:
-            await page.wait_for_load_state("networkidle", timeout=5000)
-        except Exception:
-            pass  # Timeout is OK, just proceed with check
+        # Try multiple times in case redirects are still in progress
+        is_blocked = False
+        result = None
+        matched_scenario = None
 
-        logger.info("wait_if_blocked: checking page at URL=%s", page.url)
+        for attempt in range(3):
+            try:
+                await page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass  # Timeout is OK, just proceed with check
 
-        # Check if any trigger condition is met
-        is_blocked, result, matched_scenario = await self.is_blocked(page)
+            logger.info(
+                "wait_if_blocked: attempt %d, checking page at URL=%s",
+                attempt + 1,
+                page.url,
+            )
 
-        logger.info(
-            "wait_if_blocked: is_blocked=%s, scenario=%s",
-            is_blocked,
-            matched_scenario.name if matched_scenario else None,
-        )
+            # Check if any trigger condition is met
+            is_blocked, result, matched_scenario = await self.is_blocked(page)
+
+            if is_blocked:
+                logger.info(
+                    "wait_if_blocked: is_blocked=True, scenario=%s",
+                    matched_scenario.name if matched_scenario else None,
+                )
+                break
+
+            # Wait a bit before retrying (redirects may still be happening)
+            if attempt < 2:
+                await asyncio.sleep(1)
 
         if not is_blocked or not result or not matched_scenario:
             # No intervention needed
