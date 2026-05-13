@@ -274,7 +274,13 @@ async with handoff.guard(page) as session:
 
 ## Configuration Files
 
-### JSON Configuration
+<table>
+<tr>
+<th>JSON</th>
+<th>YAML</th>
+</tr>
+<tr>
+<td>
 
 ```json
 {
@@ -284,32 +290,17 @@ async with handoff.guard(page) as session:
       "trigger": {
         "type": "any",
         "conditions": [
-          { "type": "url", "path_contains": ["/login", "/signin"] },
+          { "type": "url", "path_contains": ["/login"] },
           { "type": "element", "present": ["input[type=password]"] }
         ]
       },
       "complete": {
         "type": "url",
-        "path_contains": ["/dashboard", "/home"]
-      }
-    },
-    {
-      "name": "payment_checkout",
-      "trigger": {
-        "type": "url",
-        "path_contains": ["/checkout", "/payment"]
-      },
-      "complete": {
-        "type": "all",
-        "conditions": [
-          { "type": "url", "path_contains": ["/confirmation"] },
-          { "type": "not", "condition": { "type": "element", "present": [".error"] } }
-        ]
+        "path_contains": ["/dashboard"]
       }
     }
   ],
   "server": {
-    "host": "0.0.0.0",
     "port": 8080,
     "public_base": "${HANDOFF_PUBLIC_URL}",
     "timeout": 600
@@ -323,7 +314,8 @@ async with handoff.guard(page) as session:
 }
 ```
 
-### YAML Configuration
+</td>
+<td>
 
 ```yaml
 scenarios:
@@ -332,29 +324,12 @@ scenarios:
       type: any
       conditions:
         - type: url
-          path_contains:
-            - "/login"
-            - "/signin"
+          path_contains: ["/login"]
         - type: element
-          present:
-            - "input[type=password]"
+          present: ["input[type=password]"]
     complete:
       type: url
-      path_contains:
-        - "/dashboard"
-        - "/home"
-
-  - name: payment_checkout
-    trigger:
-      type: url
-      path_contains:
-        - "/checkout"
-        - "/payment"
-    complete:
-      type: url
-      path_contains:
-        - "/confirmation"
-        - "/thank-you"
+      path_contains: ["/dashboard"]
 
 server:
   port: 8080
@@ -365,6 +340,10 @@ notifiers:
   - type: slack
     webhook_url: ${SLACK_WEBHOOK_URL}
 ```
+
+</td>
+</tr>
+</table>
 
 ### Loading Configuration
 
