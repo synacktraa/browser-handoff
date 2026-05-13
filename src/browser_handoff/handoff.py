@@ -302,7 +302,9 @@ class Handoff:
 
             # Check completion immediately in case already complete
             is_complete, result = await self.is_complete(page, scenario)
+            logger.info(f"Initial completion check: is_complete={is_complete}, result={result}")
             if is_complete and result:
+                logger.info(f"Completion detected immediately: {result.reason}")
                 completion_result = CompletionResult(
                     success=True,
                     reason=result.reason,
