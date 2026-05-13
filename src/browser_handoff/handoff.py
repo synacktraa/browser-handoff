@@ -239,6 +239,12 @@ class Handoff:
         if context is None:
             context = page.context
 
+        # Wait for page to settle (redirects, etc.) before checking
+        try:
+            await page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass  # Timeout is OK, just proceed with check
+
         logger.info("wait_if_blocked: checking page at URL=%s", page.url)
 
         # Check if any trigger condition is met
