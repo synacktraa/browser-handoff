@@ -1,20 +1,22 @@
 """
-Fix for ccauth integration: Correct handoff trigger conditions.
+Fix for ccauth integration: Correct handoff usage pattern.
 
-The issue: Triggering on `/login` URL blocks the bot even when cookies work
-and the page auto-redirects to the consent page.
+The issue: Using guard() context manager around bot code that needs to run
+to trigger the completion condition creates a deadlock.
 
-Solution: Trigger on conditions that indicate the bot CANNOT proceed:
-1. Login form is visible (not just /login URL)
-2. Turnstile/CAPTCHA challenge appears
-3. Error messages
-
-This file shows the corrected handoff configuration.
+Solution: Use wait_if_blocked() which checks conditions and waits only if needed,
+then lets your bot code run after human intervention completes.
 """
+
+import logging
+import re
+from pathlib import Path
 
 from browser_handoff import Detection, DiscordNotifier, Handoff, Scenario
 
-# CORRECT: Trigger on conditions that require human intervention
+logger = logging.getLogger(__name__)
+
+# Configure handoff to trigger only when human intervention is REQUIRED
 handoff_config = Handoff(
     scenarios=[
         Scenario(
@@ -26,7 +28,6 @@ handoff_config = Handoff(
                 Detection.any(
                     Detection.element(selector='input[type="email"]'),
                     Detection.element(selector='input[type="password"]'),
-                    Detection.element(selector='button[type="submit"]'),
                 ),
             ),
             complete=Detection.url(path_contains=["/callback"]),
@@ -50,26 +51,27 @@ handoff_config = Handoff(
     ],
 )
 
-# ALTERNATIVE: Run bot first, only use handoff as fallback
-# This is often the cleanest approach for OAuth flows
 
-
-async def open_and_wait_v2(
+async def open_and_wait(
     authorize_url: str,
     server,  # CallbackServer
     cookies: list,
     *,
-    process_page=None,
+    process_page=None,  # Callable[[Page], Awaitable[None]]
     timeout: float = 180.0,
 ) -> str:
     """
-    Improved flow:
-    1. Try bot action first
-    2. Only trigger handoff if bot fails
+    Correct flow using wait_if_blocked():
+    1. Navigate to authorize URL
+    2. Check if human intervention needed (login form visible, etc.)
+    3. If yes, wait for human to complete
+    4. Run bot action (click Authorize button)
+    5. Wait for callback
     """
-    import re
-
     from patchright.async_api import async_playwright
+
+    PROFILE_DIR = Path.home() / ".ccauth" / "patchright-profile"
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
     callback_pattern = re.compile(
         rf"localhost:{server.port}{re.escape(server.callback_path)}"
@@ -77,51 +79,42 @@ async def open_and_wait_v2(
 
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
-            user_data_dir=str("~/.ccauth/profile"),
+            user_data_dir=str(PROFILE_DIR),
             channel="chrome",
             headless=False,
+            no_viewport=True,
+            args=["--disable-quic", "--disable-features=UseDnsHttpsSvcb"],
         )
-        await context.add_cookies(cookies)
+
+        try:
+            await context.add_cookies(cookies)
+        except Exception as e:
+            await context.close()
+            raise Exception(f"Failed to inject cookies: {e}") from e
 
         page = context.pages[0] if context.pages else await context.new_page()
+        logger.info("Navigating to authorize URL...")
         await page.goto(authorize_url, wait_until="domcontentloaded", timeout=30000)
 
-        # Wait a moment for redirects to settle
+        # Wait for page to settle (redirects, etc.)
         await page.wait_for_timeout(2000)
 
-        # Check if we need human intervention
-        needs_handoff = False
+        # Check if human intervention is needed and wait if so
+        result = await handoff_config.wait_if_blocked(page, context)
 
-        # Check for login form (cookies didn't work)
-        if "/login" in page.url:
-            try:
-                login_form = page.locator('input[type="email"], input[type="password"]')
-                if await login_form.count() > 0:
-                    needs_handoff = True
-            except Exception:
-                pass
+        if result.was_blocked:
+            logger.info(
+                "Human intervention completed (scenario: %s)", result.scenario_name
+            )
 
-        # Check for Turnstile
-        try:
-            turnstile = page.locator('iframe[src*="challenges.cloudflare.com"]')
-            if await turnstile.count() > 0:
-                needs_handoff = True
-        except Exception:
-            pass
-
-        if needs_handoff:
-            # Human intervention required
-            async with handoff_config.guard(page=page, context=context) as session:
-                # Guard blocks until human completes
-                pass
-
-        # Now try bot action (after any human intervention)
+        # Now run bot action - this happens AFTER human intervention (if any)
         if process_page is not None:
             try:
                 await process_page(page)
             except Exception as e:
+                captured_url = page.url
                 await context.close()
-                raise Exception(f"process_page failed: {e}") from e
+                raise Exception(f"process_page failed at {captured_url}: {e}") from e
 
         # Wait for callback
         try:

@@ -3,17 +3,15 @@
 Example: OAuth flow with conditional human handoff.
 
 This demonstrates the correct pattern for using browser-handoff in an OAuth flow:
-1. Bot attempts the automated flow first
-2. Guard monitors for conditions that REQUIRE human intervention
-3. Only blocks when the bot cannot proceed
+1. Navigate to OAuth page
+2. Check if human intervention is needed (login form, challenge, etc.)
+3. Wait for human if needed
+4. Run bot logic (click authorize, etc.)
+5. Wait for callback
 
-Key insight: Don't trigger on normal flow pages (like /login URL).
-Instead, trigger on conditions that indicate the bot is stuck:
-- Login form visible (cookies didn't work)
-- CAPTCHA/challenge present
-- Error messages
-
-Run with: python examples/oauth_flow_with_handoff.py
+Key insight: Use wait_if_blocked() for a simple check-and-wait pattern.
+Don't trigger on normal flow pages (like /login URL) - trigger on conditions
+that indicate the bot is stuck.
 """
 
 import asyncio
@@ -91,28 +89,29 @@ async def run_oauth_flow(authorize_url: str, callback_pattern: str) -> str:
         logger.info("Navigating to: %s", authorize_url)
         await page.goto(authorize_url, wait_until="domcontentloaded")
 
-        # Use guard to monitor for conditions requiring human intervention
-        # The guard only blocks if a trigger condition is detected
-        async with handoff.guard(page=page, context=context) as session:
-            if session.was_blocked:
-                logger.info(
-                    "Human intervention completed (scenario: %s)",
-                    session.scenario_name,
-                )
+        # Wait for page to settle
+        await page.wait_for_timeout(2000)
 
-            # Now try the bot action (after any required human intervention)
-            try:
-                await click_authorize(page)
-            except Exception as e:
-                logger.warning("Bot action failed: %s", e)
-                # Could trigger another handoff here if needed
+        # Check if human intervention needed and wait if so
+        result = await handoff.wait_if_blocked(page, context)
 
-            # Wait for callback
-            try:
-                await page.wait_for_url(re.compile(callback_pattern), timeout=30000)
-                logger.info("Callback received!")
-            except Exception:
-                logger.warning("Timeout waiting for callback")
+        if result.was_blocked:
+            logger.info(
+                "Human intervention completed (scenario: %s)", result.scenario_name
+            )
+
+        # Now try the bot action (after any required human intervention)
+        try:
+            await click_authorize(page)
+        except Exception as e:
+            logger.warning("Bot action failed: %s", e)
+
+        # Wait for callback
+        try:
+            await page.wait_for_url(re.compile(callback_pattern), timeout=30000)
+            logger.info("Callback received!")
+        except Exception:
+            logger.warning("Timeout waiting for callback")
 
         final_url = page.url
         await browser.close()
