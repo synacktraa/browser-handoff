@@ -239,11 +239,20 @@ class Handoff:
         if context is None:
             context = page.context
 
+        logger.info("wait_if_blocked: checking page at URL=%s", page.url)
+
         # Check if any trigger condition is met
         is_blocked, result, matched_scenario = await self.is_blocked(page)
 
+        logger.info(
+            "wait_if_blocked: is_blocked=%s, scenario=%s",
+            is_blocked,
+            matched_scenario.name if matched_scenario else None,
+        )
+
         if not is_blocked or not result or not matched_scenario:
             # No intervention needed
+            logger.info("wait_if_blocked: no trigger matched, continuing")
             return HandoffResult(
                 was_blocked=False,
                 scenario_name=None,
