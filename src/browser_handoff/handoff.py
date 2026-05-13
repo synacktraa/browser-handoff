@@ -314,24 +314,29 @@ class Handoff:
                 completion_event.set()
 
             # Wait for completion or timeout
+            logger.info(f"Waiting for completion event (timeout={self.server.timeout}s)...")
             try:
                 await asyncio.wait_for(
                     completion_event.wait(),
                     timeout=self.server.timeout,
                 )
+                logger.info("Completion event received!")
             except asyncio.TimeoutError:
                 raise HandoffError(
                     f"Handoff timeout: user did not complete task within {self.server.timeout}s"
                 )
 
             # Stop screencast before sensitive data appears
+            logger.info("Stopping screencast...")
             await server.stop_screencast(session_id)
 
             # Notify completion
             if completion_result:
+                logger.info(f"Notifying task completed: {completion_result.reason}")
                 await server.notify_task_completed(session_id, completion_result.reason)
                 await asyncio.sleep(0.5)  # Give time for message to be sent
 
+            logger.info(f"Returning completion result: {completion_result}")
             return completion_result or CompletionResult(
                 success=False,
                 reason="Unknown completion",
