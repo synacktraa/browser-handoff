@@ -63,34 +63,17 @@ PROFILE_VOLUME_ID = "browser-handoff-profile"
 PROFILE_MOUNT_PATH = "/home/daytona/.browser-profile"
 
 
-class BrowserEnabledSandbox:
-    """Sandbox wrapper with browser support.
-
-    Provides access to both the Daytona sandbox and a Patchright browser
-    instance running inside it.
+class SandboxBrowser:
+    """Browser wrapper providing access to context and page.
 
     Attributes:
-        browser: Patchright Browser instance (may be None for persistent context)
         context: Browser context with persistent profile
         page: Default page for navigation
     """
 
-    def __init__(
-        self,
-        sandbox,  # AsyncSandbox
-        browser: "Browser | None",
-        context: "BrowserContext",
-        page: "Page",
-    ):
-        self._sandbox = sandbox
-        self._browser = browser
+    def __init__(self, context: "BrowserContext", page: "Page"):
         self._context = context
         self._page = page
-
-    @property
-    def browser(self) -> "Browser | None":
-        """Patchright browser instance (None for persistent context)."""
-        return self._browser
 
     @property
     def context(self) -> "BrowserContext":
@@ -101,6 +84,26 @@ class BrowserEnabledSandbox:
     def page(self) -> "Page":
         """Default page for navigation."""
         return self._page
+
+
+class BrowserEnabledSandbox:
+    """Sandbox wrapper with browser support.
+
+    Provides access to both the Daytona sandbox and a Patchright browser
+    instance running inside it.
+
+    Attributes:
+        browser: SandboxBrowser with .context and .page access
+    """
+
+    def __init__(self, sandbox, browser: SandboxBrowser):  # AsyncSandbox
+        self._sandbox = sandbox
+        self._browser = browser
+
+    @property
+    def browser(self) -> SandboxBrowser:
+        """Browser with .context and .page access."""
+        return self._browser
 
     def __getattr__(self, name: str) -> Any:
         """Delegate all other attributes to the underlying sandbox."""
@@ -115,7 +118,7 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
     1. Creates a sandbox with Patchright/Chromium pre-installed
     2. Mounts a persistent volume for browser profile data
     3. Launches a browser with persistent context inside the sandbox
-    4. Yields a BrowserEnabledSandbox with .browser, .context, .page access
+    4. Yields a BrowserEnabledSandbox with .browser.context and .browser.page
     5. Cleans up browser and sandbox on exit
 
     The persistent volume maintains browser state (cookies, localStorage, etc.)
@@ -126,10 +129,12 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
 
     Example:
         async with create_browser_enabled_sandbox() as sandbox:
-            await sandbox.page.goto("https://example.com")
+            await sandbox.browser.page.goto("https://example.com")
 
             # Use browser-handoff for human intervention
-            result = await handoff.wait_if_blocked(sandbox.page, sandbox.context)
+            result = await handoff.wait_if_blocked(
+                sandbox.browser.page, sandbox.browser.context
+            )
 
             # Access sandbox methods directly
             response = await sandbox.process.exec("echo 'Hello'")
@@ -183,9 +188,7 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
 
                 yield BrowserEnabledSandbox(
                     sandbox=sandbox,
-                    browser=None,  # persistent context doesn't expose browser
-                    context=context,
-                    page=page,
+                    browser=SandboxBrowser(context=context, page=page),
                 )
 
                 await context.close()
@@ -220,15 +223,14 @@ async def run_claude_oauth(authorize_url: str) -> dict:
     )
 
     async with create_browser_enabled_sandbox() as sandbox:
-        page = sandbox.page
+        page = sandbox.browser.page
+        context = sandbox.browser.context
 
         logger.info("Navigating to: %s", authorize_url)
         await page.goto(authorize_url, wait_until="domcontentloaded")
 
         # Check if human intervention needed (login required)
-        result = await handoff.wait_if_blocked(
-            page, sandbox.context, trigger_timeout=10
-        )
+        result = await handoff.wait_if_blocked(page, context, trigger_timeout=10)
 
         if result.was_blocked:
             logger.info("Human completed: %s", result.scenario_name)
