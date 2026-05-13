@@ -3,16 +3,16 @@
 Example: Claude OAuth with browser-handoff in Daytona Sandbox.
 
 This example demonstrates using browser-handoff for human-in-the-loop
-OAuth authentication running entirely inside a Daytona sandbox.
+OAuth authentication running inside a Daytona sandbox.
 
 Features:
 - Declarative image building with Patchright/Chromium
 - Persistent volume for browser profile (maintains login sessions)
-- CDP-based streaming for remote human intervention
+- CDP-based remote browser connection
 - Clean async context manager API
 
 Requirements:
-    pip install daytona patchright browser-handoff
+    pip install daytona playwright browser-handoff
 
 Environment Variables:
     DAYTONA_API_KEY: Your Daytona API key
@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import textwrap
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 if TYPE_CHECKING:
-    from patchright.async_api import Browser, BrowserContext, Page
+    from daytona import AsyncSandbox
+    from playwright.async_api import BrowserContext, Page
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,21 +55,47 @@ def _build_browser_image():
             "libatspi2.0-0 libgtk-3-0",
             "rm -rf /var/lib/apt/lists/*",
         )
-        .pip_install("patchright", "browser-handoff")
+        .pip_install("patchright")
         .run_commands("patchright install chromium")
     )
 
 
+# Browser launcher script that runs inside the sandbox
+_BROWSER_LAUNCHER = textwrap.dedent('''
+    import asyncio
+    from patchright.async_api import async_playwright
+
+    async def main():
+        async with async_playwright() as pw:
+            context = await pw.chromium.launch_persistent_context(
+                user_data_dir="{profile_path}",
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--remote-debugging-port=9222",
+                    "--remote-debugging-address=0.0.0.0",
+                ],
+            )
+            # Keep browser running until process is killed
+            while True:
+                await asyncio.sleep(1)
+
+    asyncio.run(main())
+''')
+
 # Volume for persistent browser profile
 PROFILE_VOLUME_ID = "browser-handoff-profile"
 PROFILE_MOUNT_PATH = "/home/daytona/.browser-profile"
+CDP_PORT = 9222
 
 
 class SandboxBrowser:
     """Browser wrapper providing access to context and page.
 
     Attributes:
-        context: Browser context with persistent profile
+        context: Browser context connected via CDP
         page: Default page for navigation
     """
 
@@ -77,7 +105,7 @@ class SandboxBrowser:
 
     @property
     def context(self) -> "BrowserContext":
-        """Browser context with persistent profile."""
+        """Browser context connected via CDP."""
         return self._context
 
     @property
@@ -89,14 +117,14 @@ class SandboxBrowser:
 class BrowserEnabledSandbox:
     """Sandbox wrapper with browser support.
 
-    Provides access to both the Daytona sandbox and a Patchright browser
-    instance running inside it.
+    Provides access to both the Daytona sandbox and a browser
+    instance running inside it via CDP.
 
     Attributes:
         browser: SandboxBrowser with .context and .page access
     """
 
-    def __init__(self, sandbox, browser: SandboxBrowser):  # AsyncSandbox
+    def __init__(self, sandbox: "AsyncSandbox", browser: SandboxBrowser):
         self._sandbox = sandbox
         self._browser = browser
 
@@ -110,6 +138,19 @@ class BrowserEnabledSandbox:
         return getattr(self._sandbox, name)
 
 
+async def _get_cdp_ws_url(base_url: str) -> str:
+    """Get WebSocket URL from Chrome's /json/version endpoint."""
+    import aiohttp
+
+    # Handle both http and https URLs
+    version_url = f"{base_url}/json/version"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(version_url) as resp:
+            data = await resp.json()
+            return data["webSocketDebuggerUrl"]
+
+
 @asynccontextmanager
 async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbox]:
     """Create a Daytona sandbox with browser support for human-in-the-loop tasks.
@@ -117,9 +158,10 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
     This context manager:
     1. Creates a sandbox with Patchright/Chromium pre-installed
     2. Mounts a persistent volume for browser profile data
-    3. Launches a browser with persistent context inside the sandbox
-    4. Yields a BrowserEnabledSandbox with .browser.context and .browser.page
-    5. Cleans up browser and sandbox on exit
+    3. Launches browser inside sandbox with CDP exposed
+    4. Connects to browser via CDP from local machine
+    5. Yields a BrowserEnabledSandbox with .browser.context and .browser.page
+    6. Cleans up browser and sandbox on exit
 
     The persistent volume maintains browser state (cookies, localStorage, etc.)
     across sandbox runs, reducing repeated login prompts.
@@ -145,7 +187,7 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
         Resources,
         VolumeMount,
     )
-    from patchright.async_api import async_playwright
+    from playwright.async_api import async_playwright
 
     async with AsyncDaytona() as daytona:
         # Get or create persistent volume for browser profile
@@ -169,29 +211,45 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
         logger.info("Sandbox created: %s", sandbox.id)
 
         try:
-            # Launch browser with persistent profile
-            async with async_playwright() as pw:
-                context = await pw.chromium.launch_persistent_context(
-                    user_data_dir=PROFILE_MOUNT_PATH,
-                    headless=False,
-                    no_viewport=True,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-sandbox",
-                        "--disable-dev-shm-usage",
-                    ],
-                )
+            # Upload and run browser launcher script inside sandbox
+            launcher_code = _BROWSER_LAUNCHER.format(profile_path=PROFILE_MOUNT_PATH)
+            launcher_path = "/tmp/browser_launcher.py"
+            await sandbox.fs.upload_file(
+                launcher_code.encode(), launcher_path
+            )
 
+            # Start browser in background with xvfb
+            await sandbox.process.exec(
+                f"nohup xvfb-run -a python {launcher_path} > /tmp/browser.log 2>&1 &",
+            )
+            logger.info("Browser launcher started in sandbox")
+
+            # Wait for browser to be ready
+            await asyncio.sleep(3)
+
+            # Get preview URL for CDP port
+            preview = await sandbox.get_preview_link(CDP_PORT, expires_in=3600)
+            cdp_base_url = f"https://{preview.url}"
+            logger.info("CDP preview URL: %s", cdp_base_url)
+
+            # Get WebSocket URL and connect via CDP
+            ws_url = await _get_cdp_ws_url(cdp_base_url)
+            # Replace the host in ws_url with preview URL
+            ws_url = ws_url.replace("ws://localhost:9222", f"wss://{preview.url}")
+            ws_url = ws_url.replace("ws://127.0.0.1:9222", f"wss://{preview.url}")
+            logger.info("Connecting to CDP: %s", ws_url)
+
+            async with async_playwright() as pw:
+                browser = await pw.chromium.connect_over_cdp(ws_url)
+                context = browser.contexts[0]
                 page = context.pages[0] if context.pages else await context.new_page()
 
-                logger.info("Browser launched with persistent profile")
+                logger.info("Connected to browser via CDP")
 
                 yield BrowserEnabledSandbox(
                     sandbox=sandbox,
                     browser=SandboxBrowser(context=context, page=page),
                 )
-
-                await context.close()
 
         finally:
             await sandbox.delete()
