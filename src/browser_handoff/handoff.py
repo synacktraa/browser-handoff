@@ -42,6 +42,23 @@ class CompletionResult:
     duration: float = 0.0
 
 
+@dataclass
+class HandoffResult:
+    """Result of wait_if_blocked() call."""
+
+    was_blocked: bool
+    """Whether human intervention was required."""
+
+    scenario_name: str | None
+    """Name of the scenario that triggered, if any."""
+
+    trigger_reason: str | None
+    """Reason the trigger matched, if any."""
+
+    completion_result: CompletionResult | None
+    """Details of completion, if blocked."""
+
+
 class HandoffError(Exception):
     """Error during handoff process."""
 
@@ -59,23 +76,24 @@ class Handoff:
 
     At least one scenario must be provided.
 
-    Example:
+    Example (simple await - recommended):
         handoff = Handoff(
             scenarios=[
                 Scenario(
-                    name="cloudflare_challenge",
-                    trigger=Detection.content(title_contains=["Just a moment"]),
-                    complete=Detection.element(missing=[".cf-turnstile"]),
-                ),
-                Scenario(
                     name="login_required",
-                    trigger=Detection.url(path_contains=["/login"]),
+                    trigger=Detection.element(selector='input[type="email"]'),
                     complete=Detection.url(path_contains=["/dashboard"]),
                 ),
             ],
-            server=ServerConfig(port=8080),
         )
 
+        # Simple: check and wait if needed, then continue
+        result = await handoff.wait_if_blocked(page)
+        if result.was_blocked:
+            print(f"Human completed: {result.scenario_name}")
+        await bot_logic(page)
+
+    Example (context manager - for event-based monitoring):
         async with handoff.guard(page) as session:
             await page.click("#login")
             # Auto-detects blockers and streams if needed
@@ -195,6 +213,70 @@ class Handoff:
         if result.matched:
             return True, result
         return False, None
+
+    async def wait_if_blocked(
+        self,
+        page: "Page",
+        context: "BrowserContext | None" = None,
+    ) -> "HandoffResult":
+        """Check if page needs human intervention and wait if so.
+
+        This is the simple, recommended way to use handoff:
+
+            result = await handoff.wait_if_blocked(page)
+            if result.was_blocked:
+                print(f"Human completed: {result.scenario_name}")
+            # Continue with bot logic
+            await click_button(page)
+
+        Args:
+            page: Playwright page to check and potentially hand off.
+            context: Optional browser context (auto-detected if not provided).
+
+        Returns:
+            HandoffResult with details about what happened.
+        """
+        if context is None:
+            context = page.context
+
+        # Check if any trigger condition is met
+        is_blocked, result, matched_scenario = await self.is_blocked(page)
+
+        if not is_blocked or not result or not matched_scenario:
+            # No intervention needed
+            return HandoffResult(
+                was_blocked=False,
+                scenario_name=None,
+                trigger_reason=None,
+                completion_result=None,
+            )
+
+        # Human intervention required
+        logger.info(
+            "Trigger detected (scenario '%s'): %s",
+            matched_scenario.name,
+            result.reason,
+        )
+
+        completion = await self.wait_for_human(
+            page=page,
+            context=context,
+            scenario=matched_scenario,
+            reason=result.reason,
+        )
+
+        logger.info(
+            "Handoff completed (scenario '%s'): %s",
+            matched_scenario.name,
+            completion.reason if completion else "unknown",
+        )
+
+        return HandoffResult(
+            was_blocked=True,
+            scenario_name=matched_scenario.name,
+            trigger_reason=result.reason,
+            completion_result=completion,
+        )
 
     async def wait_for_human(
         self,

@@ -3,27 +3,27 @@
 A standalone library that provides human-in-the-loop fallback for browser
 automation via CDP-based streaming when automation gets blocked.
 
-Example:
-    from browser_handoff import Handoff, Detection, ServerConfig
+Example (simple await - recommended):
+    from browser_handoff import Handoff, Detection, Scenario
 
     handoff = Handoff(
-        trigger_on=[
-            Detection.content(title_contains=["Just a moment"]),
-            Detection.element(present=[".captcha-container"]),
-        ],
-        complete_on=[
-            Detection.url(
-                host_equals=["localhost"],
-                path_matches=["/callback"],
-                query_contains=["code="],
+        scenarios=[
+            Scenario(
+                name="login_required",
+                trigger=Detection.element(selector='input[type="email"]'),
+                complete=Detection.url(path_contains=["/dashboard"]),
             ),
         ],
-        server=ServerConfig(port=8080),
     )
 
+    # Check and wait if human intervention needed
+    result = await handoff.wait_if_blocked(page)
+    await bot_logic(page)
+
+Example (context manager - for event-based monitoring):
     async with handoff.guard(page) as session:
         await page.click("#login")
-        # Auto-detects blockers and streams if needed
+        # Auto-detects blockers during execution
 """
 
 from .detection import (
@@ -37,7 +37,7 @@ from .detection import (
     NotDetection,
     UrlDetection,
 )
-from .handoff import CompletionResult, GuardedSession, Handoff, HandoffError
+from .handoff import CompletionResult, GuardedSession, Handoff, HandoffError, HandoffResult
 from .scenario import Scenario
 from .notifiers import DiscordNotifier, EmailNotifier, Notifier, SlackNotifier
 from .server import ServerConfig, StreamingServer
@@ -48,6 +48,7 @@ __all__ = [
     # Main classes
     "Handoff",
     "HandoffError",
+    "HandoffResult",
     "CompletionResult",
     "GuardedSession",
     "Scenario",

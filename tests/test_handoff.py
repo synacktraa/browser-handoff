@@ -7,6 +7,7 @@ from browser_handoff import (
     CompletionResult,
     Detection,
     Handoff,
+    HandoffResult,
     Scenario,
     ServerConfig,
     SlackNotifier,
@@ -229,6 +230,43 @@ class TestCompletionResult:
         )
         assert result.matched_detection is None
         assert result.duration == 0.0
+
+
+class TestHandoffResult:
+    """Tests for HandoffResult dataclass."""
+
+    def test_not_blocked(self):
+        """Test HandoffResult when not blocked."""
+        result = HandoffResult(
+            was_blocked=False,
+            scenario_name=None,
+            trigger_reason=None,
+            completion_result=None,
+        )
+        assert result.was_blocked is False
+        assert result.scenario_name is None
+        assert result.trigger_reason is None
+        assert result.completion_result is None
+
+    def test_was_blocked(self):
+        """Test HandoffResult when blocked."""
+        completion = CompletionResult(
+            success=True,
+            reason="URL matched /dashboard",
+            detection_type="url",
+            duration=10.5,
+        )
+        result = HandoffResult(
+            was_blocked=True,
+            scenario_name="login_required",
+            trigger_reason="Login form detected",
+            completion_result=completion,
+        )
+        assert result.was_blocked is True
+        assert result.scenario_name == "login_required"
+        assert result.trigger_reason == "Login form detected"
+        assert result.completion_result.success is True
+        assert result.completion_result.duration == 10.5
 
 
 class TestComplexConfig:

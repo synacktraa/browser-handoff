@@ -36,53 +36,24 @@ pip install browser-handoff[llm]
 
 ## Quick Start
 
+### Simple Usage (Recommended)
+
+Use `wait_if_blocked()` - it checks if human intervention is needed and waits if so:
+
 ```python
 from playwright.async_api import async_playwright
-from browser_handoff import Handoff, Detection, Scenario, ServerConfig
+from browser_handoff import Handoff, Detection, Scenario
 
-# Create handoff configuration with scenarios
-# Each scenario pairs a trigger with its specific completion condition
-# Use Detection.any() or Detection.all() to combine multiple conditions
 handoff = Handoff(
     scenarios=[
         Scenario(
-            name="login_required",
-            # Trigger when login page is detected
-            trigger=Detection.any([
-                Detection.url(path_contains=["/login", "/signin"]),
-                Detection.element(present=["form[action*=login]"]),
-            ]),
-            # Complete when redirected to dashboard
-            complete=Detection.url(path_contains=["/dashboard", "/home"]),
-        ),
-        Scenario(
-            name="oauth_consent",
-            # Trigger on OAuth consent screens
-            trigger=Detection.url(host_equals=["accounts.google.com"]),
-            # Complete when redirected back with auth code
-            complete=Detection.all([
-                Detection.url(host_equals=["localhost"]),
-                Detection.url(query_contains=["code="]),
-            ]),
-        ),
-        Scenario(
-            name="payment_flow",
-            # Trigger on payment pages
-            trigger=Detection.any([
-                Detection.url(path_contains=["/checkout", "/payment"]),
-                Detection.element(present=["#card-number", ".payment-form"]),
-            ]),
-            # Complete when payment confirmed
-            complete=Detection.any([
-                Detection.url(path_contains=["/confirmation", "/success"]),
-                Detection.element(present=[".payment-success"]),
-            ]),
+            name="login_form",
+            # Trigger when login form is visible (not just /login URL)
+            trigger=Detection.element(selector='input[type="email"]'),
+            # Complete when logged in
+            complete=Detection.url(path_contains=["/dashboard"]),
         ),
     ],
-    server=ServerConfig(
-        port=8080,
-        timeout=600,
-    ),
 )
 
 async with async_playwright() as p:
@@ -91,15 +62,61 @@ async with async_playwright() as p:
 
     await page.goto("https://example.com/start")
 
-    # Guard monitors and streams to human when needed
-    async with handoff.guard(page) as session:
-        await page.click("#begin-checkout")
-        # If login/payment is needed, streams to human
-        # Human completes the task, automation resumes
+    # Check if human intervention needed, wait if so
+    result = await handoff.wait_if_blocked(page)
 
-    if session.was_blocked:
-        print(f"Scenario: {session.scenario_name}")
-        print(f"Human helped! Completed via: {session.completion_result.detection_type}")
+    if result.was_blocked:
+        print(f"Human completed: {result.scenario_name}")
+
+    # Continue with bot logic
+    await page.click("#continue")
+```
+
+### Multiple Scenarios
+
+```python
+handoff = Handoff(
+    scenarios=[
+        Scenario(
+            name="login_required",
+            # Use Detection.any() to trigger on multiple conditions
+            trigger=Detection.any([
+                Detection.element(selector='input[type="email"]'),
+                Detection.element(selector='input[type="password"]'),
+            ]),
+            complete=Detection.url(path_contains=["/dashboard"]),
+        ),
+        Scenario(
+            name="oauth_consent",
+            trigger=Detection.url(host_equals=["accounts.google.com"]),
+            # Use Detection.all() when all conditions must match
+            complete=Detection.all([
+                Detection.url(host_equals=["localhost"]),
+                Detection.url(query_contains=["code="]),
+            ]),
+        ),
+        Scenario(
+            name="payment_flow",
+            trigger=Detection.element(selector='#card-number'),
+            complete=Detection.url(path_contains=["/confirmation"]),
+        ),
+    ],
+    server=ServerConfig(port=8080, timeout=600),
+)
+```
+
+### Context Manager (Event-Based Monitoring)
+
+Use `guard()` when you need to monitor for triggers during bot execution:
+
+```python
+async with handoff.guard(page) as session:
+    await page.click("#begin-checkout")
+    # If a trigger fires mid-execution, waits for human
+    await page.fill("#promo-code", "SAVE10")
+
+if session.was_blocked:
+    print(f"Human helped with: {session.scenario_name}")
 ```
 
 ## Detection Types
