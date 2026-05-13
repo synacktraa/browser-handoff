@@ -276,45 +276,10 @@ async with handoff.guard(page) as session:
 
 <table>
 <tr>
-<th>JSON</th>
 <th>YAML</th>
+<th>JSON</th>
 </tr>
 <tr>
-<td>
-
-```json
-{
-  "scenarios": [
-    {
-      "name": "login_flow",
-      "trigger": {
-        "type": "any",
-        "conditions": [
-          { "type": "url", "path_contains": ["/login"] },
-          { "type": "element", "present": ["input[type=password]"] }
-        ]
-      },
-      "complete": {
-        "type": "url",
-        "path_contains": ["/dashboard"]
-      }
-    }
-  ],
-  "server": {
-    "port": 8080,
-    "public_base": "${HANDOFF_PUBLIC_URL}",
-    "timeout": 600
-  },
-  "notifiers": [
-    {
-      "type": "slack",
-      "webhook_url": "${SLACK_WEBHOOK_URL}"
-    }
-  ]
-}
-```
-
-</td>
 <td>
 
 ```yaml
@@ -339,6 +304,39 @@ server:
 notifiers:
   - type: slack
     webhook_url: ${SLACK_WEBHOOK_URL}
+```
+
+</td>
+<td>
+
+```json
+{
+  "scenarios": [{
+    "name": "login_flow",
+    "trigger": {
+      "type": "any",
+      "conditions": [
+        { "type": "url",
+          "path_contains": ["/login"] },
+        { "type": "element",
+          "present": ["input[type=password]"] }
+      ]
+    },
+    "complete": {
+      "type": "url",
+      "path_contains": ["/dashboard"]
+    }
+  }],
+  "server": {
+    "port": 8080,
+    "public_base": "${HANDOFF_PUBLIC_URL}",
+    "timeout": 600
+  },
+  "notifiers": [{
+    "type": "slack",
+    "webhook_url": "${SLACK_WEBHOOK_URL}"
+  }]
+}
 ```
 
 </td>
