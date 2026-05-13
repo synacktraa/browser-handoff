@@ -302,9 +302,8 @@ class Handoff:
 
             # Check completion immediately in case already complete
             is_complete, result = await self.is_complete(page, scenario)
-            logger.info(f"Initial completion check: is_complete={is_complete}, result={result}")
             if is_complete and result:
-                logger.info(f"Completion detected immediately: {result.reason}")
+                logger.debug(f"Completion detected immediately: {result.reason}")
                 completion_result = CompletionResult(
                     success=True,
                     reason=result.reason,
@@ -314,13 +313,13 @@ class Handoff:
                 completion_event.set()
 
             # Wait for completion or timeout
-            logger.info(f"Waiting for completion event (timeout={self.server.timeout}s)...")
+            logger.debug(f"Waiting for completion event (timeout={self.server.timeout}s)...")
             try:
                 await asyncio.wait_for(
                     completion_event.wait(),
                     timeout=self.server.timeout,
                 )
-                logger.info("Completion event received!")
+                logger.debug("Completion event received")
             except asyncio.TimeoutError:
                 raise HandoffError(
                     f"Handoff timeout: user did not complete task within {self.server.timeout}s"
@@ -475,6 +474,11 @@ class Handoff:
                     context=context,
                     scenario=matched_scenario,
                     reason=result.reason,
+                )
+                logger.info(
+                    "Handoff completed (scenario '%s'): %s",
+                    matched_scenario.name,
+                    completion.reason if completion else "unknown",
                 )
                 session.completion_result = completion
                 session.in_handoff = False
