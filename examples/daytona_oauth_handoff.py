@@ -161,7 +161,8 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
             logger.info("Browser started in sandbox")
             await asyncio.sleep(3)
 
-            preview = await sandbox.get_preview_link(CDP_PORT)
+            # Use signed preview URL for authenticated access to CDP
+            preview = await sandbox.create_signed_preview_url(CDP_PORT, expires_in_seconds=3600)
             logger.info("Preview URL: %s", preview.url)
             # preview.url may or may not include the scheme
             cdp_base_url = preview.url if preview.url.startswith("http") else f"https://{preview.url}"
