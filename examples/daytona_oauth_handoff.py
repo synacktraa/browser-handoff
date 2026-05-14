@@ -176,7 +176,6 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
                 "nohup xvfb-run -a python /tmp/browser_launcher.py > /tmp/browser.log 2>&1 &"
             )
             logger.info("Browser started in sandbox")
-            await asyncio.sleep(3)
 
             # Use non-signed preview link so token doesn't expire mid-session
             # The token is passed via x-daytona-preview-token header
@@ -185,14 +184,30 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
             cdp_headers = {_PREVIEW_TOKEN_HEADER: preview.token}
             logger.info("Preview URL: %s", preview_url)
 
-            # Resolve CDP WebSocket URL and connect with auth headers
-            ws_url = await _resolve_cdp_ws_url(preview_url, preview.token)
-            logger.info("CDP WebSocket URL: %s", ws_url)
+            # Retry loop - browser may not be ready immediately
+            CDP_CONNECT_TIMEOUT = 60
+            CDP_POLL_INTERVAL = 2
+            deadline = time.time() + CDP_CONNECT_TIMEOUT
+            last_error: Exception | None = None
 
             async with async_playwright() as pw:
-                browser = await pw.chromium.connect_over_cdp(ws_url, headers=cdp_headers)
-                logger.info("Connected to browser via CDP")
-                yield BrowserEnabledSandbox(sandbox=sandbox, browser=browser)
+                while time.time() < deadline:
+                    try:
+                        ws_url = await _resolve_cdp_ws_url(preview_url, preview.token)
+                        logger.info("CDP WebSocket URL: %s", ws_url)
+                        browser = await pw.chromium.connect_over_cdp(ws_url, headers=cdp_headers)
+                        logger.info("Connected to browser via CDP")
+                        yield BrowserEnabledSandbox(sandbox=sandbox, browser=browser)
+                        break
+                    except Exception as e:
+                        last_error = e
+                        logger.debug("CDP connection attempt failed: %s", e)
+                        await asyncio.sleep(CDP_POLL_INTERVAL)
+                else:
+                    raise RuntimeError(
+                        f"Browser failed to start within {CDP_CONNECT_TIMEOUT}s. "
+                        f"Last error: {last_error}"
+                    )
 
         finally:
             await sandbox.delete()
