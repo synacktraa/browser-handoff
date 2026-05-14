@@ -3,7 +3,7 @@
 A standalone library that provides human-in-the-loop fallback for browser
 automation via CDP-based streaming when automation gets blocked.
 
-Example (simple await - recommended):
+Example:
     from browser_handoff import Handoff, Detection, Scenario
 
     handoff = Handoff(
@@ -16,14 +16,10 @@ Example (simple await - recommended):
         ],
     )
 
-    # Check and wait if human intervention needed
-    result = await handoff.wait_if_blocked(page)
+    result = await handoff.run(page)
+    if result.was_blocked:
+        print(f"Human completed: {result.scenario_name}")
     await bot_logic(page)
-
-Example (context manager - for event-based monitoring):
-    async with handoff.guard(page) as session:
-        await page.click("#login")
-        # Auto-detects blockers during execution
 """
 
 from .detection import (
@@ -37,7 +33,7 @@ from .detection import (
     NotDetection,
     UrlDetection,
 )
-from .handoff import CompletionResult, GuardedSession, Handoff, HandoffError, HandoffResult
+from .handoff import CompletionResult, Handoff, HandoffError, HandoffResult
 from .scenario import Scenario
 from .notifiers import DiscordNotifier, EmailNotifier, Notifier, SlackNotifier
 from .server import ServerConfig, StreamingServer
@@ -50,7 +46,6 @@ __all__ = [
     "HandoffError",
     "HandoffResult",
     "CompletionResult",
-    "GuardedSession",
     "Scenario",
     # Detection
     "Detection",
