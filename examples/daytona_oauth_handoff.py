@@ -29,6 +29,7 @@ import logging
 import textwrap
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncIterator
+from urllib.parse import parse_qs, urlparse
 
 if TYPE_CHECKING:
     from daytona import AsyncSandbox
@@ -206,9 +207,14 @@ async def run_claude_oauth() -> dict[str, Any]:
             btn = page.get_by_role("button", name="Authorize", exact=True).first
             await btn.wait_for(state="visible", timeout=60000)
             await btn.click()
+
+            # Wait for redirect to callback URL
+            # Note: Page won't load (sandbox can't reach localhost), but URL changes
             await page.wait_for_url(f"**{server.redirect_uri}**", timeout=15000)
 
-        return server.wait_for_code(timeout=30.0)
+            # Extract code from browser URL
+            parsed = urlparse(page.url)
+            return parse_qs(parsed.query)["code"][0]
 
     return await run_auth_custom(capture_code)
 
