@@ -10,14 +10,10 @@
 """
 Example: Claude OAuth with browser-handoff in Daytona Sandbox.
 
-This example demonstrates using browser-handoff for human-in-the-loop
-OAuth authentication running inside a Daytona sandbox.
-
-Features:
+Demonstrates human-in-the-loop OAuth using:
 - Daytona sandbox with persistent browser profile
-- CDP-based remote browser connection
-- browser-handoff streaming for human login intervention
-- ccauth for OAuth token exchange
+- browser-handoff for streaming login to human
+- ccauth for OAuth orchestration
 
 Requirements:
     pip install daytona patchright browser-handoff ccauth
@@ -48,7 +44,6 @@ logger = logging.getLogger(__name__)
 # Daytona Sandbox with Browser Support
 # =============================================================================
 
-# Browser launcher script that runs inside the sandbox
 _BROWSER_LAUNCHER = textwrap.dedent('''
     import asyncio
     from patchright.async_api import async_playwright
@@ -79,7 +74,6 @@ STREAMING_PORT = 8080
 
 
 def _build_browser_image():
-    """Build Daytona image with browser dependencies."""
     from daytona import Image
 
     return (
@@ -111,7 +105,6 @@ class BrowserEnabledSandbox:
 
 
 async def _get_cdp_ws_url(base_url: str) -> str:
-    """Get WebSocket URL from Chrome's /json/version endpoint."""
     import aiohttp
 
     async with aiohttp.ClientSession() as session:
@@ -122,25 +115,8 @@ async def _get_cdp_ws_url(base_url: str) -> str:
 
 @asynccontextmanager
 async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbox]:
-    """Create a Daytona sandbox with browser support.
-
-    Creates a sandbox with:
-    - Patchright/Chromium pre-installed
-    - Persistent volume for browser profile
-    - CDP exposed for remote connection
-
-    Example:
-        async with create_browser_enabled_sandbox() as ctx:
-            context = ctx.browser.contexts[0]
-            page = context.pages[0]
-            await page.goto("https://example.com")
-    """
-    from daytona import (
-        AsyncDaytona,
-        CreateSandboxFromImageParams,
-        Resources,
-        VolumeMount,
-    )
+    """Create a Daytona sandbox with browser support."""
+    from daytona import AsyncDaytona, CreateSandboxFromImageParams, Resources, VolumeMount
     from playwright.async_api import async_playwright
 
     async with AsyncDaytona() as daytona:
@@ -158,7 +134,6 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
         logger.info("Sandbox created: %s", sandbox.id)
 
         try:
-            # Upload and run browser launcher
             launcher_code = _BROWSER_LAUNCHER.format(profile_path=PROFILE_MOUNT_PATH)
             await sandbox.fs.upload_file(launcher_code.encode(), "/tmp/browser_launcher.py")
             await sandbox.process.exec(
@@ -167,7 +142,6 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
             logger.info("Browser started in sandbox")
             await asyncio.sleep(3)
 
-            # Connect via CDP
             preview = await sandbox.get_preview_link(CDP_PORT)
             cdp_base_url = f"https://{preview.url}"
             ws_url = await _get_cdp_ws_url(cdp_base_url)
@@ -190,102 +164,60 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
 
 
 async def run_claude_oauth() -> dict[str, Any]:
-    """Run Claude OAuth with browser-handoff for human login.
-
-    Uses:
-    - ccauth for OAuth primitives (PKCE, callback server, token exchange)
-    - browser-handoff for human-in-the-loop login streaming
-    - Daytona sandbox for isolated browser environment
-    """
-    from ccauth.modes._callback import start_callback_server
-    from ccauth.oauth import build_authorize_url, exchange_code, generate_pkce, generate_state
-    from ccauth.runner import (
-        AUTHORIZE_URL,
-        CALLBACK_PATH,
-        CLIENT_ID,
-        SCOPE,
-        USER_AGENT,
-    )
+    """Run Claude OAuth with browser-handoff for human login."""
+    from ccauth import run_auth_custom
+    from ccauth.modes import CallbackServer
 
     from browser_handoff import Detection, Handoff, Scenario, ServerConfig
 
-    # Setup OAuth with ccauth utilities
-    pkce = generate_pkce()
-    state = generate_state()
-    callback_server = start_callback_server(expected_state=state, callback_path=CALLBACK_PATH)
-    redirect_uri = f"http://localhost:{callback_server.port}{CALLBACK_PATH}"
+    async def capture_code(authorize_url: str, server: CallbackServer) -> str:
+        async with create_browser_enabled_sandbox() as ctx:
+            context = ctx.browser.contexts[0]
+            page = context.pages[0] if context.pages else await context.new_page()
 
-    authorize_url = build_authorize_url(
-        authorize_url=AUTHORIZE_URL,
-        client_id=CLIENT_ID,
-        redirect_uri=redirect_uri,
-        scope=SCOPE,
-        code_challenge=pkce.challenge,
-        state=state,
-    )
-    logger.info("Callback server on port %d", callback_server.port)
+            # Get public URL for browser-handoff streaming
+            streaming_preview = await ctx.sandbox.create_signed_preview_url(
+                STREAMING_PORT, expires_in_seconds=3600
+            )
 
-    async with create_browser_enabled_sandbox() as ctx:
-        context = ctx.browser.contexts[0]
-        page = context.pages[0] if context.pages else await context.new_page()
-
-        # Get public URL for browser-handoff streaming
-        streaming_preview = await ctx.sandbox.create_signed_preview_url(
-            STREAMING_PORT, expires_in_seconds=3600
-        )
-        public_base = f"https://{streaming_preview.url}"
-
-        # Configure browser-handoff
-        handoff = Handoff(
-            scenarios=[
-                Scenario(
-                    name="Claude Login",
-                    trigger=Detection.url(path_contains=["/login"]),
-                    complete=Detection.url(path_contains=["/oauth/authorize"]),
+            # Configure browser-handoff
+            handoff = Handoff(
+                scenarios=[
+                    Scenario(
+                        name="Claude Login",
+                        trigger=Detection.url(path_contains=["/login"]),
+                        complete=Detection.url(path_contains=["/oauth/authorize"]),
+                    ),
+                ],
+                server=ServerConfig(
+                    port=STREAMING_PORT,
+                    public_base=f"https://{streaming_preview.url}",
                 ),
-            ],
-            server=ServerConfig(port=STREAMING_PORT, public_base=public_base),
-        )
+            )
 
-        # Navigate and handle login
-        await page.goto(authorize_url, wait_until="domcontentloaded")
-        result = await handoff.wait_if_blocked(page, context, trigger_timeout=10)
+            # Navigate and handle login
+            await page.goto(authorize_url, wait_until="domcontentloaded")
+            result = await handoff.wait_if_blocked(page, context, trigger_timeout=10)
 
-        if result.was_blocked:
-            logger.info("Human completed: %s", result.scenario_name)
+            if result.was_blocked:
+                logger.info("Human completed: %s", result.scenario_name)
 
-        # Click Authorize (wait for Cloudflare Turnstile)
-        btn = page.get_by_role("button", name="Authorize", exact=True).first
-        await btn.wait_for(state="visible", timeout=60000)
-        await btn.click()
-        await page.wait_for_url(f"**/localhost:{callback_server.port}/**", timeout=15000)
+            # Click Authorize (wait for Cloudflare Turnstile)
+            btn = page.get_by_role("button", name="Authorize", exact=True).first
+            await btn.wait_for(state="visible", timeout=60000)
+            await btn.click()
+            await page.wait_for_url(f"**{server.redirect_uri}**", timeout=15000)
 
-    # Exchange code for tokens using ccauth
-    code = callback_server.wait_for_code(timeout=30.0)
-    tokens = exchange_code(
-        token_url="https://api.anthropic.com/oauth/token",
-        client_id=CLIENT_ID,
-        code=code,
-        code_verifier=pkce.verifier,
-        redirect_uri=redirect_uri,
-        state=state,
-        user_agent=USER_AGENT,
-    )
+        return server.wait_for_code(timeout=30.0)
 
-    return {
-        "access_token": tokens.access_token,
-        "refresh_token": tokens.refresh_token,
-        "expires_at_ms": tokens.expires_at_ms,
-        "scopes": tokens.scopes,
-    }
+    return await run_auth_custom(capture_code)
 
 
 async def main():
-    """Run the OAuth flow."""
     result = await run_claude_oauth()
     logger.info("OAuth successful!")
-    logger.info("Access token: %s...", result["access_token"][:20])
-    logger.info("Scopes: %s", result["scopes"])
+    logger.info("Access token: %s...", result["claudeAiOauth"]["accessToken"][:20])
+    logger.info("Scopes: %s", result["claudeAiOauth"]["scopes"])
 
 
 if __name__ == "__main__":
