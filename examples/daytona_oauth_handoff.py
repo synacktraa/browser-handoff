@@ -3,8 +3,8 @@
 # dependencies = [
 #   "daytona",
 #   "patchright",
-#   "browser-handoff",
-#   "ccauth",
+#   "ccauth @ git+https://github.com/synacktraa/ccauth.git",
+#   "browser-handoff @ git+https://github.com/synacktraa/browser-handoff.git@agent/storm-frost-0xeh"
 # ]
 # ///
 """
@@ -15,11 +15,9 @@ Demonstrates human-in-the-loop OAuth using:
 - browser-handoff for streaming login to human
 - ccauth for OAuth orchestration
 
-Requirements:
-    pip install daytona patchright browser-handoff ccauth
-
 Environment Variables:
     DAYTONA_API_KEY: Your Daytona API key
+    DISCORD_WEBHOOK_URL: Your Discord webhook URL
 """
 
 from __future__ import annotations
@@ -27,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import textwrap
+import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncIterator
 from urllib.parse import parse_qs, urlparse
@@ -81,7 +80,8 @@ def _build_browser_image():
         Image.debian_slim("3.12")
         .run_commands(
             "apt-get update && "
-            "apt-get install -y --no-install-recommends xvfb xauth && "
+            "apt-get install -y --no-install-recommends "
+            "xvfb xauth x11vnc novnc xfce4 xfce4-terminal dbus-x11 && "
             "rm -rf /var/lib/apt/lists/*",
         )
         .pip_install("patchright")
@@ -114,6 +114,12 @@ async def _get_cdp_ws_url(base_url: str) -> str:
             return data["webSocketDebuggerUrl"]
 
 
+import asyncio
+import time
+
+VOLUME_READY_TIMEOUT_MS = 30000
+VOLUME_POLL_INTERVAL_MS = 500
+
 @asynccontextmanager
 async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbox]:
     """Create a Daytona sandbox with browser support."""
@@ -122,6 +128,17 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
 
     async with AsyncDaytona() as daytona:
         volume = await daytona.volume.get(PROFILE_VOLUME_ID, create=True)
+
+        volume_deadline = time.time() + (VOLUME_READY_TIMEOUT_MS / 1000)
+        while volume.state != "ready" and time.time() < volume_deadline:
+            await asyncio.sleep(VOLUME_POLL_INTERVAL_MS / 1000)
+            volume = await daytona.volume.get(PROFILE_VOLUME_ID, create=False)
+
+        if volume.state != "ready":
+            raise RuntimeError(
+                f"Volume '{PROFILE_VOLUME_ID}' not ready after {VOLUME_READY_TIMEOUT_MS}ms (state: {volume.state})"
+            )
+
         logger.info("Using volume: %s", volume.id)
 
         sandbox = await daytona.create(
@@ -131,6 +148,7 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
                 volumes=[VolumeMount(volume_id=volume.id, mount_path=PROFILE_MOUNT_PATH)],
             ),
             timeout=300,
+            on_snapshot_create_logs=lambda log: logger.info(f"Sandbox snapshot log: {log}")
         )
         logger.info("Sandbox created: %s", sandbox.id)
 
@@ -169,9 +187,12 @@ async def run_claude_oauth() -> dict[str, Any]:
     from ccauth import run_auth_custom
     from ccauth.modes import CallbackServer
 
-    from browser_handoff import Detection, Handoff, Scenario, ServerConfig
+    from browser_handoff import Detection, Handoff, Scenario, ServerConfig, DiscordNotifier
 
     async def capture_code(authorize_url: str, server: CallbackServer) -> str:
+        # Close server since we won't receive the callback in the sandbox, but detect via URL change instead
+        server.close() 
+
         async with create_browser_enabled_sandbox() as ctx:
             context = ctx.browser.contexts[0]
             page = context.pages[0] if context.pages else await context.new_page()
@@ -194,6 +215,12 @@ async def run_claude_oauth() -> dict[str, Any]:
                     port=STREAMING_PORT,
                     public_base=f"https://{streaming_preview.url}",
                 ),
+                notifiers=[
+                    DiscordNotifier(
+                        webhook_url=os.getenv("DISCORD_WEBHOOK_URL"),
+                        username="CCAuth Handoff Bot",
+                    )
+                ],
             )
 
             # Navigate and handle login
@@ -216,7 +243,6 @@ async def run_claude_oauth() -> dict[str, Any]:
             parsed = urlparse(page.url)
             code = parse_qs(parsed.query)["code"][0]
 
-        server.close()
         return code
 
     return await run_auth_custom(capture_code)
