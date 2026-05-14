@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, AsyncIterator
 
 if TYPE_CHECKING:
     from daytona import AsyncSandbox
-    from playwright.async_api import BrowserContext, Page
+    from playwright.async_api import Browser
 
 logging.basicConfig(
     level=logging.INFO,
@@ -91,41 +91,18 @@ PROFILE_MOUNT_PATH = "/home/daytona/.browser-profile"
 CDP_PORT = 9222
 
 
-class SandboxBrowser:
-    """Browser wrapper providing access to context and page.
-
-    Attributes:
-        context: Browser context connected via CDP
-        page: Default page for navigation
-    """
-
-    def __init__(self, context: "BrowserContext", page: "Page"):
-        self._context = context
-        self._page = page
-
-    @property
-    def context(self) -> "BrowserContext":
-        """Browser context connected via CDP."""
-        return self._context
-
-    @property
-    def page(self) -> "Page":
-        """Default page for navigation."""
-        return self._page
-
-
 class BrowserEnabledSandbox:
     """Sandbox wrapper with browser support.
 
-    Provides access to both the Daytona sandbox and a browser
-    instance running inside it via CDP.
+    Provides access to both the Daytona sandbox and a Playwright
+    browser instance running inside it via CDP.
 
     Attributes:
         sandbox: The underlying AsyncSandbox instance (typed for IDE support)
-        browser: SandboxBrowser with .context and .page access
+        browser: Playwright Browser connected via CDP
     """
 
-    def __init__(self, sandbox: "AsyncSandbox", browser: SandboxBrowser):
+    def __init__(self, sandbox: "AsyncSandbox", browser: "Browser"):
         self._sandbox = sandbox
         self._browser = browser
 
@@ -135,8 +112,8 @@ class BrowserEnabledSandbox:
         return self._sandbox
 
     @property
-    def browser(self) -> SandboxBrowser:
-        """Browser with .context and .page access."""
+    def browser(self) -> "Browser":
+        """Playwright Browser connected via CDP."""
         return self._browser
 
 
@@ -162,23 +139,24 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
     2. Mounts a persistent volume for browser profile data
     3. Launches browser inside sandbox with CDP exposed
     4. Connects to browser via CDP from local machine
-    5. Yields a BrowserEnabledSandbox with .browser.context and .browser.page
+    5. Yields a BrowserEnabledSandbox with .browser (Playwright Browser) and .sandbox
     6. Cleans up browser and sandbox on exit
 
     The persistent volume maintains browser state (cookies, localStorage, etc.)
     across sandbox runs, reducing repeated login prompts.
 
     Yields:
-        BrowserEnabledSandbox with .browser and .sandbox properties.
+        BrowserEnabledSandbox with .browser (Playwright Browser) and .sandbox properties.
 
     Example:
         async with create_browser_enabled_sandbox() as ctx:
-            await ctx.browser.page.goto("https://example.com")
+            # Access browser contexts and pages
+            context = ctx.browser.contexts[0]
+            page = context.pages[0]
+            await page.goto("https://example.com")
 
             # Use browser-handoff for human intervention
-            result = await handoff.wait_if_blocked(
-                ctx.browser.page, ctx.browser.context
-            )
+            result = await handoff.wait_if_blocked(page, context)
 
             # Access sandbox methods with full type support
             response = await ctx.sandbox.process.exec("echo 'Hello'")
@@ -243,15 +221,9 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
 
             async with async_playwright() as pw:
                 browser = await pw.chromium.connect_over_cdp(ws_url)
-                context = browser.contexts[0]
-                page = context.pages[0] if context.pages else await context.new_page()
-
                 logger.info("Connected to browser via CDP")
 
-                yield BrowserEnabledSandbox(
-                    sandbox=sandbox,
-                    browser=SandboxBrowser(context=context, page=page),
-                )
+                yield BrowserEnabledSandbox(sandbox=sandbox, browser=browser)
 
         finally:
             await sandbox.delete()
@@ -283,8 +255,8 @@ async def run_claude_oauth(authorize_url: str) -> dict:
     )
 
     async with create_browser_enabled_sandbox() as sandbox:
-        page = sandbox.browser.page
-        context = sandbox.browser.context
+        context = sandbox.browser.contexts[0]
+        page = context.pages[0] if context.pages else await context.new_page()
 
         logger.info("Navigating to: %s", authorize_url)
         await page.goto(authorize_url, wait_until="domcontentloaded")
