@@ -105,13 +105,30 @@ class BrowserEnabledSandbox:
         return self._browser
 
 
-async def _get_cdp_ws_url(base_url: str) -> str:
+_PREVIEW_TOKEN_HEADER = "x-daytona-preview-token"
+
+
+async def _resolve_cdp_ws_url(preview_url: str, token: str) -> str:
+    """Fetch /json/version and rebuild the WS URL against the Daytona proxy.
+
+    Chrome advertises ws://localhost:9222/devtools/browser/<id> regardless of
+    how it's reached, so we extract just the path and splice it onto the
+    externally-reachable preview host.
+    """
     import aiohttp
 
+    probe_url = preview_url.rstrip("/") + "/json/version"
+    headers = {_PREVIEW_TOKEN_HEADER: token}
+
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{base_url}/json/version") as resp:
+        async with session.get(probe_url, headers=headers) as resp:
             data = await resp.json()
-            return data["webSocketDebuggerUrl"]
+
+    # Extract path from Chrome's advertised WebSocket URL
+    ws_path = urlparse(data["webSocketDebuggerUrl"]).path
+    # Get host from preview URL
+    preview_host = urlparse(preview_url).netloc
+    return f"wss://{preview_host}{ws_path}"
 
 
 import asyncio
@@ -161,19 +178,19 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
             logger.info("Browser started in sandbox")
             await asyncio.sleep(3)
 
-            # Use signed preview URL for authenticated access to CDP
-            preview = await sandbox.create_signed_preview_url(CDP_PORT, expires_in_seconds=3600)
-            logger.info("Preview URL: %s", preview.url)
-            # preview.url may or may not include the scheme
-            cdp_base_url = preview.url if preview.url.startswith("http") else f"https://{preview.url}"
-            # Extract host from preview URL for WebSocket connection
-            preview_host = preview.url.replace("https://", "").replace("http://", "")
-            ws_url = await _get_cdp_ws_url(cdp_base_url)
-            ws_url = ws_url.replace("ws://localhost:9222", f"wss://{preview_host}")
-            ws_url = ws_url.replace("ws://127.0.0.1:9222", f"wss://{preview_host}")
+            # Use non-signed preview link so token doesn't expire mid-session
+            # The token is passed via x-daytona-preview-token header
+            preview = await sandbox.get_preview_link(CDP_PORT)
+            preview_url = preview.url if preview.url.startswith("http") else f"https://{preview.url}"
+            cdp_headers = {_PREVIEW_TOKEN_HEADER: preview.token}
+            logger.info("Preview URL: %s", preview_url)
+
+            # Resolve CDP WebSocket URL and connect with auth headers
+            ws_url = await _resolve_cdp_ws_url(preview_url, preview.token)
+            logger.info("CDP WebSocket URL: %s", ws_url)
 
             async with async_playwright() as pw:
-                browser = await pw.chromium.connect_over_cdp(ws_url)
+                browser = await pw.chromium.connect_over_cdp(ws_url, headers=cdp_headers)
                 logger.info("Connected to browser via CDP")
                 yield BrowserEnabledSandbox(sandbox=sandbox, browser=browser)
 
