@@ -31,7 +31,7 @@ import asyncio
 import logging
 import textwrap
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator
 
 if TYPE_CHECKING:
     from daytona import AsyncSandbox
@@ -121,6 +121,7 @@ class BrowserEnabledSandbox:
     instance running inside it via CDP.
 
     Attributes:
+        sandbox: The underlying AsyncSandbox instance (typed for IDE support)
         browser: SandboxBrowser with .context and .page access
     """
 
@@ -129,13 +130,14 @@ class BrowserEnabledSandbox:
         self._browser = browser
 
     @property
+    def sandbox(self) -> "AsyncSandbox":
+        """The underlying Daytona sandbox (typed for IDE completion)."""
+        return self._sandbox
+
+    @property
     def browser(self) -> SandboxBrowser:
         """Browser with .context and .page access."""
         return self._browser
-
-    def __getattr__(self, name: str) -> Any:
-        """Delegate all other attributes to the underlying sandbox."""
-        return getattr(self._sandbox, name)
 
 
 async def _get_cdp_ws_url(base_url: str) -> str:
@@ -167,19 +169,19 @@ async def create_browser_enabled_sandbox() -> AsyncIterator[BrowserEnabledSandbo
     across sandbox runs, reducing repeated login prompts.
 
     Yields:
-        BrowserEnabledSandbox with browser access and all sandbox methods.
+        BrowserEnabledSandbox with .browser and .sandbox properties.
 
     Example:
-        async with create_browser_enabled_sandbox() as sandbox:
-            await sandbox.browser.page.goto("https://example.com")
+        async with create_browser_enabled_sandbox() as ctx:
+            await ctx.browser.page.goto("https://example.com")
 
             # Use browser-handoff for human intervention
             result = await handoff.wait_if_blocked(
-                sandbox.browser.page, sandbox.browser.context
+                ctx.browser.page, ctx.browser.context
             )
 
-            # Access sandbox methods directly
-            response = await sandbox.process.exec("echo 'Hello'")
+            # Access sandbox methods with full type support
+            response = await ctx.sandbox.process.exec("echo 'Hello'")
     """
     from daytona import (
         AsyncDaytona,
