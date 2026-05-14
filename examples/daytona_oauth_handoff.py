@@ -44,27 +44,28 @@ logger = logging.getLogger(__name__)
 # Daytona Sandbox with Browser Support
 # =============================================================================
 
+# Runs inside the sandbox. Uses sync API with signal.pause() to keep alive.
+# Must use ignore_default_args to remove --remote-debugging-pipe, otherwise
+# Chrome opens a pipe transport instead of binding the CDP port.
 _BROWSER_LAUNCHER = textwrap.dedent('''
-    import asyncio
-    from patchright.async_api import async_playwright
+    import signal
+    from patchright.sync_api import sync_playwright
 
-    async def main():
-        async with async_playwright() as pw:
-            context = await pw.chromium.launch_persistent_context(
-                user_data_dir="{profile_path}",
-                headless=False,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--remote-debugging-port=9222",
-                    "--remote-debugging-address=0.0.0.0",
-                ],
-            )
-            while True:
-                await asyncio.sleep(1)
-
-    asyncio.run(main())
+    p = sync_playwright().start()
+    p.chromium.launch_persistent_context(
+        user_data_dir="{profile_path}",
+        channel="chrome",
+        headless=False,
+        no_viewport=True,
+        ignore_default_args=["--remote-debugging-pipe"],
+        args=[
+            "--remote-debugging-port=9222",
+            "--remote-debugging-address=0.0.0.0",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ],
+    )
+    signal.pause()
 ''')
 
 PROFILE_VOLUME_ID = "browser-handoff-profile"
@@ -81,11 +82,14 @@ def _build_browser_image():
         .run_commands(
             "apt-get update && "
             "apt-get install -y --no-install-recommends "
-            "xvfb xauth x11vnc novnc xfce4 xfce4-terminal dbus-x11 && "
+            "xvfb x11vnc novnc xfce4 xfce4-terminal dbus-x11 && "
             "rm -rf /var/lib/apt/lists/*",
         )
-        .pip_install("patchright")
-        .run_commands("patchright install chromium")
+        .pip_install("patchright>=1.48")
+        .run_commands(
+            "patchright install chrome",
+            "patchright install-deps chrome",
+        )
     )
 
 
