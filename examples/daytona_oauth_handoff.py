@@ -214,7 +214,10 @@ async def run_claude_oauth() -> dict[str, Any]:
 
             # Extract code from browser URL
             parsed = urlparse(page.url)
-            return parse_qs(parsed.query)["code"][0]
+            code = parse_qs(parsed.query)["code"][0]
+
+        server.close()
+        return code
 
     return await run_auth_custom(capture_code)
 
