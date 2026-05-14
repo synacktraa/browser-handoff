@@ -307,43 +307,43 @@
       function getCoords(e) {
           const rect = stream.getBoundingClientRect();
 
-          // Calculate actual image dimensions within the container (object-fit: contain)
+          // Use the actual frame dimensions, not VIEWPORT_WIDTH/HEIGHT. The
+          // template values can disagree with what CDP actually captures
+          // (Xvfb display size, window decorations, devicePixelRatio, or
+          // Page.startScreencast clamping). naturalWidth/Height is the truth.
+          const naturalW = stream.naturalWidth;
+          const naturalH = stream.naturalHeight;
+          if (!naturalW || !naturalH) return null;
+
           const containerAspect = rect.width / rect.height;
-          const imageAspect = VIEWPORT_WIDTH / VIEWPORT_HEIGHT;
+          const imageAspect = naturalW / naturalH;
 
           let imageWidth, imageHeight, offsetX, offsetY;
-
           if (imageAspect > containerAspect) {
-              // Image is wider - padding on top/bottom
               imageWidth = rect.width;
               imageHeight = rect.width / imageAspect;
               offsetX = 0;
               offsetY = (rect.height - imageHeight) / 2;
           } else {
-              // Image is taller - padding on left/right
               imageHeight = rect.height;
               imageWidth = rect.height * imageAspect;
               offsetX = (rect.width - imageWidth) / 2;
               offsetY = 0;
           }
 
-          // Get click position relative to container
           const x = e.clientX - rect.left;
           const y = e.clientY - rect.top;
-
-          // Check if click is within actual image bounds
           if (x < offsetX || x > offsetX + imageWidth ||
               y < offsetY || y > offsetY + imageHeight) {
-              return null; // Outside image - in padding area
+              return null; // padding area
           }
 
-          // Map to viewport coordinates
-          const scaleX = VIEWPORT_WIDTH / imageWidth;
-          const scaleY = VIEWPORT_HEIGHT / imageHeight;
-
+          // Map displayed-pixel → frame-pixel. Input.dispatchMouseEvent
+          // expects page CSS pixels; with devicePixelRatio=1 (default Xvfb),
+          // frame pixels equal viewport CSS pixels, so this is what CDP wants.
           return {
-              x: Math.round((x - offsetX) * scaleX),
-              y: Math.round((y - offsetY) * scaleY)
+              x: Math.round((x - offsetX) * (naturalW / imageWidth)),
+              y: Math.round((y - offsetY) * (naturalH / imageHeight))
           };
       }
 
