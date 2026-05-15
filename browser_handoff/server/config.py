@@ -26,10 +26,16 @@ class ServerConfig:
     every_nth_frame: int = 1
 
     def get_base_url(self) -> str:
-        """Get the base URL for stream URLs."""
+        """Get the base URL for stream URLs.
+
+        When `host` is a wildcard bind (0.0.0.0 or ::), the URL is rewritten
+        to use `localhost` so the link is openable from a browser. Wildcards
+        are bind addresses, not destinations.
+        """
         if self.public_base:
             return self.public_base.rstrip("/")
-        return f"http://{self.host}:{self.port}"
+        host = "localhost" if self.host in ("0.0.0.0", "::", "") else self.host
+        return f"http://{host}:{self.port}"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
