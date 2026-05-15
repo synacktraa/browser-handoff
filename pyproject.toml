@@ -1,0 +1,73 @@
+[project]
+name = "browser-handoff"
+version = "0.1.0"
+description = "Pause Playwright automation, hand the browser to a human, resume when they're done."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Harsh Verma", email = "synacktra.work@gmail.com" }
+]
+requires-python = ">=3.12"
+keywords = [
+    "browser", "automation", "playwright", "handoff",
+    "human-in-the-loop", "streaming", "intervention",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Framework :: AsyncIO",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Testing",
+]
+
+dependencies = [
+    "playwright>=1.40",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "jinja2>=3.1",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+llm = ["litellm>=1.0"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[project.urls]
+Homepage = "https://github.com/synacktraa/browser-handoff"
+Repository = "https://github.com/synacktraa/browser-handoff"
+Issues = "https://github.com/synacktraa/browser-handoff/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["browser_handoff"]
+
+[tool.hatch.build.targets.wheel.sources]
+"browser_handoff" = "browser_handoff"
+
+[tool.hatch.build]
+include = [
+    "browser_handoff/**/*.py",
+    "browser_handoff/**/*.html",
+    "browser_handoff/**/*.jinja",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
