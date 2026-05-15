@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
@@ -43,15 +44,17 @@ class ContentDetection(BaseDetection):
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
         """Register domcontentloaded listener."""
+        loop = asyncio.get_running_loop()
 
         async def on_dom_content_loaded() -> None:
             await callback(self)
 
-        page.on("domcontentloaded", lambda: page._loop.create_task(on_dom_content_loaded()))
+        listener = lambda: loop.create_task(on_dom_content_loaded())
+        page.on("domcontentloaded", listener)
 
         def cleanup() -> None:
             try:
-                page.remove_listener("domcontentloaded", on_dom_content_loaded)
+                page.remove_listener("domcontentloaded", listener)
             except Exception:
                 pass
 

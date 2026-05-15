@@ -94,7 +94,7 @@ class Detection:
 
     @staticmethod
     def llm(
-        model: str = "anthropic/claude-sonnet-4-20250514",
+        model: str = "anthropic/claude-sonnet-4-5",
         condition: str = "",
     ) -> "LLMDetection":
         """Create an LLM-based detection.
@@ -165,18 +165,4 @@ class Detection:
             raise ValueError(f"Unknown detection type: {detection_type}")
 
 
-__all__ = [
-    "Detection",
-    "DetectionResult",
-    "BaseDetection",
-    "ContentDetection",
-    "UrlDetection",
-    "ElementDetection",
-    "AllDetection",
-    "AnyDetection",
-    "NotDetection",
-]
-
-# Conditionally export LLMDetection
-if _HAS_LLM:
-    __all__.append("LLMDetection")
+__all__ = ["Detection", "DetectionResult"]

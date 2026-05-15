@@ -26,7 +26,7 @@ Environment Variables (optional):
     DISCORD_WEBHOOK_URL: Discord webhook for handoff notifications.
 
 Run:
-    uv run examples/claude_oauth_handoff.py
+    uv run examples/claude_oauth_login_handoff.py
 """
 
 from __future__ import annotations
@@ -41,13 +41,9 @@ from ccauth import run_auth_custom
 from ccauth.modes import CallbackServer
 from patchright.async_api import async_playwright
 
-from browser_handoff import (
-    Detection,
-    DiscordNotifier,
-    Handoff,
-    Scenario,
-    ServerConfig,
-)
+from browser_handoff import Handoff, Scenario, ServerConfig
+from browser_handoff.detection import Detection
+from browser_handoff.notifiers import DiscordNotifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -96,6 +92,11 @@ async def run_claude_oauth() -> dict[str, Any]:
                     # /oauth/authorize. If already logged in, returns immediately.
                     result = await handoff.run(page, timeout=30)
                     if result.was_blocked:
+                        if result.timed_out:
+                            raise TimeoutError(
+                                f"Human did not finish login within "
+                                f"{handoff.server.completion_timeout:.0f}s"
+                            )
                         logger.info("Human completed: %s", result.scenario_name)
 
                     # Cloudflare Turnstile may keep the Authorize button

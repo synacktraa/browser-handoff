@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -90,19 +91,24 @@ class DiscordNotifier(Notifier):
         if self.avatar_url:
             payload["avatar_url"] = self.avatar_url
 
-        try:
-            request = Request(
-                self.webhook_url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": "BrowserHandoff/1.0",
-                },
-                method="POST",
-            )
+        request = Request(
+            self.webhook_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "BrowserHandoff/1.0",
+            },
+            method="POST",
+        )
+
+        def do_send() -> int:
             with urlopen(request, timeout=30) as response:
-                # Discord returns 204 No Content on success
-                return response.status in (200, 204)
+                return response.status
+
+        try:
+            status = await asyncio.to_thread(do_send)
+            # Discord returns 204 No Content on success
+            return status in (200, 204)
         except HTTPError as e:
             # Try to read response body for more details
             error_body = ""

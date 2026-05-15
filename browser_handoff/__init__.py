@@ -1,68 +1,46 @@
-"""browser-handoff - Human-in-the-loop fallback for browser automation.
+"""browser-handoff — Human-in-the-loop fallback for browser automation.
 
-A standalone library that provides human-in-the-loop fallback for browser
-automation via CDP-based streaming when automation gets blocked.
+A standalone library that pauses your Playwright automation, hands the
+page off to a human via CDP-based streaming, and resumes when they're
+done — for OAuth, 2FA, payments, identity checks, or any flow that
+requires a human.
 
 Example:
-    from browser_handoff import Handoff, Detection, Scenario
+    from browser_handoff import Handoff, Scenario
+    from browser_handoff.detection import Detection
 
     handoff = Handoff(
         scenarios=[
             Scenario(
                 name="login_required",
-                trigger=Detection.element(selector='input[type="email"]'),
+                trigger=Detection.element(present=['input[type="email"]']),
                 complete=Detection.url(path_contains=["/dashboard"]),
             ),
         ],
     )
 
     result = await handoff.run(page)
-    if result.was_blocked:
+    if result.was_blocked and not result.timed_out:
         print(f"Human completed: {result.scenario_name}")
     await bot_logic(page)
 """
 
-from .detection import (
-    AllDetection,
-    AnyDetection,
-    BaseDetection,
-    ContentDetection,
-    Detection,
-    DetectionResult,
-    ElementDetection,
-    NotDetection,
-    UrlDetection,
-)
-from .handoff import CompletionResult, Handoff, HandoffError, HandoffResult
-from .scenario import Scenario
-from .notifiers import DiscordNotifier, EmailNotifier, Notifier, SlackNotifier
-from .server import ServerConfig, StreamingServer
+from importlib.metadata import PackageNotFoundError, version
 
-__version__ = "0.1.0"
+from .handoff import Handoff, HandoffResult
+from .scenario import Scenario
+from .server import ServerConfig
+
+try:
+    __version__ = version("browser-handoff")
+except PackageNotFoundError:
+    # Package is not installed (e.g. running from a checkout without `pip install -e .`).
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
-    # Main classes
     "Handoff",
-    "HandoffError",
     "HandoffResult",
-    "CompletionResult",
     "Scenario",
-    # Detection
-    "Detection",
-    "DetectionResult",
-    "BaseDetection",
-    "ContentDetection",
-    "UrlDetection",
-    "ElementDetection",
-    "AllDetection",
-    "AnyDetection",
-    "NotDetection",
-    # Server
     "ServerConfig",
-    "StreamingServer",
-    # Notifiers
-    "Notifier",
-    "SlackNotifier",
-    "DiscordNotifier",
-    "EmailNotifier",
+    "__version__",
 ]

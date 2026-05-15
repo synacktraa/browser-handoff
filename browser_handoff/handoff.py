@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -12,8 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, FileSystemLoader
 
-from .config import load_file
-from .detection import BaseDetection, Detection, DetectionResult
+from .config import load_file, load_json, load_yaml
+from .detection.base import BaseDetection, DetectionResult
 from .notifiers import Notifier, notifier_from_dict
 from .scenario import Scenario
 from .server import ServerConfig, StreamingServer
@@ -30,37 +31,32 @@ DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
 
 
 @dataclass
-class CompletionResult:
-    """Result of a handoff session completion."""
-
-    success: bool
-    reason: str
-    detection_type: str
-    matched_detection: BaseDetection | None = None
-    duration: float = 0.0
-
-
-@dataclass
 class HandoffResult:
-    """Result of Handoff.run() call."""
+    """Outcome of a Handoff.run() call.
+
+    Three terminal states:
+      - was_blocked=False                  → no trigger fired within timeout
+      - was_blocked=True, timed_out=False  → human completed the task
+      - was_blocked=True, timed_out=True   → human exceeded completion_timeout
+    """
 
     was_blocked: bool
-    """Whether human intervention was required."""
+    """Whether a trigger fired and a human handoff was performed."""
 
-    scenario_name: str | None
-    """Name of the scenario that triggered, if any."""
+    timed_out: bool = False
+    """Only meaningful if was_blocked: human exceeded completion_timeout."""
 
-    trigger_reason: str | None
-    """Reason the trigger matched, if any."""
+    scenario_name: str | None = None
+    """Name of the scenario that fired."""
 
-    completion_result: CompletionResult | None
-    """Details of completion, if blocked."""
+    trigger_reason: str | None = None
+    """Why the trigger matched (e.g. URL pattern, element appeared)."""
 
+    completion_reason: str | None = None
+    """Why the completion matched. None if not blocked or if timed out."""
 
-class HandoffError(Exception):
-    """Error during handoff process."""
-
-    pass
+    duration: float = 0.0
+    """Seconds spent waiting for the human (0 if not blocked)."""
 
 
 @dataclass
@@ -75,14 +71,14 @@ class Handoff:
             scenarios=[
                 Scenario(
                     name="login_required",
-                    trigger=Detection.element(selector='input[type="email"]'),
+                    trigger=Detection.element(present=['input[type="email"]']),
                     complete=Detection.url(path_contains=["/dashboard"]),
                 ),
             ],
         )
 
         result = await handoff.run(page)
-        if result.was_blocked:
+        if result.was_blocked and not result.timed_out:
             print(f"Human completed: {result.scenario_name}")
         await bot_logic(page)
     """
@@ -98,38 +94,23 @@ class Handoff:
 
     @classmethod
     def from_file(cls, path: str | Path) -> "Handoff":
-        config = load_file(path)
-        return cls.from_dict(config)
+        return cls.from_dict(load_file(path))
 
     @classmethod
     def from_json(cls, json_string: str) -> "Handoff":
-        from .config import load_json
-
-        config = load_json(json_string)
-        return cls.from_dict(config)
+        return cls.from_dict(load_json(json_string))
 
     @classmethod
     def from_yaml(cls, yaml_string: str) -> "Handoff":
-        from .config import load_yaml
-
-        config = load_yaml(yaml_string)
-        return cls.from_dict(config)
+        return cls.from_dict(load_yaml(yaml_string))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Handoff":
         scenarios = [Scenario.from_dict(s) for s in data.get("scenarios", [])]
-
         server_data = data.get("server", {})
         server = ServerConfig.from_dict(server_data) if server_data else ServerConfig()
-
-        notifiers_data = data.get("notifiers", [])
-        notifiers = [notifier_from_dict(n) for n in notifiers_data]
-
-        return cls(
-            scenarios=scenarios,
-            server=server,
-            notifiers=notifiers,
-        )
+        notifiers = [notifier_from_dict(n) for n in data.get("notifiers", [])]
+        return cls(scenarios=scenarios, server=server, notifiers=notifiers)
 
     async def run(
         self,
@@ -142,7 +123,8 @@ class Handoff:
         Registers framenavigated/element-mutation listeners on every scenario's
         trigger, then waits for either:
           - A trigger to fire → run the human handoff and wait for the
-            scenario's completion condition (bounded by self.server.timeout).
+            scenario's completion condition (bounded by
+            self.server.completion_timeout).
           - `timeout` seconds to elapse with no trigger → return was_blocked=False.
 
         The browser context is auto-detected from page.context — there's no
@@ -153,10 +135,12 @@ class Handoff:
             timeout: Max seconds to wait for any trigger to fire before
                 concluding no handoff is needed. Default: 30.0.
                 Does NOT bound the human-completion phase — that uses
-                self.server.timeout (default 600s, set on ServerConfig).
+                self.server.completion_timeout (default 600s, set on
+                ServerConfig).
 
         Returns:
-            HandoffResult describing what happened.
+            HandoffResult describing what happened. Never raises on
+            human-completion timeout — check result.timed_out instead.
         """
         context = page.context
 
@@ -193,38 +177,25 @@ class Handoff:
                     break
 
             if not trigger_event.is_set():
-                try:
+                with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(trigger_event.wait(), timeout=timeout)
-                except asyncio.TimeoutError:
-                    pass
 
             if matched_scenario is None or matched_result is None:
                 logger.info(
                     "handoff.run: no trigger matched within %.1fs (page url=%s)",
                     timeout, page.url,
                 )
-                return HandoffResult(
-                    was_blocked=False,
-                    scenario_name=None,
-                    trigger_reason=None,
-                    completion_result=None,
-                )
+                return HandoffResult(was_blocked=False)
 
             logger.info(
                 "handoff.run: trigger matched (scenario='%s'): %s",
                 matched_scenario.name, matched_result.reason,
             )
-            completion = await self._run_handoff(
+            return await self._run_handoff(
                 page=page,
                 context=context,
                 scenario=matched_scenario,
-                reason=matched_result.reason,
-            )
-            return HandoffResult(
-                was_blocked=True,
-                scenario_name=matched_scenario.name,
                 trigger_reason=matched_result.reason,
-                completion_result=completion,
             )
         finally:
             for cleanup in cleanups:
@@ -236,39 +207,30 @@ class Handoff:
         page: "Page",
         context: Any,
         scenario: Scenario,
-        reason: str,
-    ) -> CompletionResult:
+        trigger_reason: str,
+    ) -> HandoffResult:
         """Stream the page to a human, wait for the scenario's completion."""
-        import time
-
         start_time = time.time()
         session_id = str(uuid.uuid4())[:8]
         server: StreamingServer | None = None
         server_task: asyncio.Task[None] | None = None
         listener_cleanups: list[Any] = []
         completion_event = asyncio.Event()
-        completion_result: CompletionResult | None = None
+        completion_reason: str | None = None
 
         async def on_completion_detected(detection: BaseDetection) -> None:
-            nonlocal completion_result
+            nonlocal completion_reason
             if completion_event.is_set():
                 return
-
             result = await detection.check(page)
             if result.matched:
-                completion_result = CompletionResult(
-                    success=True,
-                    reason=result.reason,
-                    detection_type=result.detection_type,
-                    matched_detection=detection,
-                    duration=time.time() - start_time,
-                )
+                completion_reason = result.reason
                 completion_event.set()
 
         try:
             server = StreamingServer(config=self.server)
             server_task = asyncio.create_task(server.start())
-            await asyncio.sleep(0.5)  # let the server bind
+            await self._wait_for_port(self.server.host, self.server.port)
 
             viewport_size = self.viewport_size
             try:
@@ -288,56 +250,56 @@ class Handoff:
                 session_id=session_id,
                 page=page,
                 context=context,
-                reason=reason,
+                reason=trigger_reason,
                 viewport_size=viewport_size,
             )
 
-            cleanup = scenario.complete.register_listeners(page, on_completion_detected)
-            listener_cleanups.append(cleanup)
+            listener_cleanups.append(
+                scenario.complete.register_listeners(page, on_completion_detected)
+            )
 
             stream_url = server.get_stream_url(session_id)
 
             logger.info("=" * 70)
             logger.info("HANDOFF: Human intervention required")
-            logger.info("Reason: %s", reason)
+            logger.info("Reason: %s", trigger_reason)
             logger.info("Scenario: %s", scenario.name)
             logger.info("Stream URL: %s", stream_url)
             logger.info("=" * 70)
 
-            await self._send_notifications(reason, stream_url)
+            await self._send_notifications(trigger_reason, stream_url)
 
             # Already complete? (e.g. page raced past completion before we
             # finished setting up listeners.)
             initial = await scenario.complete.check(page)
             if initial.matched:
-                completion_result = CompletionResult(
-                    success=True,
-                    reason=initial.reason,
-                    detection_type=initial.detection_type,
-                    duration=time.time() - start_time,
-                )
+                completion_reason = initial.reason
                 completion_event.set()
 
+            timed_out = False
             try:
                 await asyncio.wait_for(
                     completion_event.wait(),
-                    timeout=self.server.timeout,
+                    timeout=self.server.completion_timeout,
                 )
             except asyncio.TimeoutError:
-                raise HandoffError(
-                    f"Handoff timeout: user did not complete task within {self.server.timeout}s"
+                timed_out = True
+                logger.warning(
+                    "Handoff completion_timeout: human did not finish "
+                    "within %.0fs", self.server.completion_timeout,
                 )
 
             await server.stop_screencast(session_id)
 
-            if completion_result:
-                await server.notify_task_completed(session_id, completion_result.reason)
-                await asyncio.sleep(0.5)  # give the message time to send
+            if not timed_out and completion_reason:
+                await server.notify_task_completed(session_id, completion_reason)
 
-            return completion_result or CompletionResult(
-                success=False,
-                reason="Unknown completion",
-                detection_type="unknown",
+            return HandoffResult(
+                was_blocked=True,
+                timed_out=timed_out,
+                scenario_name=scenario.name,
+                trigger_reason=trigger_reason,
+                completion_reason=None if timed_out else completion_reason,
                 duration=time.time() - start_time,
             )
 
@@ -353,7 +315,7 @@ class Handoff:
             if server_task and not server_task.done():
                 # server.stop() already signaled should_exit and closed the
                 # client connections. Let uvicorn unwind on its own; only
-                # cancel as a last resort if it hangs (shouldn't happen).
+                # cancel as a last resort if it hangs.
                 try:
                     await asyncio.wait_for(server_task, timeout=5.0)
                 except asyncio.TimeoutError:
@@ -362,6 +324,34 @@ class Handoff:
                         await server_task
                 except asyncio.CancelledError:
                     pass
+
+    @staticmethod
+    async def _wait_for_port(
+        host: str, port: int, timeout: float = 5.0, interval: float = 0.05
+    ) -> None:
+        """Poll until uvicorn is accepting connections on host:port.
+
+        Replaces a magic asyncio.sleep — works regardless of how slow the
+        machine is to bind, and returns the moment the port is ready.
+        """
+        # 0.0.0.0 / :: are bind addresses, not connect addresses.
+        connect_host = "127.0.0.1" if host in ("0.0.0.0", "") else (
+            "::1" if host == "::" else host
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                _, writer = await asyncio.open_connection(connect_host, port)
+                writer.close()
+                with suppress(Exception):
+                    await writer.wait_closed()
+                return
+            except OSError:
+                await asyncio.sleep(interval)
+        logger.warning(
+            "Streaming server did not accept connections on %s:%d within %.1fs",
+            connect_host, port, timeout,
+        )
 
     async def _send_notifications(self, reason: str, stream_url: str) -> None:
         if not self.notifiers:
@@ -373,16 +363,11 @@ class Handoff:
 
         async def send_notification(notifier: Notifier) -> None:
             try:
-                await notifier.send(
-                    title=title,
-                    message=message,
-                    urgency="critical",
-                )
+                await notifier.send(title=title, message=message, urgency="critical")
             except Exception as e:
                 logger.error(
                     "Failed to send notification via %s: %s",
-                    type(notifier).__name__,
-                    e,
+                    type(notifier).__name__, e,
                 )
 
         await asyncio.gather(

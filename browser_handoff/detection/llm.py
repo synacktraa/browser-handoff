@@ -40,14 +40,14 @@ class LLMDetection(BaseDetection):
 
     Example:
         detection = LLMDetection(
-            model="anthropic/claude-sonnet-4-20250514",
+            model="anthropic/claude-sonnet-4-5",
             condition="The page is showing a CAPTCHA or security challenge",
         )
     """
 
     detection_type: str = field(default="llm", init=False)
 
-    model: str = "anthropic/claude-sonnet-4-20250514"
+    model: str = "anthropic/claude-sonnet-4-5"
     condition: str = ""
 
     # Internal state for frame diff detection
@@ -60,32 +60,26 @@ class LLMDetection(BaseDetection):
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
         """Register periodic screenshot comparison."""
+        loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
 
         async def periodic_check() -> None:
             while not stop_event.is_set():
                 try:
-                    # Take screenshot and compute hash
                     screenshot = await page.screenshot(type="jpeg", quality=50)
                     current_hash = _compute_frame_hash(screenshot)
-
-                    # Check if frame changed significantly
                     if self._last_frame_hash is None or current_hash != self._last_frame_hash:
                         self._last_frame_hash = current_hash
                         await callback(self)
-
                 except Exception:
-                    # Page might be navigating
                     pass
 
-                # Wait before next check
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=self._check_interval)
                 except asyncio.TimeoutError:
                     pass
 
-        # Start periodic check task
-        task = page._loop.create_task(periodic_check())
+        task = loop.create_task(periodic_check())
 
         def cleanup() -> None:
             stop_event.set()
@@ -164,6 +158,6 @@ class LLMDetection(BaseDetection):
     def from_dict(cls, data: dict[str, Any]) -> "LLMDetection":
         """Create from dictionary."""
         return cls(
-            model=data.get("model", "anthropic/claude-sonnet-4-20250514"),
+            model=data.get("model", "anthropic/claude-sonnet-4-5"),
             condition=data.get("condition", ""),
         )

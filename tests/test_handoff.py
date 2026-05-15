@@ -4,14 +4,13 @@ import json
 import pytest
 
 from browser_handoff import (
-    CompletionResult,
-    Detection,
     Handoff,
     HandoffResult,
     Scenario,
     ServerConfig,
-    SlackNotifier,
 )
+from browser_handoff.detection import Detection
+from browser_handoff.notifiers import SlackNotifier
 
 
 class TestHandoffCreation:
@@ -65,7 +64,7 @@ class TestHandoffCreation:
             ],
             "server": {
                 "port": 8080,
-                "timeout": 300,
+                "completion_timeout": 300,
             },
             "notifiers": [
                 {"type": "slack", "webhook_url": "https://test.com/webhook"},
@@ -75,7 +74,7 @@ class TestHandoffCreation:
         assert len(handoff.scenarios) == 1
         assert handoff.scenarios[0].name == "challenge"
         assert handoff.server.port == 8080
-        assert handoff.server.timeout == 300
+        assert handoff.server.completion_timeout == 300
         assert len(handoff.notifiers) == 1
 
     def test_from_dict_requires_scenarios(self):
@@ -175,8 +174,6 @@ class TestHandoffWithEnvVars:
             },
         }))
 
-        # Note: port would be string after interpolation
-        # Real implementation might need type coercion
         handoff = Handoff.from_file(config_file)
         assert handoff.server.public_base == "https://proxy.example.com"
 
@@ -205,68 +202,46 @@ notifiers:
         assert handoff.notifiers[0].webhook_url == "https://hooks.slack.com/secret"
 
 
-class TestCompletionResult:
-    """Tests for CompletionResult dataclass."""
-
-    def test_creation(self):
-        """Test creating a CompletionResult."""
-        result = CompletionResult(
-            success=True,
-            reason="URL matched callback pattern",
-            detection_type="url",
-            duration=5.5,
-        )
-        assert result.success is True
-        assert result.reason == "URL matched callback pattern"
-        assert result.detection_type == "url"
-        assert result.duration == 5.5
-
-    def test_default_values(self):
-        """Test default values."""
-        result = CompletionResult(
-            success=False,
-            reason="Timeout",
-            detection_type="timeout",
-        )
-        assert result.matched_detection is None
-        assert result.duration == 0.0
-
-
 class TestHandoffResult:
-    """Tests for HandoffResult dataclass."""
+    """Tests for the flattened HandoffResult dataclass."""
 
     def test_not_blocked(self):
-        """Test HandoffResult when not blocked."""
-        result = HandoffResult(
-            was_blocked=False,
-            scenario_name=None,
-            trigger_reason=None,
-            completion_result=None,
-        )
+        result = HandoffResult(was_blocked=False)
         assert result.was_blocked is False
+        assert result.timed_out is False
         assert result.scenario_name is None
         assert result.trigger_reason is None
-        assert result.completion_result is None
+        assert result.completion_reason is None
+        assert result.duration == 0.0
 
-    def test_was_blocked(self):
-        """Test HandoffResult when blocked."""
-        completion = CompletionResult(
-            success=True,
-            reason="URL matched /dashboard",
-            detection_type="url",
-            duration=10.5,
-        )
+    def test_completed(self):
         result = HandoffResult(
             was_blocked=True,
+            timed_out=False,
             scenario_name="login_required",
             trigger_reason="Login form detected",
-            completion_result=completion,
+            completion_reason="URL matched /dashboard",
+            duration=10.5,
         )
         assert result.was_blocked is True
+        assert result.timed_out is False
         assert result.scenario_name == "login_required"
         assert result.trigger_reason == "Login form detected"
-        assert result.completion_result.success is True
-        assert result.completion_result.duration == 10.5
+        assert result.completion_reason == "URL matched /dashboard"
+        assert result.duration == 10.5
+
+    def test_timed_out(self):
+        result = HandoffResult(
+            was_blocked=True,
+            timed_out=True,
+            scenario_name="login_required",
+            trigger_reason="Login form detected",
+            completion_reason=None,
+            duration=600.0,
+        )
+        assert result.was_blocked is True
+        assert result.timed_out is True
+        assert result.completion_reason is None
 
 
 class TestComplexConfig:
@@ -469,7 +444,7 @@ scenarios:
         - ".h-captcha"
 server:
   port: 8080
-  timeout: 600
+  completion_timeout: 600
 """
         handoff = Handoff.from_yaml(yaml_str)
         assert len(handoff.scenarios) == 2
@@ -511,7 +486,7 @@ scenarios:
 
 server:
   port: 8080
-  timeout: 300
+  completion_timeout: 300
 
 notifiers:
   - type: slack
@@ -522,5 +497,5 @@ notifiers:
         assert handoff.scenarios[0].name == "cloudflare_turnstile"
         assert handoff.scenarios[1].name == "google_oauth"
         assert handoff.server.port == 8080
-        assert handoff.server.timeout == 300
+        assert handoff.server.completion_timeout == 300
         assert len(handoff.notifiers) == 1

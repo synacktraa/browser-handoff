@@ -16,7 +16,8 @@ LLM-based detection (optional): `pip install browser-handoff[llm]`
 
 ```python
 from playwright.async_api import async_playwright
-from browser_handoff import Detection, Handoff, Scenario
+from browser_handoff import Handoff, Scenario
+from browser_handoff.detection import Detection
 
 handoff = Handoff(
     scenarios=[
@@ -34,7 +35,7 @@ async with async_playwright() as pw:
     await page.goto("https://example.com/start")
 
     result = await handoff.run(page, timeout=30)
-    if result.was_blocked:
+    if result.was_blocked and not result.timed_out:
         print(f"Human completed: {result.scenario_name}")
 
     # Continue automation
@@ -45,7 +46,7 @@ async with async_playwright() as pw:
 
 A `Scenario` is a pair: a `trigger` that says "stop, a human is needed" and a `complete` that says "OK, they're done."
 
-`handoff.run(page, timeout=...)` watches the page for any scenario's trigger. If none fires within `timeout` seconds, it returns immediately and your script keeps going. If one does fire, it starts a local streaming server, surfaces the URL (printed to logs and pushed to your notifiers), and waits until the matching `complete` condition matches before returning.
+`handoff.run(page, timeout=...)` watches the page for any scenario's trigger. If none fires within `timeout` seconds, it returns `HandoffResult(was_blocked=False)` and your script keeps going. If one fires, it starts a local streaming server, surfaces the URL (printed to logs and pushed to your notifiers), and waits until the matching `complete` condition matches — or until `server.completion_timeout` elapses, in which case the result has `timed_out=True`. `handoff.run` never raises on completion timeout; check the result.
 
 ## Detection
 
@@ -71,7 +72,7 @@ Detection.not_(d1)         # NOT
 Optional. Each notifier gets the stream URL when a handoff starts.
 
 ```python
-from browser_handoff import DiscordNotifier, EmailNotifier, SlackNotifier
+from browser_handoff.notifiers import DiscordNotifier, EmailNotifier, SlackNotifier
 
 Handoff(
     scenarios=[...],
@@ -89,7 +90,7 @@ Handoff(
 
 ## Server
 
-Defaults to `0.0.0.0:8080` with a 10-minute human-completion budget.
+Defaults to `127.0.0.1:8080` (loopback only) with a 10-minute human-completion budget. Set `host="0.0.0.0"` to expose on the LAN — e.g. for phone access or tunnel forwarding.
 
 ```python
 from browser_handoff import ServerConfig
@@ -97,9 +98,10 @@ from browser_handoff import ServerConfig
 Handoff(
     scenarios=[...],
     server=ServerConfig(
+        host="127.0.0.1",                             # "0.0.0.0" to expose on LAN
         port=8080,
         public_base="https://my-tunnel.example.com",  # what notifiers link to
-        timeout=600,                                  # max human wait (s)
+        completion_timeout=600,                       # max human wait (s)
         jpeg_quality=75,
         every_nth_frame=1,
     ),
@@ -186,7 +188,7 @@ handoff = Handoff.from_file("handoff.yaml")
 
 ## Examples
 
-See [`examples/`](examples/) for a working Claude OAuth flow that pairs `browser-handoff` with [`ccauth`](https://github.com/synacktraa/ccauth).
+See [`examples/claude_oauth_login_handoff.py`](examples/claude_oauth_login_handoff.py) for a working Claude OAuth flow that pairs `browser-handoff` with [`ccauth`](https://github.com/synacktraa/ccauth).
 
 ## License
 

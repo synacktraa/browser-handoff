@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -92,15 +93,20 @@ class SlackNotifier(Notifier):
         if self.channel:
             payload["channel"] = self.channel
 
-        try:
-            request = Request(
-                self.webhook_url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
+        request = Request(
+            self.webhook_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        def do_send() -> int:
             with urlopen(request, timeout=10) as response:
-                return response.status == 200
+                return response.status
+
+        try:
+            status = await asyncio.to_thread(do_send)
+            return status == 200
         except Exception as e:
             logger.error(f"SlackNotifier: Failed to send notification: {e}")
             return False

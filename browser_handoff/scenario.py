@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import Any
 
-from .detection import BaseDetection, Detection
-
-if TYPE_CHECKING:
-    pass
+from .detection import Detection
+from .detection.base import BaseDetection
 
 
 @dataclass

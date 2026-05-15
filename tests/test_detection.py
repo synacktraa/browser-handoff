@@ -1,15 +1,11 @@
 """Tests for detection types."""
 
 import pytest
-from browser_handoff.detection import (
-    AllDetection,
-    AnyDetection,
-    ContentDetection,
-    Detection,
-    ElementDetection,
-    NotDetection,
-    UrlDetection,
-)
+from browser_handoff.detection import Detection
+from browser_handoff.detection.combinators import AllDetection, AnyDetection, NotDetection
+from browser_handoff.detection.content import ContentDetection
+from browser_handoff.detection.element import ElementDetection
+from browser_handoff.detection.url import UrlDetection
 
 
 class TestDetectionFactory:

@@ -101,10 +101,9 @@ class EmailNotifier(Notifier):
         """
         msg.attach(MIMEText(html, "html"))
 
-        # Send in executor to avoid blocking
-        loop = asyncio.get_event_loop()
+        # Send in executor to avoid blocking the event loop.
         try:
-            await loop.run_in_executor(None, self._send_sync, msg)
+            await asyncio.to_thread(self._send_sync, msg)
             return True
         except Exception as e:
             logger.error(f"EmailNotifier: Failed to send email: {e}")

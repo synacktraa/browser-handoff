@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
@@ -46,17 +47,21 @@ class UrlDetection(BaseDetection):
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
         """Register framenavigated listener."""
+        loop = asyncio.get_running_loop()
 
         async def on_frame_navigated(frame: Any) -> None:
-            # Only check main frame navigation
             if frame == page.main_frame:
                 await callback(self)
 
-        page.on("framenavigated", lambda frame: page._loop.create_task(on_frame_navigated(frame)))
+        # The listener page.on() registers IS the lambda — store it so
+        # remove_listener can find it. Using a module-level function
+        # reference would point at a different object than what was added.
+        listener = lambda frame: loop.create_task(on_frame_navigated(frame))
+        page.on("framenavigated", listener)
 
         def cleanup() -> None:
             try:
-                page.remove_listener("framenavigated", on_frame_navigated)
+                page.remove_listener("framenavigated", listener)
             except Exception:
                 pass
 
