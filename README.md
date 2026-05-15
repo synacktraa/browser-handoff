@@ -1,328 +1,158 @@
 # browser-handoff
 
-A standalone library that provides human-in-the-loop fallback for browser automation. Seamlessly hand off control to humans for tasks that require genuine human interaction - authentication, payments, identity verification, or any workflow where automation isn't appropriate.
+Pause your browser automation, hand the page to a human, resume when they're done.
 
-## Why browser-handoff?
+When automation hits something only a human should do — login, 2FA, OAuth consent, payment, identity check — `browser-handoff` streams the live browser to an operator over the web, waits for them to finish, then gives control back to your script.
 
-Some tasks simply require a human:
-- **Authentication flows** - Login with 2FA, OAuth consent screens, SSO
-- **Payment processing** - Entering payment details, confirming purchases
-- **Identity verification** - Document uploads, biometric checks
-- **Account setup** - Registration forms, consent agreements
-- **Sensitive actions** - Approving transactions, confirming deletions
-
-Browser-handoff detects when your automation reaches these points and streams the browser to a human operator who can complete the task, then seamlessly returns control to your automation.
-
-## Features
-
-- **Detection System**: Flexible rules to detect when human intervention is needed
-- **CDP Streaming**: Real-time browser streaming via Chrome DevTools Protocol
-- **Event-Driven**: Efficient event-based detection instead of polling
-- **Notifications**: Alert humans via Slack, Discord, email, or custom notifiers
-- **Config Files**: JSON/YAML configuration with environment variable interpolation
-- **LLM Detection**: Optional AI-powered detection using vision models
-
-## Installation
+## Install
 
 ```bash
 pip install browser-handoff
 ```
 
-For LLM-based detection:
+LLM-based detection (optional): `pip install browser-handoff[llm]`
 
-```bash
-pip install browser-handoff[llm]
-```
-
-## Quick Start
-
-### Simple Usage (Recommended)
-
-Use `wait_if_blocked()` - it checks if human intervention is needed and waits if so:
+## 30-second example
 
 ```python
 from playwright.async_api import async_playwright
-from browser_handoff import Handoff, Detection, Scenario
+from browser_handoff import Detection, Handoff, Scenario
 
 handoff = Handoff(
     scenarios=[
         Scenario(
-            name="login_form",
-            # Trigger when login form is visible (not just /login URL)
-            trigger=Detection.element(selector='input[type="email"]'),
-            # Complete when logged in
+            name="login",
+            trigger=Detection.url(path_contains=["/login"]),
             complete=Detection.url(path_contains=["/dashboard"]),
         ),
     ],
 )
 
-async with async_playwright() as p:
-    browser = await p.chromium.launch(headless=False)
+async with async_playwright() as pw:
+    browser = await pw.chromium.launch(headless=False)
     page = await browser.new_page()
-
     await page.goto("https://example.com/start")
 
-    # Check if human intervention needed, wait if so
-    # trigger_timeout allows time for redirects to complete (default: 5s)
-    result = await handoff.wait_if_blocked(page, trigger_timeout=5)
-
+    result = await handoff.run(page, timeout=30)
     if result.was_blocked:
         print(f"Human completed: {result.scenario_name}")
 
-    # Continue with bot logic
+    # Continue automation
     await page.click("#continue")
 ```
 
-### Multiple Scenarios
+## How it works
+
+A `Scenario` is a pair: a `trigger` that says "stop, a human is needed" and a `complete` that says "OK, they're done."
+
+`handoff.run(page, timeout=...)` watches the page for any scenario's trigger. If none fires within `timeout` seconds, it returns immediately and your script keeps going. If one does fire, it starts a local streaming server, surfaces the URL (printed to logs and pushed to your notifiers), and waits until the matching `complete` condition matches before returning.
+
+## Detection
+
+`Detection` is the factory for conditions:
 
 ```python
-handoff = Handoff(
-    scenarios=[
-        Scenario(
-            name="login_required",
-            # Use Detection.any() to trigger on multiple conditions
-            trigger=Detection.any([
-                Detection.element(selector='input[type="email"]'),
-                Detection.element(selector='input[type="password"]'),
-            ]),
-            complete=Detection.url(path_contains=["/dashboard"]),
-        ),
-        Scenario(
-            name="oauth_consent",
-            trigger=Detection.url(host_equals=["accounts.google.com"]),
-            # Use Detection.all() when all conditions must match
-            complete=Detection.all([
-                Detection.url(host_equals=["localhost"]),
-                Detection.url(query_contains=["code="]),
-            ]),
-        ),
-        Scenario(
-            name="payment_flow",
-            trigger=Detection.element(selector='#card-number'),
-            complete=Detection.url(path_contains=["/confirmation"]),
-        ),
-    ],
-    server=ServerConfig(port=8080, timeout=600),
-)
+Detection.url(host_equals=["accounts.google.com"], path_contains=["/oauth"])
+Detection.element(present=["#captcha"], visible=[".modal"], missing=[".loaded"])
+Detection.content(title_contains=["Sign In"], body_matches=[r"verify.*you"])
+Detection.llm(model="anthropic/claude-sonnet-4-5", condition="Login form is visible")
 ```
 
-### Context Manager (Event-Based Monitoring)
-
-Use `guard()` when you need to monitor for triggers during bot execution:
+Combine them:
 
 ```python
-async with handoff.guard(page) as session:
-    await page.click("#begin-checkout")
-    # If a trigger fires mid-execution, waits for human
-    await page.fill("#promo-code", "SAVE10")
-
-if session.was_blocked:
-    print(f"Human helped with: {session.scenario_name}")
+Detection.any([d1, d2])    # OR
+Detection.all([d1, d2])    # AND
+Detection.not_(d1)         # NOT
 ```
 
-## Detection Types
+## Notifications
 
-### Content Detection
-
-Check page title or body for substrings or regex patterns:
+Optional. Each notifier gets the stream URL when a handoff starts.
 
 ```python
-Detection.content(
-    title_contains=["Sign In", "Login"],
-    title_matches=[r"Step \d+ of \d+"],
-    body_contains=["enter your password", "verify your identity"],
-    body_matches=[r"welcome.*back"],
-)
-```
+from browser_handoff import DiscordNotifier, EmailNotifier, SlackNotifier
 
-### URL Detection
-
-Check URL components:
-
-```python
-Detection.url(
-    scheme_equals="https",
-    host_equals=["localhost", "accounts.google.com"],
-    host_not_equals=["blocked-domain.com"],
-    path_matches=["/callback", "/oauth/.*"],
-    path_contains=["/auth/", "/login"],
-    query_contains=["code=", "token="],
-)
-```
-
-### Element Detection
-
-Check for DOM element presence, absence, or visibility:
-
-```python
-Detection.element(
-    present=["input[type=password]", "#login-form"],
-    missing=[".user-menu", ".logout-button"],
-    visible=[".modal-overlay"],
-    hidden=[".loading-spinner"],
-)
-```
-
-### LLM Detection (Optional)
-
-Use AI vision to analyze screenshots:
-
-```python
-Detection.llm(
-    model="anthropic/claude-sonnet-4-20250514",
-    condition="The page is showing a login form or asking for user credentials",
-)
-```
-
-Requires `pip install browser-handoff[llm]` and appropriate API keys.
-
-### Combinators
-
-Combine detections with logical operators:
-
-```python
-# AND - all conditions must match
-Detection.all([
-    Detection.url(path_matches=["/dashboard"]),
-    Detection.element(present=[".user-avatar"]),
-])
-
-# OR - any condition must match
-Detection.any([
-    Detection.element(present=["#success"]),
-    Detection.content(body_contains=["Welcome"]),
-])
-
-# NOT - invert a condition
-Detection.not_(
-    Detection.element(present=[".error-message"])
-)
-```
-
-## Scenarios
-
-Scenarios define trigger-completion pairs where each trigger has its own specific completion condition. Only one scenario can be active at a time - when a scenario's trigger is detected, its corresponding completion condition is used.
-
-Use `Detection.any()` to trigger on multiple conditions (OR logic), and `Detection.all()` when all conditions must be met (AND logic).
-
-### Programmatic Usage
-
-```python
-from browser_handoff import Handoff, Detection, Scenario, ServerConfig
-
-handoff = Handoff(
-    scenarios=[
-        Scenario(
-            name="login_flow",
-            # Trigger on login pages
-            trigger=Detection.any([
-                Detection.url(path_contains=["/login", "/signin", "/auth"]),
-                Detection.element(present=["input[type=password]"]),
-            ]),
-            # Complete when logged in
-            complete=Detection.any([
-                Detection.url(path_contains=["/dashboard", "/home", "/account"]),
-                Detection.element(present=[".user-menu", ".logout-button"]),
-            ]),
-        ),
-        Scenario(
-            name="two_factor_auth",
-            # Trigger on 2FA/MFA pages
-            trigger=Detection.any([
-                Detection.url(path_contains=["/2fa", "/mfa", "/verify"]),
-                Detection.element(present=[".otp-input", "#authenticator-code"]),
-            ]),
-            # Complete when verification done
-            complete=Detection.url(path_contains=["/dashboard", "/home"]),
-        ),
-        Scenario(
-            name="payment_checkout",
-            # Trigger on payment pages
-            trigger=Detection.any([
-                Detection.url(path_contains=["/checkout", "/payment", "/billing"]),
-                Detection.element(present=[".stripe-card", "#card-element"]),
-            ]),
-            # Complete when order confirmed
-            complete=Detection.all([
-                Detection.url(path_contains=["/confirmation", "/thank-you"]),
-                Detection.not_(Detection.element(present=[".payment-error"])),
-            ]),
-        ),
-        Scenario(
-            name="oauth_consent",
-            # Trigger on OAuth provider consent screens
-            trigger=Detection.url(host_equals=["accounts.google.com"]),
-            # Complete when redirected back with auth code
-            complete=Detection.all([
-                Detection.url(host_equals=["localhost"]),
-                Detection.url(query_contains=["code="]),
-            ]),
+Handoff(
+    scenarios=[...],
+    notifiers=[
+        SlackNotifier(webhook_url="https://hooks.slack.com/..."),
+        DiscordNotifier(webhook_url="https://discord.com/api/webhooks/..."),
+        EmailNotifier(
+            smtp_host="smtp.gmail.com", smtp_port=587,
+            username="bot@x.com", password="...",
+            to=["ops@x.com"],
         ),
     ],
-    server=ServerConfig(port=8080),
 )
-
-async with handoff.guard(page) as session:
-    await page.click("#login")
-    # Automatically detects which scenario matched
-    # Uses that scenario's completion condition
-
-    if session.was_blocked:
-        print(f"Scenario: {session.scenario_name}")
-        print(f"Completed via: {session.completion_result.detection_type}")
 ```
 
-## Configuration Files
+## Server
+
+Defaults to `0.0.0.0:8080` with a 10-minute human-completion budget.
+
+```python
+from browser_handoff import ServerConfig
+
+Handoff(
+    scenarios=[...],
+    server=ServerConfig(
+        port=8080,
+        public_base="https://my-tunnel.example.com",  # what notifiers link to
+        timeout=600,                                  # max human wait (s)
+        jpeg_quality=75,
+        every_nth_frame=1,
+    ),
+)
+```
+
+## Config files
+
+JSON or YAML, with `${VAR}` interpolation:
 
 <table>
-<tr>
-<th>JSON</th>
-<th>YAML</th>
-</tr>
+<tr><th>JSON</th><th>YAML</th></tr>
 <tr>
 <td>
 
 ```json
 {
   "scenarios": [{
-    "name": "login_flow",
+    "name": "login",
     "trigger": {
       "type": "any",
       "conditions": [
-        {
-          "type": "url",
-          "path_contains": ["/login"]
-        },
-        {
-          "type": "element",
-          "present": ["input[type=password]"]
-        }
+        { "type": "url",
+          "path_contains": ["/login"] },
+        { "type": "element",
+          "present": ["input[type=password]"] }
       ]
     },
     "complete": {
-      "type": "url",
-      "path_contains": ["/dashboard"]
+      "type": "not",
+      "condition": {
+        "type": "url",
+        "path_contains": ["/login"]
+      }
     }
   }],
   "server": {
     "port": 8080,
-    "public_base": "${HANDOFF_PUBLIC_URL}",
-    "timeout": 600
+    "public_base": "${HANDOFF_URL}"
   },
-  "notifiers": [{
-    "type": "slack",
-    "webhook_url": "${SLACK_WEBHOOK_URL}"
-  }]
+  "notifiers": [
+    { "type": "slack",
+      "webhook_url": "${SLACK_WEBHOOK}" }
+  ]
 }
 ```
 
 </td>
-
 <td>
 
 ```yaml
 scenarios:
-  - name: login_flow
+  - name: login
     trigger:
       type: any
       conditions:
@@ -331,144 +161,33 @@ scenarios:
         - type: element
           present: ["input[type=password]"]
     complete:
-      type: url
-      path_contains: ["/dashboard"]
+      type: not
+      condition:
+        type: url
+        path_contains: ["/login"]
 
 server:
   port: 8080
-  public_base: ${HANDOFF_PUBLIC_URL}
-  timeout: 600
+  public_base: ${HANDOFF_URL}
 
 notifiers:
   - type: slack
-    webhook_url: ${SLACK_WEBHOOK_URL}
+    webhook_url: ${SLACK_WEBHOOK}
 ```
 
 </td>
 </tr>
 </table>
 
-### Loading Configuration
-
 ```python
-from browser_handoff import Handoff
-
-# From file
-handoff = Handoff.from_file("config.json")
-handoff = Handoff.from_file("config.yaml")
-
-# From string
-handoff = Handoff.from_json(json_string)
-handoff = Handoff.from_yaml(yaml_string)
+handoff = Handoff.from_file("handoff.yaml")
+# or: Handoff.from_json(s) / Handoff.from_yaml(s) / Handoff.from_dict(d)
 ```
 
-## Notifiers
+## Examples
 
-### Slack
-
-```python
-from browser_handoff import SlackNotifier
-
-notifier = SlackNotifier(
-    webhook_url="https://hooks.slack.com/services/...",
-    channel="#alerts",  # Optional
-    username="Browser Bot",  # Optional
-)
-```
-
-### Discord
-
-```python
-from browser_handoff import DiscordNotifier
-
-notifier = DiscordNotifier(
-    webhook_url="https://discord.com/api/webhooks/...",
-    username="Browser Bot",  # Optional
-    avatar_url="https://example.com/avatar.png",  # Optional
-)
-```
-
-### Email
-
-```python
-from browser_handoff import EmailNotifier
-
-notifier = EmailNotifier(
-    smtp_host="smtp.gmail.com",
-    smtp_port=587,
-    username="bot@example.com",
-    password="app-password",
-    to=["ops@example.com", "admin@example.com"],
-    use_tls=True,
-)
-```
-
-## Server Configuration
-
-```python
-from browser_handoff import ServerConfig
-
-config = ServerConfig(
-    host="0.0.0.0",      # Bind address
-    port=8080,           # Port number
-    public_base="https://proxy.example.com",  # Public URL for notifications
-    timeout=600,         # Timeout in seconds
-)
-```
-
-## Manual Control
-
-For more control over the handoff process:
-
-```python
-# Check if currently blocked
-is_blocked, result = await handoff.is_blocked(page)
-if is_blocked:
-    print(f"Blocked: {result.reason}")
-
-# Check if task is complete
-is_complete, result = await handoff.is_complete(page)
-
-# Manually trigger handoff
-completion = await handoff.wait_for_human(
-    page=page,
-    context=context,
-    reason="Manual intervention requested",
-)
-print(f"Completed via: {completion.detection_type}")
-```
-
-## Environment Variables
-
-Configuration files support `${VAR_NAME}` syntax for environment variable interpolation:
-
-```json
-{
-  "server": {
-    "public_base": "${HANDOFF_URL}"
-  },
-  "notifiers": [
-    {
-      "type": "slack",
-      "webhook_url": "${SLACK_WEBHOOK}"
-    }
-  ]
-}
-```
-
-## Development
-
-```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Run specific tests
-pytest tests/test_detection.py -v
-```
+See [`examples/`](examples/) for a working Claude OAuth flow that pairs `browser-handoff` with [`ccauth`](https://github.com/synacktraa/ccauth).
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
