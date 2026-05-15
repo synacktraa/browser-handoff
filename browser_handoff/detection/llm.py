@@ -41,7 +41,7 @@ class LLMDetection(BaseDetection):
     Example:
         detection = LLMDetection(
             model="anthropic/claude-sonnet-4-5",
-            condition="The page is showing a CAPTCHA or security challenge",
+            condition="The page is showing a login form or asking for credentials",
         )
     """
 

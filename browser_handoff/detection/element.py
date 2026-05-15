@@ -83,9 +83,9 @@ class ElementDetection(BaseDetection):
 
     Example:
         detection = ElementDetection(
-            present=[".captcha-container", "#challenge-form"],
-            missing=["button#submit", ".main-content"],
-            visible=[".modal-overlay"],
+            present=["input[type=password]", "#login-form"],
+            missing=[".user-menu", ".logout-button"],
+            visible=[".consent-modal"],
             hidden=[".loading-spinner"],
         )
     """

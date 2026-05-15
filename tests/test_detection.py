@@ -71,12 +71,12 @@ class TestDetectionFactory:
         """Test creating detection from dict - content type."""
         data = {
             "type": "content",
-            "title_contains": ["Just a moment"],
-            "body_contains": ["cloudflare"],
+            "title_contains": ["Sign In"],
+            "body_contains": ["please log in"],
         }
         detection = Detection.from_dict(data)
         assert isinstance(detection, ContentDetection)
-        assert detection.title_contains == ["Just a moment"]
+        assert detection.title_contains == ["Sign In"]
 
     def test_from_dict_url(self):
         """Test creating detection from dict - URL type."""
@@ -93,12 +93,12 @@ class TestDetectionFactory:
         """Test creating detection from dict - element type."""
         data = {
             "type": "element",
-            "present": [".captcha"],
-            "visible": [".modal"],
+            "present": ["input[type=password]"],
+            "visible": [".consent-modal"],
         }
         detection = Detection.from_dict(data)
         assert isinstance(detection, ElementDetection)
-        assert detection.present == [".captcha"]
+        assert detection.present == ["input[type=password]"]
 
     def test_from_dict_all_combinator(self):
         """Test creating detection from dict - all combinator."""

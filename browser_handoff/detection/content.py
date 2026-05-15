@@ -21,8 +21,8 @@ class ContentDetection(BaseDetection):
 
     Example:
         detection = ContentDetection(
-            title_contains=["Just a moment", "Access Denied"],
-            body_contains=["challenges.cloudflare.com"],
+            title_contains=["Sign In", "Login Required"],
+            body_contains=["please enter your password"],
         )
     """
 

@@ -31,14 +31,14 @@ class TestHandoffCreation:
         handoff = Handoff(
             scenarios=[
                 Scenario(
-                    name="cloudflare",
-                    trigger=Detection.content(title_contains=["Just a moment"]),
-                    complete=Detection.element(missing=[".cf-turnstile"]),
+                    name="login",
+                    trigger=Detection.url(path_contains=["/login"]),
+                    complete=Detection.url(path_contains=["/dashboard"]),
                 ),
                 Scenario(
-                    name="captcha",
-                    trigger=Detection.element(present=[".captcha"]),
-                    complete=Detection.element(missing=[".captcha"]),
+                    name="payment",
+                    trigger=Detection.element(present=["#card-number"]),
+                    complete=Detection.url(path_contains=["/confirmation"]),
                 ),
             ],
             server=ServerConfig(port=3000),
@@ -47,8 +47,8 @@ class TestHandoffCreation:
             ],
         )
         assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "cloudflare"
-        assert handoff.scenarios[1].name == "captcha"
+        assert handoff.scenarios[0].name == "login"
+        assert handoff.scenarios[1].name == "payment"
         assert handoff.server.port == 3000
         assert len(handoff.notifiers) == 1
 
@@ -87,15 +87,15 @@ class TestHandoffCreation:
         json_str = json.dumps({
             "scenarios": [
                 {
-                    "name": "captcha",
-                    "trigger": {"type": "element", "present": ["#captcha"]},
-                    "complete": {"type": "content", "body_contains": ["Success"]},
+                    "name": "payment",
+                    "trigger": {"type": "element", "present": ["#card-number"]},
+                    "complete": {"type": "content", "body_contains": ["Order confirmed"]},
                 },
             ],
         })
         handoff = Handoff.from_json(json_str)
         assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "captcha"
+        assert handoff.scenarios[0].name == "payment"
 
     def test_from_yaml(self):
         """Test creating Handoff from YAML string."""
@@ -315,11 +315,11 @@ class TestScenario:
     def test_scenario_creation(self):
         """Test creating a Scenario programmatically."""
         scenario = Scenario(
-            name="cloudflare_challenge",
-            trigger=Detection.content(title_contains=["Just a moment"]),
-            complete=Detection.element(missing=[".cf-turnstile"]),
+            name="login_required",
+            trigger=Detection.url(path_contains=["/login"]),
+            complete=Detection.url(path_contains=["/dashboard"]),
         )
-        assert scenario.name == "cloudflare_challenge"
+        assert scenario.name == "login_required"
         assert scenario.trigger is not None
         assert scenario.complete is not None
 
@@ -340,12 +340,12 @@ class TestScenario:
     def test_scenario_from_dict(self):
         """Test creating a Scenario from dictionary."""
         data = {
-            "name": "captcha_challenge",
-            "trigger": {"type": "element", "present": ["#captcha"]},
-            "complete": {"type": "element", "missing": ["#captcha"]},
+            "name": "password_required",
+            "trigger": {"type": "element", "present": ["input[type=password]"]},
+            "complete": {"type": "element", "missing": ["input[type=password]"]},
         }
         scenario = Scenario.from_dict(data)
-        assert scenario.name == "captcha_challenge"
+        assert scenario.name == "password_required"
         assert scenario.trigger is not None
         assert scenario.complete is not None
 
@@ -367,9 +367,9 @@ class TestHandoffWithScenarios:
         handoff = Handoff(
             scenarios=[
                 Scenario(
-                    name="cloudflare_challenge",
-                    trigger=Detection.content(title_contains=["Just a moment"]),
-                    complete=Detection.element(missing=[".cf-turnstile"]),
+                    name="oauth_consent",
+                    trigger=Detection.content(title_contains=["Authorize"]),
+                    complete=Detection.url(query_contains=["code="]),
                 ),
                 Scenario(
                     name="login_required",
@@ -380,7 +380,7 @@ class TestHandoffWithScenarios:
             server=ServerConfig(port=8080),
         )
         assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "cloudflare_challenge"
+        assert handoff.scenarios[0].name == "oauth_consent"
         assert handoff.scenarios[1].name == "login_required"
 
     def test_handoff_with_scenarios_from_dict(self):
@@ -388,22 +388,22 @@ class TestHandoffWithScenarios:
         config = {
             "scenarios": [
                 {
-                    "name": "cloudflare_challenge",
-                    "trigger": {"type": "content", "title_contains": ["Just a moment"]},
-                    "complete": {"type": "element", "missing": [".cf-turnstile"]},
+                    "name": "login_required",
+                    "trigger": {"type": "content", "title_contains": ["Sign In"]},
+                    "complete": {"type": "element", "missing": ["input[type=password]"]},
                 },
                 {
-                    "name": "recaptcha",
-                    "trigger": {"type": "element", "present": [".g-recaptcha"]},
-                    "complete": {"type": "element", "missing": [".g-recaptcha"]},
+                    "name": "payment",
+                    "trigger": {"type": "element", "present": ["#card-number"]},
+                    "complete": {"type": "element", "missing": ["#card-number"]},
                 },
             ],
             "server": {"port": 9000},
         }
         handoff = Handoff.from_dict(config)
         assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "cloudflare_challenge"
-        assert handoff.scenarios[1].name == "recaptcha"
+        assert handoff.scenarios[0].name == "login_required"
+        assert handoff.scenarios[1].name == "payment"
 
     def test_handoff_with_scenarios_from_json(self):
         """Test creating Handoff with scenarios from JSON string."""
@@ -424,32 +424,32 @@ class TestHandoffWithScenarios:
         """Test creating Handoff with scenarios from YAML string."""
         yaml_str = """
 scenarios:
-  - name: cloudflare_challenge
+  - name: login_required
     trigger:
       type: content
       title_contains:
-        - "Just a moment"
+        - "Sign In"
     complete:
       type: element
       missing:
-        - ".cf-turnstile"
-  - name: hcaptcha
+        - "input[type=password]"
+  - name: mfa_required
     trigger:
       type: element
       present:
-        - ".h-captcha"
+        - ".otp-input"
     complete:
       type: element
       missing:
-        - ".h-captcha"
+        - ".otp-input"
 server:
   port: 8080
   completion_timeout: 600
 """
         handoff = Handoff.from_yaml(yaml_str)
         assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "cloudflare_challenge"
-        assert handoff.scenarios[1].name == "hcaptcha"
+        assert handoff.scenarios[0].name == "login_required"
+        assert handoff.scenarios[1].name == "mfa_required"
         assert handoff.server.port == 8080
 
     def test_handoff_with_scenarios_from_file(self, tmp_path):
@@ -457,20 +457,20 @@ server:
         config_file = tmp_path / "scenarios.yaml"
         config_file.write_text("""
 scenarios:
-  - name: cloudflare_turnstile
+  - name: login_with_consent
     trigger:
       type: all
       conditions:
         - type: content
           title_contains:
-            - "Just a moment"
+            - "Sign In"
         - type: element
           present:
-            - ".cf-turnstile"
+            - "input[type=password]"
     complete:
       type: element
       missing:
-        - ".cf-turnstile"
+        - "input[type=password]"
 
   - name: google_oauth
     trigger:
@@ -494,7 +494,7 @@ notifiers:
 """)
         handoff = Handoff.from_file(config_file)
         assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "cloudflare_turnstile"
+        assert handoff.scenarios[0].name == "login_with_consent"
         assert handoff.scenarios[1].name == "google_oauth"
         assert handoff.server.port == 8080
         assert handoff.server.completion_timeout == 300

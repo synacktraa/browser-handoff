@@ -48,13 +48,19 @@ A `Scenario` is a pair: a `trigger` that says "stop, a human is needed" and a `c
 
 `handoff.run(page, timeout=...)` watches the page for any scenario's trigger. If none fires within `timeout` seconds, it returns `HandoffResult(was_blocked=False)` and your script keeps going. If one fires, it starts a local streaming server, surfaces the URL (printed to logs and pushed to your notifiers), and waits until the matching `complete` condition matches — or until `server.completion_timeout` elapses, in which case the result has `timed_out=True`. `handoff.run` never raises on completion timeout; check the result.
 
+## Scope: what this is *not*
+
+`browser-handoff` is for flows gated by **credentials or session state** — login pages, 2FA prompts, OAuth consent screens, payment forms, identity verification, T&C acceptance.
+
+It is **not** an anti-bot bypass. Sites that fingerprint Playwright/CDP sessions as automation will keep refusing the flow even after a human solves a CAPTCHA, Cloudflare Turnstile, or similar challenge — the session itself is flagged, not the response. If that's your problem, you need an anti-detection browser, not a handoff tool.
+
 ## Detection
 
 `Detection` is the factory for conditions:
 
 ```python
 Detection.url(host_equals=["accounts.google.com"], path_contains=["/oauth"])
-Detection.element(present=["#captcha"], visible=[".modal"], missing=[".loaded"])
+Detection.element(present=["input[type=password]"], visible=[".consent-modal"], missing=[".user-menu"])
 Detection.content(title_contains=["Sign In"], body_matches=[r"verify.*you"])
 Detection.llm(model="anthropic/claude-sonnet-4-5", condition="Login form is visible")
 ```

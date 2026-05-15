@@ -19,9 +19,9 @@ class Scenario:
 
     Example:
         scenario = Scenario(
-            name="cloudflare_challenge",
-            trigger=Detection.content(title_contains=["Just a moment"]),
-            complete=Detection.element(missing=[".cf-turnstile"]),
+            name="login_required",
+            trigger=Detection.url(path_contains=["/login"]),
+            complete=Detection.url(path_contains=["/dashboard"]),
         )
     """
 

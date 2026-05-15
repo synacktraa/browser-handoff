@@ -41,7 +41,7 @@ class StreamingServer:
             session_id="abc123",
             page=page,
             context=context,
-            reason="Cloudflare challenge detected",
+            reason="Login required",
         )
 
         # Wait for user to complete task

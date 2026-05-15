@@ -26,8 +26,8 @@ class Detection:
     Example:
         # Content detection
         detection = Detection.content(
-            title_contains=["Just a moment"],
-            body_contains=["challenges.cloudflare.com"],
+            title_contains=["Sign In"],
+            body_contains=["please log in"],
         )
 
         # URL detection
