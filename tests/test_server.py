@@ -57,6 +57,8 @@ class TestServerConfig:
             "port": 8080,
             "public_base": "https://example.com",
             "timeout": 120.0,
+            "jpeg_quality": 75,
+            "every_nth_frame": 1,
         }
 
     def test_from_dict(self):
