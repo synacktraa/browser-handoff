@@ -222,11 +222,7 @@
       </div>
 
       <div id="stream-container">
-        <img
-          id="stream"
-          src="/stream?session={{ session_id }}"
-          alt="Browser Stream"
-        />
+        <img id="stream" alt="Browser Stream" />
         <div id="completion-overlay">
           <div class="completion-checkmark">&#x2705;</div>
           <div class="completion-title">Task Completed</div>
@@ -249,24 +245,11 @@
       // Determine WebSocket protocol based on page protocol
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?session=${SESSION_ID}`);
+      ws.binaryType = 'blob';
       let mouseThrottle = null;
 
       // Track stream connection
       let streamConnected = false;
-
-      stream.onload = () => {
-          streamConnected = true;
-          updateStatus();
-      };
-
-      // Check if stream is actually showing frames
-      const checkStreamInterval = setInterval(() => {
-          if (stream.naturalWidth > 0 && stream.naturalHeight > 0 && !streamConnected) {
-              streamConnected = true;
-              updateStatus();
-              clearInterval(checkStreamInterval);
-          }
-      }, 500);
 
       function updateStatus() {
           if (streamConnected) {
@@ -278,12 +261,48 @@
           }
       }
 
+      // Latest-frame-wins client-side. We may receive frames faster than
+      // the screen can paint; only the newest unrendered frame matters.
+      // requestAnimationFrame coalesces multiple receive ticks into a
+      // single paint per refresh cycle.
+      let pendingBlob = null;
+      let rafScheduled = false;
+      let currentObjectUrl = null;
+
+      function renderPendingFrame() {
+          rafScheduled = false;
+          if (!pendingBlob) return;
+          const url = URL.createObjectURL(pendingBlob);
+          pendingBlob = null;
+          const previous = currentObjectUrl;
+          currentObjectUrl = url;
+          stream.src = url;
+          if (previous) URL.revokeObjectURL(previous);
+          if (!streamConnected) {
+              streamConnected = true;
+              updateStatus();
+          }
+      }
+
       ws.onopen = () => console.log('WS Connected');
       ws.onerror = (e) => console.error('WS Error:', e);
 
-      ws.onmessage = (event) => {
-          const message = JSON.parse(event.data);
+      ws.onclose = () => {
+          streamConnected = false;
+          updateStatus();
+      };
 
+      ws.onmessage = (event) => {
+          if (typeof event.data !== 'string') {
+              // Binary frame: drop any unrendered older frame, keep newest.
+              pendingBlob = event.data;
+              if (!rafScheduled) {
+                  rafScheduled = true;
+                  requestAnimationFrame(renderPendingFrame);
+              }
+              return;
+          }
+          const message = JSON.parse(event.data);
           if (message.type === 'task_completed') {
               showCompletionOverlay(message.reason);
           }

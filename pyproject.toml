@@ -8,15 +8,13 @@ license-files = ["LICENSE"]
 authors = [
     { name = "synacktra", email = "synacktra.work@gmail.com" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 keywords = ["browser", "automation", "playwright", "handoff", "human-in-the-loop", "streaming"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Internet :: WWW/HTTP :: Browsers",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -46,9 +44,6 @@ Repository = "https://github.com/synacktraa/browser-handoff"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/browser_handoff"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

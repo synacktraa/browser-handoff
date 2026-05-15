@@ -22,6 +22,8 @@ class ServerConfig:
     port: int = 8080
     public_base: str | None = None
     timeout: float = 600.0
+    jpeg_quality: int = 75
+    every_nth_frame: int = 1
 
     def get_base_url(self) -> str:
         """Get the base URL for stream URLs."""
@@ -36,6 +38,8 @@ class ServerConfig:
             "port": self.port,
             "public_base": self.public_base,
             "timeout": self.timeout,
+            "jpeg_quality": self.jpeg_quality,
+            "every_nth_frame": self.every_nth_frame,
         }
 
     @classmethod
@@ -46,4 +50,6 @@ class ServerConfig:
             port=data.get("port", 8080),
             public_base=data.get("public_base"),
             timeout=data.get("timeout", 600.0),
+            jpeg_quality=data.get("jpeg_quality", 75),
+            every_nth_frame=data.get("every_nth_frame", 1),
         )

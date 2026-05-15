@@ -24,10 +24,12 @@ class HandoffSession:
     cdp: "CDPSession"
     reason: str
     viewport_size: dict[str, int] = field(default_factory=lambda: DEFAULT_VIEWPORT.copy())
-    frame_queue: asyncio.Queue[bytes] = field(default_factory=lambda: asyncio.Queue(maxsize=3))
     capture_task: asyncio.Task[None] | None = None
     accessed: bool = False
     latest_frame: bytes | None = None
+    frame_seq: int = 0
+    frame_condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    closed: bool = False
     websockets: list["WebSocket"] = field(default_factory=list)
     completed: bool = False
     completion_reason: str | None = None

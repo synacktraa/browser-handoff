@@ -351,9 +351,17 @@ class Handoff:
                 await server.stop()
 
             if server_task and not server_task.done():
-                server_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await server_task
+                # server.stop() already signaled should_exit and closed the
+                # client connections. Let uvicorn unwind on its own; only
+                # cancel as a last resort if it hangs (shouldn't happen).
+                try:
+                    await asyncio.wait_for(server_task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    server_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await server_task
+                except asyncio.CancelledError:
+                    pass
 
     async def _send_notifications(self, reason: str, stream_url: str) -> None:
         if not self.notifiers:

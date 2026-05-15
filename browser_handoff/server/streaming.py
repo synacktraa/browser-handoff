@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse
 from jinja2 import Environment, FileSystemLoader
 
 from .config import ServerConfig
@@ -95,33 +95,9 @@ class StreamingServer:
 
             return self._get_html_client(session, session_state.reason)
 
-        @app.get("/stream", response_model=None)
-        async def stream(session: str = "default"):
-            """MJPEG stream endpoint."""
-            session_state = self.sessions.get(session)
-            if not session_state:
-                return HTMLResponse("Session not found", status_code=404)
-
-            async def generate():
-                try:
-                    while True:
-                        frame_data = await asyncio.wait_for(
-                            session_state.frame_queue.get(), timeout=120.0
-                        )
-                        yield (
-                            b"--frame\r\n"
-                            b"Content-Type: image/jpeg\r\n\r\n" + frame_data + b"\r\n"
-                        )
-                except TimeoutError:
-                    pass
-
-            return StreamingResponse(
-                generate(), media_type="multipart/x-mixed-replace; boundary=frame"
-            )
-
         @app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket, session: str = "default"):
-            """WebSocket endpoint for control commands."""
+            """WebSocket endpoint: binary frames out, JSON control in."""
             await websocket.accept()
 
             session_state = self.sessions.get(session)
@@ -132,6 +108,16 @@ class StreamingServer:
             session_state.websockets.append(websocket)
             cdp = session_state.cdp
             page = session_state.page
+
+            # Push the most recent frame immediately so the client paints
+            # something before the next screencast tick arrives.
+            if session_state.latest_frame is not None:
+                with suppress(Exception):
+                    await websocket.send_bytes(session_state.latest_frame)
+
+            sender_task = asyncio.create_task(
+                self._stream_frames_to_ws(websocket, session_state)
+            )
 
             try:
                 with suppress(WebSocketDisconnect):
@@ -152,10 +138,41 @@ class StreamingServer:
             except Exception as e:
                 logger.error(f"WebSocket error: {e}")
             finally:
+                sender_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await sender_task
                 if websocket in session_state.websockets:
                     session_state.websockets.remove(websocket)
 
         return app
+
+    async def _stream_frames_to_ws(
+        self, websocket: WebSocket, session: HandoffSession
+    ) -> None:
+        """Push the latest frame to a single WS, dropping intermediate frames.
+
+        Latest-frame-wins: if capture produces N new frames while we're
+        awaiting send_bytes (slow client / tunnel / WAN), the next loop
+        iteration sees only the newest one and skips the rest. That gives
+        smooth playback under load instead of building a backlog.
+        """
+        last_seq = -1
+        while True:
+            async with session.frame_condition:
+                await session.frame_condition.wait_for(
+                    lambda: session.closed or session.frame_seq != last_seq
+                )
+                if session.closed:
+                    return
+                frame = session.latest_frame
+                last_seq = session.frame_seq
+
+            if frame is None:
+                continue
+            try:
+                await websocket.send_bytes(frame)
+            except Exception:
+                return
 
     async def register_session(
         self,
@@ -190,16 +207,26 @@ class StreamingServer:
         )
         self.sessions[session_id] = session
 
-        # Take initial screenshot as first frame
+        # Take initial screenshot as first frame so the page paints
+        # immediately when a client connects, before screencast warms up.
         with suppress(Exception):
-            screenshot_bytes = await page.screenshot(type="jpeg", quality=85)
-            session.latest_frame = screenshot_bytes
-            session.frame_queue.put_nowait(screenshot_bytes)
+            screenshot_bytes = await page.screenshot(
+                type="jpeg", quality=self.config.jpeg_quality
+            )
+            await self._publish_frame(session, screenshot_bytes)
 
         # Start capture immediately
         session.capture_task = asyncio.create_task(self._capture_frames(session))
 
         return session
+
+    @staticmethod
+    async def _publish_frame(session: HandoffSession, frame_bytes: bytes) -> None:
+        """Publish a new frame and wake all per-WS senders."""
+        async with session.frame_condition:
+            session.latest_frame = frame_bytes
+            session.frame_seq += 1
+            session.frame_condition.notify_all()
 
     async def unregister_session(self, session_id: str) -> None:
         """Unregister a session.
@@ -238,41 +265,45 @@ class StreamingServer:
         return self.sessions.get(session_id)
 
     async def _capture_frames(self, session: HandoffSession) -> None:
-        """Capture frames from CDP screencast."""
+        """Capture frames from CDP screencast and publish via Condition."""
         cdp = session.cdp
+        loop = asyncio.get_running_loop()
 
         def on_frame(params: dict[str, Any]) -> None:
             frame_session_id = params.get("sessionId")
             data = params.get("data", "")
 
+            # Ack first so Chrome keeps producing — otherwise capture stalls.
             if frame_session_id:
                 asyncio.create_task(
                     cdp.send("Page.screencastFrameAck", {"sessionId": frame_session_id})
                 )
 
-            if data:
-                with suppress(Exception):
-                    frame_bytes = base64.b64decode(data)
-                    session.latest_frame = frame_bytes
-                    if session.frame_queue.full():
-                        session.frame_queue.get_nowait()
-                    session.frame_queue.put_nowait(frame_bytes)
+            if not data:
+                return
+            try:
+                frame_bytes = base64.b64decode(data)
+            except Exception:
+                return
+            # CDP fires this on the loop thread but from a sync callback —
+            # schedule the async publish without awaiting it.
+            loop.create_task(self._publish_frame(session, frame_bytes))
 
         cdp.on("Page.screencastFrame", on_frame)
         await cdp.send(
             "Page.startScreencast",
             {
                 "format": "jpeg",
-                "quality": 85,
+                "quality": self.config.jpeg_quality,
                 "maxWidth": session.viewport_size["width"],
                 "maxHeight": session.viewport_size["height"],
-                "everyNthFrame": 1,
+                "everyNthFrame": self.config.every_nth_frame,
             },
         )
 
         try:
             while True:
-                await asyncio.sleep(1)
+                await asyncio.sleep(3600)
         except asyncio.CancelledError:
             with suppress(Exception):
                 await cdp.send("Page.stopScreencast")
@@ -501,6 +532,21 @@ class StreamingServer:
         await self._server.serve()
 
     async def stop(self) -> None:
-        """Stop the server."""
+        """Stop the server gracefully.
+
+        Close WebSockets from the server side BEFORE asking uvicorn to exit
+        so their handlers unwind via the WebSocketDisconnect path instead
+        of getting cancelled mid-await (which surfaces noisy CancelledError
+        tracebacks from starlette/uvicorn's protocol layer).
+        """
+        for session in list(self.sessions.values()):
+            # Wake up per-WS sender tasks so they exit cleanly.
+            async with session.frame_condition:
+                session.closed = True
+                session.frame_condition.notify_all()
+            for ws in list(session.websockets):
+                with suppress(Exception):
+                    await ws.close()
+
         if self._server:
             self._server.should_exit = True
