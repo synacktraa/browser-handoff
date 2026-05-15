@@ -42,6 +42,7 @@ class LLMDetection(BaseDetection):
         detection = LLMDetection(
             model="anthropic/claude-sonnet-4-5",
             condition="The page is showing a login form or asking for credentials",
+            api_key="sk-ant-...",  # optional; falls back to provider env var
         )
     """
 
@@ -49,6 +50,9 @@ class LLMDetection(BaseDetection):
 
     model: str = "anthropic/claude-sonnet-4-5"
     condition: str = ""
+    # If None, litellm picks up the key from the provider's env var
+    # (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, ...).
+    api_key: str | None = None
 
     # Internal state for frame diff detection
     _last_frame_hash: str | None = field(default=None, init=False, repr=False)
@@ -105,9 +109,9 @@ class LLMDetection(BaseDetection):
             base64_image = base64.b64encode(screenshot).decode("utf-8")
 
             # Call LLM
-            response = await acompletion(
-                model=self.model,
-                messages=[
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {
                         "role": "user",
@@ -120,13 +124,18 @@ class LLMDetection(BaseDetection):
                             },
                             {
                                 "type": "text",
-                                "text": USER_PROMPT_TEMPLATE.format(condition=self.condition),
+                                "text": USER_PROMPT_TEMPLATE.format(
+                                    condition=self.condition
+                                ),
                             },
                         ],
                     },
                 ],
-                max_tokens=10,
-            )
+                "max_tokens": 10,
+            }
+            if self.api_key:
+                kwargs["api_key"] = self.api_key
+            response = await acompletion(**kwargs)
 
             # Parse response
             answer = response.choices[0].message.content.strip().lower()
@@ -148,11 +157,14 @@ class LLMDetection(BaseDetection):
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
-        return {
+        result: dict[str, Any] = {
             "type": self.detection_type,
             "model": self.model,
             "condition": self.condition,
         }
+        if self.api_key:
+            result["api_key"] = self.api_key
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LLMDetection":
@@ -160,4 +172,5 @@ class LLMDetection(BaseDetection):
         return cls(
             model=data.get("model", "anthropic/claude-sonnet-4-5"),
             condition=data.get("condition", ""),
+            api_key=data.get("api_key"),
         )

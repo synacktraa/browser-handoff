@@ -96,17 +96,21 @@ class Detection:
     def llm(
         model: str = "anthropic/claude-sonnet-4-5",
         condition: str = "",
+        api_key: str | None = None,
     ) -> "LLMDetection":
         """Create an LLM-based detection.
 
         Requires the 'llm' extra: pip install browser-handoff[llm]
+
+        If `api_key` is None, litellm picks up the key from the provider's
+        env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...).
         """
         if not _HAS_LLM:
             raise ImportError(
                 "LLM detection requires 'litellm' package. "
                 "Install with: pip install browser-handoff[llm]"
             )
-        return LLMDetection(model=model, condition=condition)
+        return LLMDetection(model=model, condition=condition, api_key=api_key)
 
     @staticmethod
     def all(conditions: list[BaseDetection]) -> AllDetection:
