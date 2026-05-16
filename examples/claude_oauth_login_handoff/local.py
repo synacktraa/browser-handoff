@@ -25,12 +25,21 @@ Flow:
 Environment Variables (optional):
     DISCORD_WEBHOOK_URL: Discord webhook for handoff notifications.
 
+CLI:
+    --public-base URL   Public base URL to surface in notifications and the
+                        logged stream link (e.g. an ngrok tunnel, or a
+                        Daytona preview URL when running this script inside
+                        a sandbox). When omitted, falls back to
+                        http://<host>:<port>.
+
 Run:
-    uv run examples/claude_oauth_login_handoff.py
+    uv run examples/claude_oauth_login_handoff/local.py
+    uv run examples/claude_oauth_login_handoff/local.py --public-base https://abc.daytona.preview
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import os
@@ -54,7 +63,7 @@ logger = logging.getLogger(__name__)
 STREAMING_PORT = 8080
 
 
-async def run_claude_oauth() -> dict[str, Any]:
+async def run_claude_oauth(public_base: str | None = None) -> dict[str, Any]:
     async def capture_code(authorize_url: str, server: CallbackServer) -> str:
         notifiers = []
         if webhook := os.getenv("DISCORD_WEBHOOK_URL"):
@@ -70,7 +79,14 @@ async def run_claude_oauth() -> dict[str, Any]:
                     complete=Detection.url(path_contains=["/oauth/authorize"]),
                 ),
             ],
-            server=ServerConfig(port=STREAMING_PORT),
+            # 0.0.0.0 so the stream is reachable from a phone over LAN, an
+            # ngrok tunnel, or a Daytona preview URL — `public_base`, when
+            # set, replaces what gets printed in logs and pushed to notifiers.
+            server=ServerConfig(
+                host="0.0.0.0",
+                port=STREAMING_PORT,
+                public_base=public_base,
+            ),
             notifiers=notifiers,
         )
 
@@ -99,8 +115,8 @@ async def run_claude_oauth() -> dict[str, Any]:
                             )
                         logger.info("Human completed: %s", result.scenario_name)
 
-                    # Cloudflare Turnstile may keep the Authorize button
-                    # disabled briefly — wait for it to be clickable.
+                    # The Authorize button may be briefly disabled while
+                    # the page finishes settling — wait for it to be visible.
                     btn = page.get_by_role("button", name="Authorize", exact=True).first
                     await btn.wait_for(state="visible", timeout=60_000)
                     await btn.click()
@@ -117,8 +133,20 @@ async def run_claude_oauth() -> dict[str, Any]:
     return await run_auth_custom(capture_code)
 
 
-async def main():
-    result = await run_claude_oauth()
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    parser.add_argument(
+        "--public-base",
+        default=None,
+        help="Public base URL the human will use to reach the stream "
+        "(e.g. a tunnel or sandbox preview URL).",
+    )
+    return parser.parse_args()
+
+
+async def main() -> None:
+    args = _parse_args()
+    result = await run_claude_oauth(public_base=args.public_base)
     logger.info("OAuth successful")
     logger.info("Access token: %s...", result["claudeAiOauth"]["accessToken"][:20])
     logger.info("Scopes: %s", result["claudeAiOauth"]["scopes"])
