@@ -194,7 +194,7 @@ handoff = Handoff.from_file("handoff.yaml")
 
 ## Examples
 
-See [`examples/claude_oauth_login_handoff.py`](examples/claude_oauth_login_handoff.py) for a working Claude OAuth flow that pairs `browser-handoff` with [`ccauth`](https://github.com/synacktraa/ccauth).
+See [`examples/claude_oauth_login_handoff/`](examples/claude_oauth_login_handoff/) for a working Claude OAuth flow that pairs `browser-handoff` with [`ccauth`](https://github.com/synacktraa/ccauth) — `local.py` runs the flow on your machine; `in_daytona.py` runs the exact same `local.py` inside a Daytona sandbox so the human can log in from anywhere via the sandbox's preview URL.
 
 ## License
 
