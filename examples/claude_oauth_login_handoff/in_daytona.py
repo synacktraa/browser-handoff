@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["daytona"]
+# dependencies = ["daytona", "rich"]
 # ///
 """
 Run examples/claude_oauth_login_handoff/local.py inside a Daytona sandbox.
@@ -13,26 +13,28 @@ Daytona preview URL to log in.
 Architecture (compared to a local run):
   - local.py drives Chrome (patchright) inside the sandbox under xvfb
   - browser-handoff's streaming server binds 0.0.0.0:8080 in the sandbox
-  - Daytona exposes port 8080 via a preview URL
+  - Daytona exposes port 8080 via a signed preview URL (token in the URL,
+    so the operator can open it without being logged into daytona.io)
   - this script passes that preview URL into local.py as --public-base
-    so the human-facing stream link in logs/notifications uses it
+    so the human-facing stream link in the rich panel and notifier
+    messages uses it
   - CDP traffic stays loopback inside the sandbox; only the JPEG frames
     and control messages cross the wire (same wire profile as any
     cloud-hosted browser session)
 
 Image build (declarative, runs once and is cached by Daytona):
   - debian-slim with python 3.12
-  - apt: curl, ca-certs, xvfb, xauth, dbus-x11
+  - apt: curl, ca-certs, xvfb, xauth, dbus-x11, git
   - uv (via the official installer, symlinked into /usr/local/bin)
   - patchright + Chrome (baked into the image so sandbox boot is fast)
 
 Boot sequence per run:
   1. Create sandbox from the image (cached after first build)
-  2. Resolve the Daytona preview URL for port 8080
+  2. Resolve a signed Daytona preview URL for port 8080 (1h validity)
   3. `curl` the latest local.py from this repo on master
   4. `xvfb-run -a uv run local.py --public-base <preview-url>`
-  5. Tail sandbox logs to this terminal so the operator sees the
-     stream URL that browser-handoff prints
+  5. Tail sandbox stdout to this terminal — local.py's rich panels
+     come through with ANSI colors intact
 
 Environment Variables:
     DAYTONA_API_KEY:      required, your Daytona API key
@@ -46,19 +48,17 @@ Run:
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import shlex
+import sys
 from typing import TYPE_CHECKING
+
+from rich.console import Console
 
 if TYPE_CHECKING:
     from daytona import AsyncSandbox
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+console = Console()
 
 LOCAL_PY_URL = (
     "https://raw.githubusercontent.com/synacktraa/browser-handoff/master/"
@@ -77,7 +77,8 @@ def _build_image():
         Image.debian_slim("3.12")
         .run_commands(
             # System packages: curl for fetching local.py, xvfb+xauth for
-            # a headless X display so patchright's headed Chrome can run.
+            # a headless X display so patchright's headed Chrome can run,
+            # git so uv can resolve our `git+https://...` script deps.
             "apt-get update && "
             "apt-get install -y --no-install-recommends "
             "curl ca-certificates xvfb xauth dbus-x11 git && "
@@ -90,10 +91,7 @@ def _build_image():
         # Bake patchright + Chrome into the image so each sandbox boot
         # doesn't re-download ~200MB of browser binary.
         .pip_install("patchright>=1.48")
-        .run_commands(
-            "patchright install chrome",
-            "patchright install-deps chrome",
-        )
+        .run_commands("patchright install --with-deps chrome")
     )
 
 
@@ -109,8 +107,6 @@ def _extract_log_text(log: object) -> str:
         return ""
     if isinstance(log, str):
         return log
-    # Some SDK versions surface a combined `output`; others split into
-    # `stdout` / `stderr`. Prefer whichever is populated.
     output = getattr(log, "output", None) or ""
     if output:
         return output
@@ -120,11 +116,12 @@ def _extract_log_text(log: object) -> str:
 
 
 async def _tail_logs(sandbox: AsyncSandbox, cmd_id: str) -> None:
-    """Stream the running command's stdout/stderr to this terminal.
+    """Stream the running command's stdout/stderr to this terminal verbatim.
 
-    Daytona's get_session_command_logs returns the full log buffer each
-    call — we track how much we've already printed and only emit new
-    bytes. Stops when the command finishes.
+    No per-line prefix — local.py emits multi-line rich panels with Unicode
+    box-drawing; a `[sandbox]` prefix per line would break the borders.
+    Raw passthrough also preserves the ANSI escape codes rich emitted, so
+    panels render with colors in the operator's terminal.
     """
     seen = 0
     while True:
@@ -132,13 +129,12 @@ async def _tail_logs(sandbox: AsyncSandbox, cmd_id: str) -> None:
             log = await sandbox.process.get_session_command_logs(SESSION_ID, cmd_id)
             text = _extract_log_text(log)
         except Exception as e:
-            logger.warning("log fetch failed: %s", e)
+            console.print(f"[yellow]log fetch failed: {e}[/yellow]")
             text = ""
 
         if len(text) > seen:
-            for line in text[seen:].splitlines():
-                if line:
-                    logger.info("[sandbox] %s", line)
+            sys.stdout.write(text[seen:])
+            sys.stdout.flush()
             seen = len(text)
 
         try:
@@ -159,24 +155,31 @@ async def main() -> None:
         SessionExecuteRequest,
     )
 
-    # Forward DISCORD_WEBHOOK_URL into the sandbox if the operator set it
-    # locally; everything else local.py needs is fetched on the fly.
-    env_vars: dict[str, str] = {}
+    # Forward DISCORD_WEBHOOK_URL into the sandbox if set, and silence
+    # uv's progress bar (the `\x02\x02\x02` cursor-control codes) since it
+    # adds nothing to a captured-log demo.
+    env_vars: dict[str, str] = {"UV_NO_PROGRESS": "1"}
     if webhook := os.getenv("DISCORD_WEBHOOK_URL"):
         env_vars["DISCORD_WEBHOOK_URL"] = webhook
 
     async with AsyncDaytona() as daytona:
-        logger.info("Creating sandbox (first run builds the image ~1-2GB; cached after)...")
+        console.rule("[bold]browser-handoff × Daytona — Claude OAuth[/bold]")
+        console.print(
+            "[cyan]→[/cyan] Creating sandbox "
+            "(first run builds the image; cached after)"
+        )
         sandbox = await daytona.create(
             CreateSandboxFromImageParams(
                 image=_build_image(),
                 resources=Resources(cpu=2, memory=4, disk=10),
-                env_vars=env_vars or None,
+                env_vars=env_vars,
             ),
             timeout=600,
-            on_snapshot_create_logs=lambda log: logger.info("[image] %s", log),
+            on_snapshot_create_logs=lambda log: console.print(
+                f"  [dim]{log.rstrip()}[/dim]"
+            ),
         )
-        logger.info("Sandbox %s ready", sandbox.id)
+        console.print(f"[cyan]→[/cyan] Sandbox [bold]{sandbox.id}[/bold] ready")
 
         try:
             await sandbox.process.create_session(SESSION_ID)
@@ -190,14 +193,16 @@ async def main() -> None:
                 STREAMING_PORT, expires_in_seconds=3600
             )
             preview_url = preview.url
-            logger.info("=" * 70)
-            logger.info("Sandbox streaming preview: %s", preview_url)
-            logger.info("(the human-facing URL with ?session=... will appear")
-            logger.info(" in the sandbox logs below once local.py starts)")
-            logger.info("=" * 70)
+            console.print(
+                f"[cyan]→[/cyan] Signed preview URL: "
+                f"[link={preview_url}]{preview_url}[/link]"
+            )
+            console.print(
+                "  [dim](fallback if the Discord notification doesn't reach you)[/dim]"
+            )
+            console.print("[cyan]→[/cyan] Booting local.py inside sandbox...")
+            console.print()
 
-            # Quote the URL — Daytona preview hosts contain dots and dashes
-            # but no shell metacharacters; shlex.quote is the safe default.
             command = (
                 f"curl -fsSL {shlex.quote(LOCAL_PY_URL)} -o /tmp/local.py && "
                 f"xvfb-run -a uv run /tmp/local.py "
@@ -210,11 +215,11 @@ async def main() -> None:
             cmd_id = getattr(cmd, "cmd_id", None) or getattr(cmd, "id", None)
             if not cmd_id:
                 raise RuntimeError("Daytona did not return a command id")
-            logger.info("Started local.py in sandbox (cmd_id=%s)", cmd_id)
 
             await _tail_logs(sandbox, cmd_id)
         finally:
-            logger.info("Deleting sandbox")
+            console.print()
+            console.print("[cyan]→[/cyan] Deleting sandbox")
             await sandbox.delete()
 
 
