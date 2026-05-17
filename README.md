@@ -75,10 +75,12 @@ Detection.not_(d1)         # NOT
 
 ## Notifications
 
-Optional. Each notifier gets the stream URL when a handoff starts.
+If you pass no notifiers, the library falls back to a built-in `ConsoleNotifier` that prints a rich panel to stdout with the stream URL — so the link is always somewhere obvious. When you do pass notifiers, the library stays out of the way and only fires what you configured.
 
 ```python
-from browser_handoff.notifiers import DiscordNotifier, EmailNotifier, SlackNotifier
+from browser_handoff.notifiers import (
+    ConsoleNotifier, DiscordNotifier, EmailNotifier, SlackNotifier,
+)
 
 Handoff(
     scenarios=[...],
@@ -90,6 +92,7 @@ Handoff(
             username="bot@x.com", password="...",
             to=["ops@x.com"],
         ),
+        ConsoleNotifier(),  # explicit — add alongside others if you also want a local panel
     ],
 )
 ```

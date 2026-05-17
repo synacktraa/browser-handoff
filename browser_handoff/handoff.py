@@ -15,7 +15,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from .config import load_file, load_json, load_yaml
 from .detection.base import BaseDetection, DetectionResult
-from .notifiers import Notifier, notifier_from_dict
+from .notifiers import ConsoleNotifier, Notifier, notifier_from_dict
 from .scenario import Scenario
 from .server import ServerConfig, StreamingServer
 
@@ -25,7 +25,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
-jinja_env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=True)
+# autoescape=False: the only template loaded here is notification.jinja,
+# which renders to plain text for Discord/Slack/email/rich-console.
+# HTML-escaping a single quote into `&#39;` mangles the URL the operator
+# is supposed to click. The HTML client template uses its own jinja env
+# (in server/streaming.py) which keeps autoescape on, as it should.
+jinja_env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=False)
 
 DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
 
@@ -354,8 +359,12 @@ class Handoff:
         )
 
     async def _send_notifications(self, reason: str, stream_url: str) -> None:
-        if not self.notifiers:
-            return
+        # No explicit notifiers → fall back to a rich console panel so the
+        # operator still gets a clearly-formatted stream URL. When the
+        # caller configures any notifier(s) we stay out of the way — they
+        # asked for those specific channels, double-pushing to stdout
+        # would just be noise.
+        notifiers = self.notifiers or [ConsoleNotifier()]
 
         notification_template = jinja_env.get_template("notification.jinja")
         message = notification_template.render(reason=reason, stream_url=stream_url)
@@ -371,6 +380,6 @@ class Handoff:
                 )
 
         await asyncio.gather(
-            *[send_notification(n) for n in self.notifiers],
+            *[send_notification(n) for n in notifiers],
             return_exceptions=True,
         )

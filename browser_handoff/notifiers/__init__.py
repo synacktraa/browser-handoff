@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .base import Notifier, Urgency
+from .console import ConsoleNotifier
 from .discord import DiscordNotifier
 from .email import EmailNotifier
 from .slack import SlackNotifier
@@ -24,7 +25,9 @@ def notifier_from_dict(data: dict[str, Any]) -> Notifier:
     """
     notifier_type = data.get("type")
 
-    if notifier_type == "slack":
+    if notifier_type == "console":
+        return ConsoleNotifier.from_dict(data)
+    elif notifier_type == "slack":
         return SlackNotifier.from_dict(data)
     elif notifier_type == "discord":
         return DiscordNotifier.from_dict(data)
@@ -37,6 +40,7 @@ def notifier_from_dict(data: dict[str, Any]) -> Notifier:
 __all__ = [
     "Notifier",
     "Urgency",
+    "ConsoleNotifier",
     "SlackNotifier",
     "DiscordNotifier",
     "EmailNotifier",
