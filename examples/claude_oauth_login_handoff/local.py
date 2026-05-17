@@ -61,37 +61,6 @@ console = Console(force_terminal=True)
 STREAMING_PORT = 8080
 
 
-class RichConsoleNotifier(Notifier):
-    """Render the handoff banner as a rich panel on the local console.
-
-    Same Notifier ABC as SlackNotifier / DiscordNotifier — gets handed the
-    rendered notification.jinja message (with the stream URL embedded).
-    Sits alongside any user-configured Discord/Slack notifiers so the
-    operator never has to scrape stdout for the URL.
-    """
-
-    notifier_type: str = "rich-console"
-
-    async def send(
-        self,
-        title: str,
-        message: str,
-        urgency: str = "normal",
-        **kwargs: Any,
-    ) -> bool:
-        console.print()
-        console.print(
-            Panel(
-                message.strip(),
-                title=f"[bold yellow]{title}[/bold yellow]",
-                border_style="yellow",
-                padding=(1, 2),
-            )
-        )
-        console.print()
-        return True
-
-
 def _mask(value: str, keep: int = 14) -> str:
     """Show first `keep` chars then an ellipsis — enough to identify a token
     by prefix without leaking the secret bit."""
@@ -140,8 +109,10 @@ def _credentials_panel(result: dict[str, Any]) -> Panel:
 
 async def run_claude_oauth(public_base: str | None = None) -> dict[str, Any]:
     async def capture_code(authorize_url: str, server: CallbackServer) -> str:
-        # RichConsoleNotifier always fires; Discord only if a webhook is set.
-        notifiers: list[Notifier] = [RichConsoleNotifier()]
+        # If DISCORD_WEBHOOK_URL is set, use it; otherwise leave the list
+        # empty and browser-handoff will fall back to its built-in
+        # ConsoleNotifier (rich panel with the stream URL).
+        notifiers: list[Notifier] = []
         if webhook := os.getenv("DISCORD_WEBHOOK_URL"):
             notifiers.append(
                 DiscordNotifier(webhook_url=webhook, username="ccauth Handoff")
