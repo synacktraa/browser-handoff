@@ -8,6 +8,7 @@ import json
 import logging
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,20 @@ if TYPE_CHECKING:
 # Setup Jinja2 templates
 TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
 jinja_env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=True)
+
+# Injected into a streamed page to suppress the native right-click context
+# menu. That menu is an OS-level overlay the screencast can't capture, so a
+# right-click would trap the operator in front of an invisible menu. Capture
+# at the capture phase so it fires before page handlers. The flag is
+# non-enumerable so it doesn't show up if the page enumerates window.
+_CONTEXT_MENU_GUARD_JS = """
+(() => {
+  if (window.__bhContextGuard) return;
+  Object.defineProperty(window, '__bhContextGuard',
+    {value: true, enumerable: false, configurable: true});
+  window.addEventListener('contextmenu', (e) => e.preventDefault(), true);
+})();
+"""
 
 
 class StreamingServer:
@@ -71,14 +86,20 @@ class StreamingServer:
             for session in self.sessions.values():
                 if session.capture_task and not session.capture_task.done():
                     session.capture_task.cancel()
+                for task in list(session.background_tasks):
+                    task.cancel()
             self.sessions.clear()
 
         app = FastAPI(title="Browser Handoff Stream", lifespan=lifespan)
 
+        # No credentials are used (the stream is gated by the session id in the
+        # URL, not cookies/auth headers), so wildcard origins are valid here.
+        # allow_credentials must stay False: browsers reject "*" together with
+        # credentials, and Starlette disallows that combination.
         app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
-            allow_credentials=True,
+            allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],
         )
@@ -207,6 +228,8 @@ class StreamingServer:
         )
         self.sessions[session_id] = session
 
+        await self._suppress_context_menu(page)
+
         # Take initial screenshot as first frame so the page paints
         # immediately when a client connects, before screencast warms up.
         with suppress(Exception):
@@ -219,6 +242,19 @@ class StreamingServer:
         session.capture_task = asyncio.create_task(self._capture_frames(session))
 
         return session
+
+    @staticmethod
+    async def _suppress_context_menu(page: "Page") -> None:
+        """Block the native right-click menu on a streamed page.
+
+        add_init_script covers documents loaded later (navigations during the
+        handoff); evaluate covers the one already loaded. Both are best-effort
+        — a transient failure must not abort the handoff.
+        """
+        with suppress(Exception):
+            await page.add_init_script(_CONTEXT_MENU_GUARD_JS)
+        with suppress(Exception):
+            await page.evaluate(_CONTEXT_MENU_GUARD_JS)
 
     @staticmethod
     async def _publish_frame(session: HandoffSession, frame_bytes: bytes) -> None:
@@ -247,6 +283,10 @@ class StreamingServer:
 
         if session.capture_task and not session.capture_task.done():
             session.capture_task.cancel()
+        # Cancel any in-flight ack/publish tasks (copy first — done callbacks
+        # mutate the set as they finish).
+        for task in list(session.background_tasks):
+            task.cancel()
 
         async with session.frame_condition:
             session.closed = True
@@ -279,10 +319,25 @@ class StreamingServer:
         """
         return self.sessions.get(session_id)
 
+    @staticmethod
+    def _spawn_tracked(
+        session: HandoffSession, coro: "Coroutine[Any, Any, Any]"
+    ) -> "asyncio.Task[Any]":
+        """Schedule a fire-and-forget coroutine while holding a strong ref.
+
+        The event loop keeps only weak references to tasks, so an unreferenced
+        ack/publish task could be garbage-collected mid-flight (a dropped ack
+        stalls the whole screencast). Keep it in session.background_tasks until
+        it completes, then let it remove itself.
+        """
+        task = asyncio.ensure_future(coro)
+        session.background_tasks.add(task)
+        task.add_done_callback(session.background_tasks.discard)
+        return task
+
     async def _capture_frames(self, session: HandoffSession) -> None:
         """Capture frames from CDP screencast and publish via Condition."""
         cdp = session.cdp
-        loop = asyncio.get_running_loop()
 
         def on_frame(params: dict[str, Any]) -> None:
             frame_session_id = params.get("sessionId")
@@ -290,8 +345,9 @@ class StreamingServer:
 
             # Ack first so Chrome keeps producing — otherwise capture stalls.
             if frame_session_id:
-                asyncio.create_task(
-                    cdp.send("Page.screencastFrameAck", {"sessionId": frame_session_id})
+                self._spawn_tracked(
+                    session,
+                    cdp.send("Page.screencastFrameAck", {"sessionId": frame_session_id}),
                 )
 
             if not data:
@@ -302,7 +358,7 @@ class StreamingServer:
                 return
             # CDP fires this on the loop thread but from a sync callback —
             # schedule the async publish without awaiting it.
-            loop.create_task(self._publish_frame(session, frame_bytes))
+            self._spawn_tracked(session, self._publish_frame(session, frame_bytes))
 
         cdp.on("Page.screencastFrame", on_frame)
         await cdp.send(
@@ -426,9 +482,17 @@ class StreamingServer:
             params["windowsVirtualKeyCode"] = key_code
             params["nativeVirtualKeyCode"] = key_code
 
-        # Add text only for keyDown of single printable characters (no ctrl/alt/meta modifiers)
-        if action == "keydown" and len(key) == 1 and not (ctrl or alt or meta):
-            params["text"] = key
+        # `text` is what drives the page's default action — inserting the
+        # character, submitting a form, adding a newline. It belongs only on
+        # keyDown without ctrl/alt/meta (shift is fine). Without it, Enter
+        # dispatches a keydown but never submits/inserts. Enter carries a
+        # carriage return; other named keys (Tab, arrows, …) carry no text;
+        # single printable characters carry themselves.
+        if action == "keydown" and not (ctrl or alt or meta):
+            if key == "Enter":
+                params["text"] = "\r"
+            elif len(key) == 1:
+                params["text"] = key
 
         await cdp.send("Input.dispatchKeyEvent", params)
 

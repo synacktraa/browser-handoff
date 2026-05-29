@@ -1,6 +1,27 @@
-"""Tests for server configuration."""
+"""Tests for server configuration and the streaming server."""
+
+import asyncio
+import contextlib
+
+from starlette.middleware.cors import CORSMiddleware
 
 from browser_handoff.server import ServerConfig
+from browser_handoff.server.session import HandoffSession
+from browser_handoff.server.streaming import StreamingServer
+
+
+def _bare_session() -> HandoffSession:
+    """A HandoffSession with placeholder page/context/cdp.
+
+    _spawn_tracked only touches session.background_tasks, so the browser
+    objects can be inert stand-ins."""
+    return HandoffSession(
+        session_id="test",
+        page=object(),
+        context=object(),
+        cdp=object(),
+        reason="test",
+    )
 
 
 class TestServerConfig:
@@ -95,3 +116,66 @@ class TestServerConfig:
         assert config.host == "127.0.0.1"
         assert config.port == 5000
         assert config.public_base is None
+
+
+class TestCORSConfig:
+    """The CORS middleware must not pair wildcard origins with credentials."""
+
+    def _cors_kwargs(self) -> dict:
+        app = StreamingServer().app
+        for mw in app.user_middleware:
+            if mw.cls is CORSMiddleware:
+                return mw.kwargs
+        raise AssertionError("CORSMiddleware not configured")
+
+    def test_credentials_disabled_with_wildcard_origin(self):
+        # Browsers reject "*" + credentials, and Starlette disallows the combo;
+        # the stream is gated by the session id, not cookies, so credentials
+        # must stay off.
+        kwargs = self._cors_kwargs()
+        assert kwargs["allow_origins"] == ["*"]
+        assert kwargs["allow_credentials"] is False
+
+
+class TestSpawnTracked:
+    """Fire-and-forget tasks are held by a strong ref until they finish.
+
+    The event loop keeps only weak references, so the ack/publish tasks must
+    live in session.background_tasks (else they can be GC'd mid-flight — a
+    dropped screencast ack stalls capture) and clear themselves on completion.
+    """
+
+    async def test_held_while_pending_then_discarded_on_completion(self):
+        session = _bare_session()
+        gate = asyncio.Event()
+
+        async def work() -> None:
+            await gate.wait()
+
+        task = StreamingServer._spawn_tracked(session, work())
+        assert task in session.background_tasks, "task must be held while running"
+
+        gate.set()
+        await task
+        await asyncio.sleep(0)  # let the done-callback run
+        assert session.background_tasks == set(), "completed task must self-remove"
+
+    async def test_discarded_on_cancellation(self):
+        # The teardown paths cancel these tasks; cancellation must still clear
+        # the set (the done-callback fires on cancel too).
+        session = _bare_session()
+        started = asyncio.Event()
+
+        async def work() -> None:
+            started.set()
+            await asyncio.sleep(3600)
+
+        task = StreamingServer._spawn_tracked(session, work())
+        await started.wait()
+        assert task in session.background_tasks
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+        assert session.background_tasks == set(), "cancelled task must self-remove"
