@@ -5,11 +5,14 @@ page off to a human via CDP-based streaming, and resumes when they're
 done — for OAuth, 2FA, payments, identity checks, or any flow that
 requires a human.
 
-Example:
+Example — let the library decide when a human is needed:
     from browser_handoff import Handoff, Scenario
     from browser_handoff.detection import Detection
 
-    handoff = Handoff(
+    handoff = Handoff()  # reusable transport config
+
+    result = await handoff.run(
+        page,
         scenarios=[
             Scenario(
                 name="login_required",
@@ -18,11 +21,16 @@ Example:
             ),
         ],
     )
-
-    result = await handoff.run(page)
     if result.was_blocked and not result.timed_out:
         print(f"Human completed: {result.scenario_name}")
     await bot_logic(page)
+
+Example — you already know a human is needed, so skip the trigger:
+    await handoff.wait_for_completion(
+        page,
+        on=Detection.url(path_contains=["/payment_done"]),
+        reason="Payment page reached",
+    )
 """
 
 from importlib.metadata import PackageNotFoundError, version

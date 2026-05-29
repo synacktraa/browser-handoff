@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
+import warnings
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,11 +69,38 @@ class HandoffResult:
 class Handoff:
     """Main handoff orchestrator.
 
-    Watch a Playwright page for trigger conditions, and when one fires, stream
-    the page to a human and wait for them to complete a corresponding action.
+    A Handoff bundles the transport config (streaming server, notifiers,
+    viewport) and is reusable across many pages/runs. *What* to watch for is
+    supplied per-call, so the same Handoff can serve any number of scenarios.
+
+    Two entry points:
+
+      - run(page, scenarios=...) — watch a page for trigger conditions, and
+        when one fires, stream the page to a human and wait for the matching
+        completion. Use this when you want the library to decide *when* a human
+        is needed.
+
+      - wait_for_completion(page, on=...) — stream the page to a human *now*
+        and wait until `on` matches. Use this when you've already decided a
+        human is needed (e.g. an agent framework detected the condition
+        itself), so there's no trigger to watch.
+
+    Pass scenarios per-call to `run(scenarios=...)`. The `scenarios`
+    constructor argument is deprecated (and emits a DeprecationWarning): it
+    couples *what to watch for* to the reusable transport object. Set them on
+    `run()` instead.
+
+    Streaming server lifecycle: a single server (on `server.port`) is shared
+    by every handoff this instance performs. It starts lazily on the first
+    handoff and stops when the last one finishes — concurrent handoffs run as
+    separate sessions on the same port (distinguished by session id) and never
+    collide, so you can drive many pages from one Handoff at once.
 
     Example:
-        handoff = Handoff(
+        handoff = Handoff(notifiers=[DiscordNotifier(...)])  # reusable
+
+        result = await handoff.run(
+            page,
             scenarios=[
                 Scenario(
                     name="login_required",
@@ -81,8 +109,6 @@ class Handoff:
                 ),
             ],
         )
-
-        result = await handoff.run(page)
         if result.was_blocked and not result.timed_out:
             print(f"Human completed: {result.scenario_name}")
         await bot_logic(page)
@@ -93,34 +119,89 @@ class Handoff:
     notifiers: list[Notifier] = field(default_factory=list)
     viewport_size: dict[str, int] = field(default_factory=lambda: DEFAULT_VIEWPORT.copy())
 
-    def __post_init__(self):
-        if not self.scenarios:
-            raise ValueError("At least one scenario must be provided")
+    # Runtime state for the shared streaming server. Not constructor args —
+    # see _acquire_server / _release_server for the lazy-start, ref-counted
+    # lifecycle. _session_count tracks live handoffs; the server stops when it
+    # returns to zero. _server_lock serializes start/stop so concurrent
+    # handoffs neither double-bind the port nor overlap a start with a stop.
+    _server: StreamingServer | None = field(default=None, init=False, repr=False, compare=False)
+    _server_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
+    _session_count: int = field(default=0, init=False, repr=False, compare=False)
+    _server_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.scenarios:
+            warnings.warn(
+                "Passing `scenarios` to Handoff() is deprecated; pass them "
+                "per-call to run(scenarios=...) instead. The constructor "
+                "argument will be removed in a future release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     @classmethod
     def from_file(cls, path: str | Path) -> "Handoff":
-        return cls.from_dict(load_file(path))
+        cls._warn_from_deprecated("from_file")
+        return cls._build_from_dict(load_file(path))
 
     @classmethod
     def from_json(cls, json_string: str) -> "Handoff":
-        return cls.from_dict(load_json(json_string))
+        cls._warn_from_deprecated("from_json")
+        return cls._build_from_dict(load_json(json_string))
 
     @classmethod
     def from_yaml(cls, yaml_string: str) -> "Handoff":
-        return cls.from_dict(load_yaml(yaml_string))
+        cls._warn_from_deprecated("from_yaml")
+        return cls._build_from_dict(load_yaml(yaml_string))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Handoff":
+        cls._warn_from_deprecated("from_dict")
+        return cls._build_from_dict(data)
+
+    @staticmethod
+    def _warn_from_deprecated(name: str) -> None:
+        warnings.warn(
+            f"Handoff.{name}() is deprecated and will be removed in the next "
+            "major release. Build the Handoff yourself from its parts instead: "
+            "parse the config with Scenario.from_dict / ServerConfig.from_dict "
+            "/ notifier_from_dict, then `Handoff(server=..., notifiers=...)` and "
+            "`run(scenarios=...)`.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
+    @classmethod
+    def _build_from_dict(cls, data: dict[str, Any]) -> "Handoff":
+        """Assemble a Handoff from a config dict (no deprecation warning).
+
+        Shared by the deprecated from_* loaders. Scenarios are assigned after
+        construction so the deprecated `scenarios` constructor argument — and
+        its warning — is not involved.
+        """
         scenarios = [Scenario.from_dict(s) for s in data.get("scenarios", [])]
         server_data = data.get("server", {})
         server = ServerConfig.from_dict(server_data) if server_data else ServerConfig()
         notifiers = [notifier_from_dict(n) for n in data.get("notifiers", [])]
-        return cls(scenarios=scenarios, server=server, notifiers=notifiers)
+        inst = cls(server=server, notifiers=notifiers)
+        inst.scenarios = scenarios
+        return inst
+
+    @property
+    def live_session_count(self) -> int:
+        """Number of handoffs currently streaming on the shared server."""
+        return self._session_count
+
+    @property
+    def is_serving(self) -> bool:
+        """Whether the shared streaming server is currently running."""
+        return self._server is not None
 
     async def run(
         self,
         page: "Page",
         *,
+        scenarios: list[Scenario] | None = None,
         timeout: float = 30.0,
     ) -> "HandoffResult":
         """Wait until handoff completes, or no handoff is needed.
@@ -137,6 +218,9 @@ class Handoff:
 
         Args:
             page: Playwright page to monitor.
+            scenarios: Trigger-completion pairs to watch. Falls back to the
+                scenarios set on the instance (e.g. via from_file) when omitted.
+                Raises ValueError if neither is provided.
             timeout: Max seconds to wait for any trigger to fire before
                 concluding no handoff is needed. Default: 30.0.
                 Does NOT bound the human-completion phase — that uses
@@ -147,13 +231,19 @@ class Handoff:
             HandoffResult describing what happened. Never raises on
             human-completion timeout — check result.timed_out instead.
         """
-        context = page.context
+        scenarios = scenarios if scenarios is not None else self.scenarios
+        if not scenarios:
+            raise ValueError(
+                "run() requires at least one scenario: pass scenarios=[...] "
+                "or set them on Handoff(...). To stream without a trigger, use "
+                "wait_for_completion()."
+            )
 
         trigger_event = asyncio.Event()
         matched_scenario: Scenario | None = None
         matched_result: DetectionResult | None = None
         detection_to_scenario: dict[int, Scenario] = {
-            id(s.trigger): s for s in self.scenarios
+            id(s.trigger): s for s in scenarios
         }
 
         async def on_trigger(detection: BaseDetection) -> None:
@@ -167,13 +257,13 @@ class Handoff:
                 trigger_event.set()
 
         cleanups: list[Any] = [
-            s.trigger.register_listeners(page, on_trigger) for s in self.scenarios
+            s.trigger.register_listeners(page, on_trigger) for s in scenarios
         ]
 
         try:
             # Initial check — page may already be in a triggered state when
             # called (e.g. caller awaited goto() then immediately ran us).
-            for scenario in self.scenarios:
+            for scenario in scenarios:
                 r = await scenario.trigger.check(page)
                 if r.matched:
                     matched_scenario = scenario
@@ -196,29 +286,54 @@ class Handoff:
                 "handoff.run: trigger matched (scenario='%s'): %s",
                 matched_scenario.name, matched_result.reason,
             )
-            return await self._run_handoff(
-                page=page,
-                context=context,
-                scenario=matched_scenario,
-                trigger_reason=matched_result.reason,
+            return await self.wait_for_completion(
+                page,
+                matched_scenario.complete,
+                reason=matched_result.reason,
+                name=matched_scenario.name,
             )
         finally:
             for cleanup in cleanups:
                 with suppress(Exception):
                     cleanup()
 
-    async def _run_handoff(
+    async def wait_for_completion(
         self,
         page: "Page",
-        context: Any,
-        scenario: Scenario,
-        trigger_reason: str,
-    ) -> HandoffResult:
-        """Stream the page to a human, wait for the scenario's completion."""
+        on: BaseDetection,
+        *,
+        reason: str = "Human intervention required",
+        name: str = "handoff",
+    ) -> "HandoffResult":
+        """Stream the page to a human *now* and wait until `on` matches.
+
+        Unlike run(), this skips trigger detection entirely — use it when
+        you've already decided a human is needed (e.g. an agent framework
+        detected the condition and called you), so watching for a trigger
+        would be redundant. run() funnels here once its trigger fires.
+
+        Runs as one session on the instance's shared streaming server (see
+        _acquire_server): the server starts on the first concurrent handoff
+        and stops when the last finishes, so handoffs never collide on the
+        port — each is just a distinct session id.
+
+        Args:
+            page: Playwright page to stream. Streaming starts immediately.
+            on: Completion detection that signals the human is done. The
+                handoff returns the moment it matches (or when the page
+                already satisfies it on entry).
+            reason: Human-facing explanation shown in the notification and the
+                operator UI. Defaults to a generic message.
+            name: Label recorded on the result (HandoffResult.scenario_name).
+
+        Returns:
+            HandoffResult with was_blocked=True. Check timed_out for whether
+            the human finished within self.server.completion_timeout. Never
+            raises on completion timeout.
+        """
+        context = page.context
         start_time = time.time()
         session_id = str(uuid.uuid4())[:8]
-        server: StreamingServer | None = None
-        server_task: asyncio.Task[None] | None = None
         listener_cleanups: list[Any] = []
         completion_event = asyncio.Event()
         completion_reason: str | None = None
@@ -232,11 +347,8 @@ class Handoff:
                 completion_reason = result.reason
                 completion_event.set()
 
+        server = await self._acquire_server()
         try:
-            server = StreamingServer(config=self.server)
-            server_task = asyncio.create_task(server.start())
-            await self._wait_for_port(self.server.host, self.server.port)
-
             viewport_size = self.viewport_size
             try:
                 actual_viewport = page.viewport_size
@@ -255,28 +367,28 @@ class Handoff:
                 session_id=session_id,
                 page=page,
                 context=context,
-                reason=trigger_reason,
+                reason=reason,
                 viewport_size=viewport_size,
             )
 
             listener_cleanups.append(
-                scenario.complete.register_listeners(page, on_completion_detected)
+                on.register_listeners(page, on_completion_detected)
             )
 
             stream_url = server.get_stream_url(session_id)
 
             logger.info("=" * 70)
             logger.info("HANDOFF: Human intervention required")
-            logger.info("Reason: %s", trigger_reason)
-            logger.info("Scenario: %s", scenario.name)
+            logger.info("Reason: %s", reason)
+            logger.info("Scenario: %s", name)
             logger.info("Stream URL: %s", stream_url)
             logger.info("=" * 70)
 
-            await self._send_notifications(trigger_reason, stream_url)
+            await self._send_notifications(reason, stream_url)
 
             # Already complete? (e.g. page raced past completion before we
             # finished setting up listeners.)
-            initial = await scenario.complete.check(page)
+            initial = await on.check(page)
             if initial.matched:
                 completion_reason = initial.reason
                 completion_event.set()
@@ -302,8 +414,8 @@ class Handoff:
             return HandoffResult(
                 was_blocked=True,
                 timed_out=timed_out,
-                scenario_name=scenario.name,
-                trigger_reason=trigger_reason,
+                scenario_name=name,
+                trigger_reason=reason,
                 completion_reason=None if timed_out else completion_reason,
                 duration=time.time() - start_time,
             )
@@ -312,21 +424,57 @@ class Handoff:
             for cleanup in listener_cleanups:
                 with suppress(Exception):
                     cleanup()
+            with suppress(Exception):
+                await server.unregister_session(session_id)
+            await self._release_server()
+
+    async def _acquire_server(self) -> StreamingServer:
+        """Return the shared streaming server, starting it on first use.
+
+        Reference-counted: every caller that acquires must pair with a
+        _release_server() in its finally. The start (bind + readiness wait)
+        happens under the lock, so concurrent first handoffs don't both try to
+        bind the port — the second waits, sees the server already up, and just
+        joins it as another session.
+        """
+        async with self._server_lock:
+            if self._server is None:
+                server = StreamingServer(config=self.server)
+                self._server_task = asyncio.create_task(server.start())
+                await self._wait_for_port(self.server.host, self.server.port)
+                self._server = server
+            self._session_count += 1
+            return self._server
+
+    async def _release_server(self) -> None:
+        """Drop one handoff's hold on the shared server.
+
+        When the last session leaves (count hits zero) the server is stopped
+        under the lock — so a handoff arriving in the same instant blocks until
+        the stopping server has fully released the port before a new one binds.
+        Start and stop therefore never overlap.
+        """
+        async with self._server_lock:
+            self._session_count -= 1
+            if self._session_count > 0:
+                return
+
+            server, task = self._server, self._server_task
+            self._server = None
+            self._server_task = None
 
             if server:
-                await server.unregister_session(session_id)
                 await server.stop()
-
-            if server_task and not server_task.done():
+            if task and not task.done():
                 # server.stop() already signaled should_exit and closed the
                 # client connections. Let uvicorn unwind on its own; only
                 # cancel as a last resort if it hangs.
                 try:
-                    await asyncio.wait_for(server_task, timeout=5.0)
+                    await asyncio.wait_for(task, timeout=5.0)
                 except asyncio.TimeoutError:
-                    server_task.cancel()
+                    task.cancel()
                     with suppress(asyncio.CancelledError):
-                        await server_task
+                        await task
                 except asyncio.CancelledError:
                     pass
 
