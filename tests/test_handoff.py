@@ -77,7 +77,7 @@ class TestHandoffCreation:
             ],
             "server": {
                 "port": 8080,
-                "completion_timeout": 300,
+                "session_timeout": 300,
             },
             "notifiers": [
                 {"type": "slack", "webhook_url": "https://test.com/webhook"},
@@ -87,7 +87,7 @@ class TestHandoffCreation:
         assert len(handoff.scenarios) == 1
         assert handoff.scenarios[0].name == "challenge"
         assert handoff.server.port == 8080
-        assert handoff.server.completion_timeout == 300
+        assert handoff.server.session_timeout == 300
         assert len(handoff.notifiers) == 1
 
     def test_from_dict_without_scenarios_allowed(self):
@@ -466,7 +466,7 @@ scenarios:
         - ".otp-input"
 server:
   port: 8080
-  completion_timeout: 600
+  session_timeout: 600
 """
         handoff = Handoff.from_yaml(yaml_str)
         assert len(handoff.scenarios) == 2
@@ -508,7 +508,7 @@ scenarios:
 
 server:
   port: 8080
-  completion_timeout: 300
+  session_timeout: 300
 
 notifiers:
   - type: slack
@@ -519,7 +519,7 @@ notifiers:
         assert handoff.scenarios[0].name == "login_with_consent"
         assert handoff.scenarios[1].name == "google_oauth"
         assert handoff.server.port == 8080
-        assert handoff.server.completion_timeout == 300
+        assert handoff.server.session_timeout == 300
         assert len(handoff.notifiers) == 1
 
 

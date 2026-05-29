@@ -85,20 +85,21 @@ async def test_concurrent_handoffs_share_one_server(
         assert handoff.is_serving, "shared server should be running"
         assert handoff.live_session_count == 2, "two live handoffs expected"
 
-        # Inspect session ids directly: the "distinct ids on one shared server"
-        # invariant is what's under test and has no public accessor.
-        session_ids = list(handoff._server.sessions.keys())
-        assert len(session_ids) == 2, f"expected 2 sessions, got {session_ids}"
-        assert len(set(session_ids)) == 2, "session ids must be unique"
+        # Inspect sessions directly: the "distinct sessions on one shared
+        # server" invariant is what's under test and has no public accessor.
+        sessions = list(handoff._server.sessions.values())
+        assert len(sessions) == 2, f"expected 2 sessions, got {len(sessions)}"
+        tokens = [s.access_token for s in sessions]
+        assert len(set(tokens)) == 2, "tokens must be unique per session"
 
-        # Each session is reachable over the wire on that single port; an
-        # unknown session id is not. (page.request is an independent HTTP
-        # client — it doesn't navigate the streamed page.)
-        for sid in session_ids:
-            resp = await page1.request.get(f"http://127.0.0.1:{port}/?session={sid}")
-            assert resp.status == 200, f"session {sid} should serve on the shared port"
-        bogus = await page1.request.get(f"http://127.0.0.1:{port}/?session=does-not-exist")
-        assert bogus.status == 404, "unknown session must not resolve"
+        # Each session is reachable over the wire by its capability token on
+        # that single port; an unknown token is not. (page.request is an
+        # independent HTTP client — it doesn't navigate the streamed page.)
+        for token in tokens:
+            resp = await page1.request.get(f"http://127.0.0.1:{port}/?t={token}")
+            assert resp.status == 200, "valid token should serve on the shared port"
+        bogus = await page1.request.get(f"http://127.0.0.1:{port}/?t=does-not-exist")
+        assert bogus.status == 404, "unknown token must not resolve"
 
         # Give both handoffs a beat to arm their completion listeners, then
         # complete each by navigating to the completion URL.

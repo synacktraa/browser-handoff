@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,14 @@ class HandoffSession:
     context: "BrowserContext"
     cdp: "CDPSession"
     reason: str
+    # The capability secret in the stream URL. ~256-bit, CSPRNG, decoupled from
+    # session_id (which is the correlation key in logs) so the secret never
+    # lands in general logging. The streaming endpoints resolve by this, not by
+    # session_id.
+    access_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
+    # Wall-clock deadline after which the token stops resolving, even if the
+    # session lingers. Set by the server at registration to bound a leaked link.
+    expires_at: float | None = None
     viewport_size: dict[str, int] = field(default_factory=lambda: DEFAULT_VIEWPORT.copy())
     capture_task: asyncio.Task[None] | None = None
     # Strong references to fire-and-forget tasks (per-frame ack + publish).
