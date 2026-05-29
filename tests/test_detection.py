@@ -526,3 +526,146 @@ class TestLLMWatchLoop:
             assert len(calls) == 1
         finally:
             cleanup()
+
+
+# ---- Element detection: poll-based watch loop (no expose_function) -------
+#
+# ElementDetection used to push mutations to Python via expose_function (a
+# detectable Runtime.addBinding) plus two fixed enumerable window globals. It
+# now uses the same stealthy poll model as LLMDetection: a MutationObserver
+# stamps a per-session, non-enumerable window var, and Python polls it — no
+# binding, nothing enumerable, no shared dispatcher. These pin the new loop
+# wiring against a fake page; the browser-side behavior + stealth live in
+# tests/integration/test_element_detection.py.
+
+
+class _FakeObserverPage:
+    """Playwright-Page stand-in for the element poll loop.
+
+    `activity_ms` mimics the hidden window stamp the injected MutationObserver
+    writes. `exposed` records any expose_function call — it must stay empty,
+    since dropping that binding is the whole point of the rewrite.
+    """
+
+    def __init__(self):
+        self.activity_ms = 0
+        self.init_scripts: list[str] = []
+        self.exposed: list[str] = []
+        self.listeners: dict[str, list] = {}
+
+    async def add_init_script(self, script):
+        self.init_scripts.append(script)
+
+    async def evaluate(self, script, *args):
+        # Setup script installs the observer (returns nothing); the read script
+        # just returns the stamp.
+        if "MutationObserver" in script:
+            return None
+        return self.activity_ms
+
+    async def expose_function(self, name, fn):  # pragma: no cover - must not run
+        self.exposed.append(name)
+
+    def on(self, event, handler):
+        self.listeners.setdefault(event, []).append(handler)
+
+    def remove_listener(self, event, handler):
+        self.listeners.get(event, []).remove(handler)
+
+
+class TestElementWatchLoop:
+    """Loop wiring against a fake page (no browser)."""
+
+    async def test_fires_on_stamp_advance_and_never_binds(self):
+        det = ElementDetection(present=["x"])
+        det._poll_interval = 0.02
+        page = _FakeObserverPage()
+        calls: list = []
+
+        async def cb(d):
+            calls.append(d)
+
+        cleanup = det.register_listeners(page, cb)
+        try:
+            # No mutation yet → no fire.
+            await asyncio.sleep(0.06)
+            assert calls == []
+
+            # Mutation stamps the var → one fire on the next poll.
+            page.activity_ms = 1_000
+            await asyncio.sleep(0.08)
+            assert len(calls) == 1
+            # No new mutation → no repeat fire.
+            await asyncio.sleep(0.08)
+            assert len(calls) == 1
+
+            # Navigation resets the var to 0 — that alone must NOT fire.
+            page.activity_ms = 0
+            await asyncio.sleep(0.06)
+            assert len(calls) == 1
+
+            # A post-nav mutation fires again.
+            page.activity_ms = 2_000
+            await asyncio.sleep(0.08)
+            assert len(calls) == 2
+        finally:
+            cleanup()
+
+        # The whole point: no expose_function / addBinding was ever used.
+        assert page.exposed == []
+
+        # Loop stopped after cleanup.
+        snapshot = len(calls)
+        page.activity_ms = 3_000
+        await asyncio.sleep(0.08)
+        assert len(calls) == snapshot
+
+    async def test_navigation_triggers_check(self):
+        det = ElementDetection(present=["x"])
+        det._poll_interval = 0.02
+        page = _FakeObserverPage()
+        calls: list = []
+
+        async def cb(d):
+            calls.append(d)
+
+        cleanup = det.register_listeners(page, cb)
+        try:
+            await asyncio.sleep(0.04)
+            for handler in list(page.listeners.get("framenavigated", [])):
+                handler()
+            await asyncio.sleep(0.08)
+            assert len(calls) >= 1
+        finally:
+            cleanup()
+
+    async def test_independent_subscriptions(self):
+        """Two detections on one page fire independently; cleaning one leaves
+        the other running (no shared dispatcher to break)."""
+        page = _FakeObserverPage()
+        calls_a: list = []
+        calls_b: list = []
+
+        async def cb_a(d):
+            calls_a.append(d)
+
+        async def cb_b(d):
+            calls_b.append(d)
+
+        det_a = ElementDetection(present=["a"])
+        det_b = ElementDetection(present=["b"])
+        det_a._poll_interval = det_b._poll_interval = 0.02
+        cleanup_a = det_a.register_listeners(page, cb_a)
+        cleanup_b = det_b.register_listeners(page, cb_b)
+        try:
+            page.activity_ms = 1_000
+            await asyncio.sleep(0.08)
+            assert len(calls_a) == 1 and len(calls_b) == 1
+
+            cleanup_a()
+            page.activity_ms = 2_000
+            await asyncio.sleep(0.08)
+            assert len(calls_a) == 1, "cleaned-up subscription still fired"
+            assert len(calls_b) == 2, "remaining subscription stopped firing"
+        finally:
+            cleanup_b()
