@@ -49,7 +49,7 @@ async with async_playwright() as pw:
 
 A `Handoff` holds your transport config — the streaming server and notifiers — and is reusable across pages and runs. You decide *what* to watch for per call, so the same `Handoff` serves any number of scenarios.
 
-**Let the library detect the moment** with `handoff.run(page, scenarios=[...])`. A `Scenario` is a pair: a `trigger` that says "stop, a human is needed" and a `complete` that says "OK, they're done." `run` watches every scenario's trigger. If none fires within `timeout` seconds, it returns `HandoffResult(was_blocked=False)` and your script keeps going. If one fires, it starts a local streaming server, surfaces the URL (printed to logs and pushed to your notifiers), and waits until that scenario's `complete` matches — or until `server.completion_timeout` elapses, in which case the result has `timed_out=True`. It never raises on completion timeout; check the result.
+**Let the library detect the moment** with `handoff.run(page, scenarios=[...])`. A `Scenario` is a pair: a `trigger` that says "stop, a human is needed" and a `complete` that says "OK, they're done." `run` watches every scenario's trigger. If none fires within `timeout` seconds, it returns `HandoffResult(was_blocked=False)` and your script keeps going. If one fires, it starts a local streaming server, surfaces the URL (printed to logs and pushed to your notifiers), and waits until that scenario's `complete` matches — or until `server.session_timeout` elapses, in which case the result has `timed_out=True`. It never raises on timeout; check the result.
 
 **Already know a human is needed?** Skip trigger detection and stream right away with `handoff.wait_for_completion(page, on=...)`. This is the right call when something upstream already decided — e.g. an AI agent navigated to the payment page itself — so watching for a trigger would be redundant:
 
@@ -121,12 +121,16 @@ Handoff(
         host="127.0.0.1",                             # "0.0.0.0" to expose on LAN
         port=8080,
         public_base="https://my-tunnel.example.com",  # what notifiers link to
-        completion_timeout=600,                       # max human wait (s)
+        session_timeout=600,                          # max session lifetime / human wait (s)
         jpeg_quality=75,
         every_nth_frame=1,
     ),
 )
 ```
+
+### Access control
+
+The stream URL carries a high-entropy capability token (`…/?t=<token>`): whoever holds the link can view **and control** the page, so treat it like a password. The token is unguessable, decoupled from internal ids, and expires when the handoff finishes or `session_timeout` elapses — a stale link stops working. When exposing beyond loopback (`0.0.0.0`, a tunnel, or a sandbox preview URL), **serve over HTTPS/WSS** so the token isn't readable in transit; set `public_base` to your public `https://` origin and the operator link is built from it. There is no second factor yet — one leaked, still-active link grants control, so deliver it over a trusted channel.
 
 ## Examples
 

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from collections.abc import Coroutine
@@ -73,6 +74,9 @@ class StreamingServer:
         """
         self.config = config or ServerConfig()
         self.sessions: dict[str, HandoffSession] = {}
+        # Public capability token -> internal session id. The stream endpoints
+        # resolve by token (the secret in the URL); session_id stays internal.
+        self._token_to_session: dict[str, str] = {}
         self.app = self._create_app()
         self._server: uvicorn.Server | None = None
 
@@ -89,6 +93,7 @@ class StreamingServer:
                 for task in list(session.background_tasks):
                     task.cancel()
             self.sessions.clear()
+            self._token_to_session.clear()
 
         app = FastAPI(title="Browser Handoff Stream", lifespan=lifespan)
 
@@ -105,23 +110,26 @@ class StreamingServer:
         )
 
         @app.get("/", response_class=HTMLResponse, response_model=None)
-        async def index(session: str = "default"):
-            """Serve the HTML client."""
-            session_state = self.sessions.get(session)
+        async def index(t: str | None = None):
+            """Serve the HTML client. `t` is the capability token."""
+            session_state = self._resolve_token(t)
             if not session_state:
                 return HTMLResponse("<h1>Session not found</h1>", status_code=404)
 
             # Mark session as accessed
             session_state.mark_accessed()
 
-            return self._get_html_client(session, session_state.reason)
+            return self._get_html_client(session_state.session_id, session_state.reason)
 
         @app.websocket("/ws")
-        async def websocket_endpoint(websocket: WebSocket, session: str = "default"):
-            """WebSocket endpoint: binary frames out, JSON control in."""
+        async def websocket_endpoint(websocket: WebSocket, t: str | None = None):
+            """WebSocket endpoint: binary frames out, JSON control in.
+
+            `t` is the capability token; an unknown or expired one is closed.
+            """
             await websocket.accept()
 
-            session_state = self.sessions.get(session)
+            session_state = self._resolve_token(t)
             if not session_state:
                 await websocket.close()
                 return
@@ -226,7 +234,11 @@ class StreamingServer:
             reason=reason,
             viewport_size=viewport_size or DEFAULT_VIEWPORT.copy(),
         )
+        # The token can't outlive the handoff itself, which is bounded by
+        # session_timeout — so a leaked link is dead once the handoff ends.
+        session.expires_at = time.time() + self.config.session_timeout
         self.sessions[session_id] = session
+        self._token_to_session[session.access_token] = session_id
 
         await self._suppress_context_menu(page)
 
@@ -280,6 +292,9 @@ class StreamingServer:
         session = self.sessions.pop(session_id, None)
         if session is None:
             return
+        # Drop the token so a leaked link stops resolving the moment the
+        # handoff ends.
+        self._token_to_session.pop(session.access_token, None)
 
         if session.capture_task and not session.capture_task.done():
             session.capture_task.cancel()
@@ -318,6 +333,25 @@ class StreamingServer:
             The session, or None if not found.
         """
         return self.sessions.get(session_id)
+
+    def _resolve_token(self, token: str | None) -> HandoffSession | None:
+        """Resolve a capability token to its session, or None.
+
+        Returns None for a missing/unknown token or one past its expiry — the
+        endpoints treat all three identically (not found), so a caller can't
+        distinguish "wrong token" from "expired".
+        """
+        if not token:
+            return None
+        session_id = self._token_to_session.get(token)
+        if session_id is None:
+            return None
+        session = self.sessions.get(session_id)
+        if session is None:
+            return None
+        if session.expires_at is not None and time.time() > session.expires_at:
+            return None
+        return session
 
     @staticmethod
     def _spawn_tracked(
@@ -581,7 +615,7 @@ class StreamingServer:
         session = self.sessions[session_id]
         template = jinja_env.get_template("intervention.html")
         return template.render(
-            session_id=session_id,
+            access_token=session.access_token,
             reason=reason,
             viewport_width=session.viewport_size["width"],
             viewport_height=session.viewport_size["height"],
@@ -590,6 +624,9 @@ class StreamingServer:
     def get_stream_url(self, session_id: str) -> str:
         """Get the public stream URL for a session.
 
+        The URL carries the session's capability token (not the session id),
+        which is the secret an operator needs to view and control the page.
+
         Args:
             session_id: The session ID.
 
@@ -597,7 +634,8 @@ class StreamingServer:
             The full URL to access the stream.
         """
         base_url = self.config.get_base_url()
-        return f"{base_url}/?session={session_id}"
+        token = self.sessions[session_id].access_token
+        return f"{base_url}/?t={token}"
 
     async def start(self) -> None:
         """Start the server."""

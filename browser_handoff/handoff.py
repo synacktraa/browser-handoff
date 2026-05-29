@@ -43,14 +43,14 @@ class HandoffResult:
     Three terminal states:
       - was_blocked=False                  → no trigger fired within timeout
       - was_blocked=True, timed_out=False  → human completed the task
-      - was_blocked=True, timed_out=True   → human exceeded completion_timeout
+      - was_blocked=True, timed_out=True   → human exceeded session_timeout
     """
 
     was_blocked: bool
     """Whether a trigger fired and a human handoff was performed."""
 
     timed_out: bool = False
-    """Only meaningful if was_blocked: human exceeded completion_timeout."""
+    """Only meaningful if was_blocked: human exceeded session_timeout."""
 
     scenario_name: str | None = None
     """Name of the scenario that fired."""
@@ -210,7 +210,7 @@ class Handoff:
         trigger, then waits for either:
           - A trigger to fire → run the human handoff and wait for the
             scenario's completion condition (bounded by
-            self.server.completion_timeout).
+            self.server.session_timeout).
           - `timeout` seconds to elapse with no trigger → return was_blocked=False.
 
         The browser context is auto-detected from page.context — there's no
@@ -224,7 +224,7 @@ class Handoff:
             timeout: Max seconds to wait for any trigger to fire before
                 concluding no handoff is needed. Default: 30.0.
                 Does NOT bound the human-completion phase — that uses
-                self.server.completion_timeout (default 600s, set on
+                self.server.session_timeout (default 600s, set on
                 ServerConfig).
 
         Returns:
@@ -328,8 +328,8 @@ class Handoff:
 
         Returns:
             HandoffResult with was_blocked=True. Check timed_out for whether
-            the human finished within self.server.completion_timeout. Never
-            raises on completion timeout.
+            the human finished within self.server.session_timeout. Never
+            raises on timeout.
         """
         context = page.context
         start_time = time.time()
@@ -397,13 +397,13 @@ class Handoff:
             try:
                 await asyncio.wait_for(
                     completion_event.wait(),
-                    timeout=self.server.completion_timeout,
+                    timeout=self.server.session_timeout,
                 )
             except asyncio.TimeoutError:
                 timed_out = True
                 logger.warning(
-                    "Handoff completion_timeout: human did not finish "
-                    "within %.0fs", self.server.completion_timeout,
+                    "Handoff session_timeout: human did not finish "
+                    "within %.0fs", self.server.session_timeout,
                 )
 
             await server.stop_screencast(session_id)

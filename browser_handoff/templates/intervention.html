@@ -233,7 +233,7 @@
     </div>
 
     <script>
-      const SESSION_ID = "{{ session_id }}";
+      const ACCESS_TOKEN = "{{ access_token }}";
 
       const stream = document.getElementById('stream');
       const statusEl = document.getElementById('status').querySelector('span');
@@ -242,7 +242,7 @@
 
       // Determine WebSocket protocol based on page protocol
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?session=${SESSION_ID}`);
+      const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?t=${ACCESS_TOKEN}`);
       ws.binaryType = 'blob';
       let mouseThrottle = null;
 

@@ -2,7 +2,9 @@
 
 import asyncio
 import contextlib
+import time
 
+import pytest
 from starlette.middleware.cors import CORSMiddleware
 
 from browser_handoff.server import ServerConfig
@@ -33,7 +35,7 @@ class TestServerConfig:
         assert config.host == "127.0.0.1"
         assert config.port == 8080
         assert config.public_base is None
-        assert config.completion_timeout == 600.0
+        assert config.session_timeout == 600.0
         assert config.jpeg_quality == 75
         assert config.every_nth_frame == 1
 
@@ -43,12 +45,12 @@ class TestServerConfig:
             host="localhost",
             port=3000,
             public_base="https://proxy.example.com",
-            completion_timeout=300.0,
+            session_timeout=300.0,
         )
         assert config.host == "localhost"
         assert config.port == 3000
         assert config.public_base == "https://proxy.example.com"
-        assert config.completion_timeout == 300.0
+        assert config.session_timeout == 300.0
 
     def test_get_base_url_with_public_base(self):
         """Test get_base_url with public_base set."""
@@ -76,14 +78,14 @@ class TestServerConfig:
             host="0.0.0.0",
             port=8080,
             public_base="https://example.com",
-            completion_timeout=120.0,
+            session_timeout=120.0,
         )
         data = config.to_dict()
         assert data == {
             "host": "0.0.0.0",
             "port": 8080,
             "public_base": "https://example.com",
-            "completion_timeout": 120.0,
+            "session_timeout": 120.0,
             "jpeg_quality": 75,
             "every_nth_frame": 1,
         }
@@ -94,13 +96,13 @@ class TestServerConfig:
             "host": "127.0.0.1",
             "port": 9000,
             "public_base": "https://proxy.test.com",
-            "completion_timeout": 60.0,
+            "session_timeout": 60.0,
         }
         config = ServerConfig.from_dict(data)
         assert config.host == "127.0.0.1"
         assert config.port == 9000
         assert config.public_base == "https://proxy.test.com"
-        assert config.completion_timeout == 60.0
+        assert config.session_timeout == 60.0
 
     def test_from_dict_defaults(self):
         """Test from_dict with missing values uses defaults."""
@@ -108,7 +110,7 @@ class TestServerConfig:
         assert config.host == "127.0.0.1"
         assert config.port == 8080
         assert config.public_base is None
-        assert config.completion_timeout == 600.0
+        assert config.session_timeout == 600.0
 
     def test_from_dict_partial(self):
         """Test from_dict with partial values."""
@@ -179,3 +181,95 @@ class TestSpawnTracked:
             await task
         await asyncio.sleep(0)
         assert session.background_tasks == set(), "cancelled task must self-remove"
+
+
+class TestAccessToken:
+    """The stream URL is gated by a strong, expiring capability token."""
+
+    def _register(self, server: StreamingServer, expires_at: float | None):
+        """Insert a session into the server without a real browser/CDP.
+
+        register_session needs a live page; these tests only exercise token
+        resolution and URL building, so wire the maps up by hand instead.
+        """
+        session = _bare_session()
+        session.expires_at = expires_at
+        server.sessions[session.session_id] = session
+        server._token_to_session[session.access_token] = session.session_id
+        return session
+
+    def test_token_is_strong_and_decoupled_from_session_id(self):
+        session = _bare_session()
+        # URL-safe and long enough to be unguessable (token_urlsafe(32) ≈ 43).
+        assert len(session.access_token) >= 32
+        assert session.access_token != session.session_id
+
+    def test_resolve_valid_token(self):
+        server = StreamingServer()
+        session = self._register(server, expires_at=time.time() + 60)
+        assert server._resolve_token(session.access_token) is session
+
+    def test_resolve_unknown_or_empty_token(self):
+        server = StreamingServer()
+        self._register(server, expires_at=time.time() + 60)
+        assert server._resolve_token("nope") is None
+        assert server._resolve_token(None) is None
+        assert server._resolve_token("") is None
+
+    def test_resolve_expired_token(self):
+        server = StreamingServer()
+        session = self._register(server, expires_at=time.time() - 1)  # already past
+        assert server._resolve_token(session.access_token) is None
+
+    def test_stream_url_carries_token_not_session_id(self):
+        server = StreamingServer()
+        session = self._register(server, expires_at=time.time() + 60)
+        url = server.get_stream_url(session.session_id)
+        assert f"?t={session.access_token}" in url
+        assert "?session=" not in url  # the id is no longer the URL gate
+
+
+class TestSessionTimeoutDeprecation:
+    """`completion_timeout` is renamed to `session_timeout` (deprecated alias).
+
+    The value bounds the whole session/token lifetime now, not just the
+    completion wait, so the name follows the meaning. The old name keeps
+    working (with a warning when set) for one major cycle.
+    """
+
+    def test_session_timeout_is_canonical(self):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any deprecation here would fail
+            assert ServerConfig().session_timeout == 600.0
+            assert ServerConfig(session_timeout=300.0).session_timeout == 300.0
+
+    def test_completion_timeout_still_readable_without_warning(self):
+        # Reading the alias on a config built the new way must not warn and
+        # must mirror session_timeout (old code keeps working).
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert ServerConfig(session_timeout=120.0).completion_timeout == 120.0
+
+    def test_passing_completion_timeout_warns_and_applies(self):
+        with pytest.warns(DeprecationWarning, match="session_timeout"):
+            config = ServerConfig(completion_timeout=42.0)
+        assert config.session_timeout == 42.0
+        assert config.completion_timeout == 42.0  # alias mirrors it
+
+    def test_to_dict_uses_new_name(self):
+        data = ServerConfig(session_timeout=300.0).to_dict()
+        assert data["session_timeout"] == 300.0
+        assert "completion_timeout" not in data
+
+    def test_from_dict_new_name(self):
+        config = ServerConfig.from_dict({"session_timeout": 200.0})
+        assert config.session_timeout == 200.0
+
+    def test_from_dict_old_name_warns(self):
+        with pytest.warns(DeprecationWarning, match="session_timeout"):
+            config = ServerConfig.from_dict({"completion_timeout": 200.0})
+        assert config.session_timeout == 200.0
