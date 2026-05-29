@@ -11,7 +11,6 @@ Examples:
 
 from __future__ import annotations
 
-import asyncio
 import os
 
 import pytest
@@ -55,34 +54,6 @@ async def test_check_does_not_match_dashboard(page: Page, base_url: str) -> None
     assert not result.matched, f"expected no match, got: {result.reason}"
 
 
-# ---- listener registration / cleanup ------------------------------------
-
-
-async def test_cleanup_stops_polling(page: Page, base_url: str) -> None:
-    """register_listeners' periodic screenshot task must stop on cleanup.
-
-    Without proper cleanup, the polling coroutine would keep taking
-    screenshots (and potentially calling the LLM) forever.
-    """
-    await page.goto(f"{base_url}/dynamic")
-    detection = Detection.llm(
-        model=_LLM_ID,
-        condition="anything",  # we don't call check() — only test the loop
-        api_key=_LLM_API_KEY,
-    )
-    calls: list = []
-
-    async def cb(d):  # type: ignore[no-untyped-def]
-        calls.append(d)
-
-    cleanup = detection.register_listeners(page, cb)
-    # First iteration runs immediately because _last_frame_hash is None.
-    await asyncio.sleep(0.5)
-    assert len(calls) >= 1, "initial screenshot didn't fire callback"
-
-    cleanup()
-    snapshot = len(calls)
-
-    # Default poll interval is 2s — wait longer and confirm no more fires.
-    await asyncio.sleep(2.5)
-    assert len(calls) == snapshot, "polling task still firing after cleanup"
+# NOTE: the activity-debounced watch loop (register_listeners) is covered,
+# browser-side and without any model call, in test_llm_activity.py — it needs
+# neither LLM_ID nor LLM_API_KEY, so it isn't gated like the check() tests here.
