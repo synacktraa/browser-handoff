@@ -4,6 +4,11 @@ This is the meatiest of the four — the previous implementation had
 several silent bugs (multi-detection shadowing via expose_function,
 broken cleanup, no re-injection after navigation). These tests pin
 each of those down.
+
+ElementDetection now uses a poll model (a MutationObserver stamps a hidden
+window var; Python polls it) rather than expose_function, so each detection's
+register_listeners is fully independent — see test_detection.py for the unit
+coverage and test_no_detectable_instrumentation below for the stealth contract.
 """
 
 from __future__ import annotations
@@ -15,8 +20,8 @@ from playwright.async_api import Page
 from browser_handoff.detection import Detection
 
 
-# MutationObserver has a 100ms debounce on the JS side. Always wait at
-# least this long after a DOM mutation before asserting.
+# The Python side polls the activity stamp every ~100ms. Always wait at
+# least this long after a DOM mutation before asserting a callback fired.
 MUTATION_WAIT = 0.3
 
 
@@ -133,14 +138,12 @@ async def test_listener_fires_on_mutation(page: Page, base_url: str) -> None:
         cleanup()
 
 
-async def test_multiple_detections_share_dispatcher(page: Page, base_url: str) -> None:
+async def test_multiple_detections_fire_independently(page: Page, base_url: str) -> None:
     """Two ElementDetections on the same page both fire on mutation.
 
-    Pre-fix, page.expose_function("__handoffMutationCallback", ...) raised
-    on the second call, the exception was swallowed by a bare except, and
-    only the first detection's callback got wired to the JS-side observer.
-    All subsequent ElementDetection scenarios on the same page silently
-    never fired.
+    With the old expose_function model the second binding collided and only
+    the first detection fired. The poll model makes each register_listeners
+    independent (its own observer + var + poll loop), so both fire.
     """
     await page.goto(f"{base_url}/dynamic")
 
@@ -213,9 +216,9 @@ async def test_per_subscription_cleanup(page: Page, base_url: str) -> None:
 async def test_re_registration_after_full_teardown(page: Page, base_url: str) -> None:
     """Fresh register on the same page after all subscribers cleanup.
 
-    Exercises the 'expose_function already exposed' branch: Playwright
-    won't let us bind the same name twice on a page, but our dispatcher
-    keeps the existing binding alive across teardown/re-registration.
+    With no shared per-page binding to keep alive, a second registration on
+    the same page after teardown just stands up its own observer + poll loop
+    and works exactly like the first.
     """
     await page.goto(f"{base_url}/dynamic")
 
@@ -278,5 +281,45 @@ async def test_observer_reinjected_after_navigation(page: Page, base_url: str) -
         await asyncio.sleep(MUTATION_WAIT)
 
         assert len(calls) > baseline, "observer not active after navigation"
+    finally:
+        cleanup()
+
+
+# ---- stealth contract ----------------------------------------------------
+
+
+async def test_no_detectable_instrumentation(page: Page, base_url: str) -> None:
+    """The injected observer leaves nothing the page can find.
+
+    Would fail on the old implementation: it set window.__handoffMutationObserver
+    and __handoffMutationCallback (both enumerable) and bound a function via
+    expose_function. The poll model uses a per-session, non-enumerable var and
+    no binding, so none of those are observable from page JS.
+    """
+    await page.goto(f"{base_url}/dynamic")
+
+    calls: list = []
+
+    async def cb(d):  # type: ignore[no-untyped-def]
+        calls.append(d)
+
+    cleanup = Detection.element(present=[".dynamic-item"]).register_listeners(page, cb)
+    try:
+        await asyncio.sleep(0.2)
+
+        # Legacy fixed globals must be gone.
+        assert (
+            await page.evaluate("() => typeof window.__handoffMutationCallback")
+        ) == "undefined"
+        assert (
+            await page.evaluate("() => typeof window.__handoffMutationObserver")
+        ) == "undefined"
+
+        # No instrumentation is enumerable on window.
+        leaked = await page.evaluate(
+            "() => Object.keys(window).filter("
+            "k => k.startsWith('__bh') || k.startsWith('__handoff'))"
+        )
+        assert leaked == [], f"enumerable instrumentation leaked: {leaked}"
     finally:
         cleanup()

@@ -1,6 +1,6 @@
 [project]
 name = "browser-handoff"
-version = "0.1.1"
+version = "0.2.0"
 description = "Pause Playwright automation, hand the browser to a human, resume when they're done."
 readme = "README.md"
 license = "MIT"
@@ -72,3 +72,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+    "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",
+]

@@ -97,6 +97,8 @@ class Detection:
         model: str = "anthropic/claude-sonnet-4-5",
         condition: str = "",
         api_key: str | None = None,
+        idle_seconds: float = 2.0,
+        max_interval: float = 30.0,
     ) -> "LLMDetection":
         """Create an LLM-based detection.
 
@@ -104,13 +106,24 @@ class Detection:
 
         If `api_key` is None, litellm picks up the key from the provider's
         env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...).
+
+        While watching, a check runs once page activity (input / DOM change /
+        navigation) settles for `idle_seconds`, with a safety-net poll every
+        `max_interval` seconds (set 0 to disable). Tune these to trade latency
+        for cost — larger values mean fewer, later vision calls.
         """
         if not _HAS_LLM:
             raise ImportError(
                 "LLM detection requires 'litellm' package. "
                 "Install with: pip install browser-handoff[llm]"
             )
-        return LLMDetection(model=model, condition=condition, api_key=api_key)
+        return LLMDetection(
+            model=model,
+            condition=condition,
+            api_key=api_key,
+            idle_seconds=idle_seconds,
+            max_interval=max_interval,
+        )
 
     @staticmethod
     def all(conditions: list[BaseDetection]) -> AllDetection:

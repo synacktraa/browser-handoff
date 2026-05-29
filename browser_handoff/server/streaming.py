@@ -229,16 +229,31 @@ class StreamingServer:
             session.frame_condition.notify_all()
 
     async def unregister_session(self, session_id: str) -> None:
-        """Unregister a session.
+        """Unregister a session and fully tear it down.
+
+        Cancels the capture task, wakes the per-WS sender tasks, and closes any
+        client connections — so a single session unwinds cleanly on its own,
+        without waiting for the whole server to stop. This matters when the
+        server is shared across concurrent handoffs: one handoff finishing must
+        not leave its WebSocket/sender task dangling on the still-running
+        server.
 
         Args:
             session_id: The session to unregister.
         """
-        if session_id in self.sessions:
-            session = self.sessions[session_id]
-            if session.capture_task and not session.capture_task.done():
-                session.capture_task.cancel()
-            del self.sessions[session_id]
+        session = self.sessions.pop(session_id, None)
+        if session is None:
+            return
+
+        if session.capture_task and not session.capture_task.done():
+            session.capture_task.cancel()
+
+        async with session.frame_condition:
+            session.closed = True
+            session.frame_condition.notify_all()
+        for ws in list(session.websockets):
+            with suppress(Exception):
+                await ws.close()
 
     def is_session_accessed(self, session_id: str) -> bool:
         """Check if a session has been accessed by the user.

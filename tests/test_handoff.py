@@ -13,18 +13,31 @@ from browser_handoff.detection import Detection
 from browser_handoff.notifiers import SlackNotifier
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 class TestHandoffCreation:
-    """Tests for Handoff class creation."""
+    """Tests for Handoff class creation.
 
-    def test_requires_scenarios(self):
-        """Test that Handoff requires at least one scenario."""
-        with pytest.raises(ValueError, match="At least one scenario must be provided"):
-            Handoff()
+    Some tests here exercise the deprecated `scenarios=` constructor arg and
+    the deprecated from_* loaders to confirm they still *work*; the warnings
+    themselves are asserted separately in TestDeprecations, so this class
+    silences them.
+    """
 
-    def test_requires_scenarios_empty_list(self):
-        """Test that Handoff requires at least one scenario (empty list)."""
-        with pytest.raises(ValueError, match="At least one scenario must be provided"):
-            Handoff(scenarios=[])
+    def test_construction_without_scenarios_allowed(self):
+        """A Handoff is reusable transport config; scenarios are optional at
+        construction and supplied per-call via run(scenarios=...)."""
+        assert Handoff().scenarios == []
+        assert Handoff(scenarios=[]).scenarios == []
+
+    def test_run_requires_scenarios(self):
+        """run() raises if no scenarios are passed and none are set on the
+        instance. Validation happens before the page is touched, so a bare
+        object stands in for the Playwright page here."""
+        import asyncio
+
+        handoff = Handoff()
+        with pytest.raises(ValueError, match="requires at least one scenario"):
+            asyncio.run(handoff.run(object()))
 
     def test_programmatic_creation(self):
         """Test creating Handoff programmatically."""
@@ -77,10 +90,11 @@ class TestHandoffCreation:
         assert handoff.server.completion_timeout == 300
         assert len(handoff.notifiers) == 1
 
-    def test_from_dict_requires_scenarios(self):
-        """Test that from_dict requires scenarios."""
-        with pytest.raises(ValueError, match="At least one scenario must be provided"):
-            Handoff.from_dict({})
+    def test_from_dict_without_scenarios_allowed(self):
+        """from_dict no longer requires scenarios — an empty config yields a
+        reusable Handoff whose scenarios are supplied later to run()."""
+        handoff = Handoff.from_dict({})
+        assert handoff.scenarios == []
 
     def test_from_json(self):
         """Test creating Handoff from JSON string."""
@@ -151,6 +165,7 @@ scenarios:
         assert handoff.scenarios[0].name == "blocker"
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 class TestHandoffWithEnvVars:
     """Tests for Handoff with environment variable interpolation."""
 
@@ -244,6 +259,7 @@ class TestHandoffResult:
         assert result.completion_reason is None
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 class TestComplexConfig:
     """Tests for complex configuration scenarios."""
 
@@ -359,8 +375,14 @@ class TestScenario:
         assert scenario.name == "unnamed"
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 class TestHandoffWithScenarios:
-    """Tests for Handoff with multiple scenarios."""
+    """Tests for Handoff with multiple scenarios.
+
+    Exercises deprecated construction paths (constructor `scenarios=` and the
+    from_* loaders) for functional coverage; deprecation warnings are asserted
+    in TestDeprecations.
+    """
 
     def test_handoff_with_multiple_scenarios(self):
         """Test creating Handoff with multiple scenarios."""
@@ -499,3 +521,69 @@ notifiers:
         assert handoff.server.port == 8080
         assert handoff.server.completion_timeout == 300
         assert len(handoff.notifiers) == 1
+
+
+class TestDeprecations:
+    """The deprecated construction paths must warn (and still work).
+
+    `scenarios=` on the constructor and the Handoff.from_* loaders are slated
+    for removal in the next major release. These pin the deprecation contract:
+    a DeprecationWarning is emitted, the call still returns a working Handoff,
+    and the from_* loaders warn exactly once (the post-construction scenario
+    assignment must NOT also trip the constructor warning).
+    """
+
+    _SCENARIO = {
+        "name": "login",
+        "trigger": {"type": "url", "path_contains": ["/login"]},
+        "complete": {"type": "url", "path_contains": ["/dashboard"]},
+    }
+
+    def test_constructor_scenarios_warns(self):
+        scenario = Scenario(
+            name="login",
+            trigger=Detection.url(path_contains=["/login"]),
+            complete=Detection.url(path_contains=["/dashboard"]),
+        )
+        with pytest.warns(DeprecationWarning, match="run\\(scenarios="):
+            handoff = Handoff(scenarios=[scenario])
+        assert handoff.scenarios == [scenario]
+
+    def test_constructor_without_scenarios_does_not_warn(self):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any warning becomes an error
+            Handoff()
+            Handoff(scenarios=[])  # empty list is not "passing scenarios"
+
+    def test_from_dict_warns(self):
+        with pytest.warns(DeprecationWarning, match="from_dict"):
+            handoff = Handoff.from_dict({"scenarios": [self._SCENARIO]})
+        assert handoff.scenarios[0].name == "login"
+
+    def test_from_json_warns(self):
+        with pytest.warns(DeprecationWarning, match="from_json"):
+            Handoff.from_json(json.dumps({"scenarios": [self._SCENARIO]}))
+
+    def test_from_yaml_warns(self):
+        with pytest.warns(DeprecationWarning, match="from_yaml"):
+            Handoff.from_yaml("scenarios: []")
+
+    def test_from_file_warns(self, tmp_path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"scenarios": [self._SCENARIO]}))
+        with pytest.warns(DeprecationWarning, match="from_file"):
+            Handoff.from_file(config_file)
+
+    def test_from_loader_warns_exactly_once(self, tmp_path):
+        """A from_* loader carrying scenarios must emit ONE deprecation (its
+        own), not also the constructor's — the loader sets scenarios after
+        construction to avoid the double warning."""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({"scenarios": [self._SCENARIO]}))
+        with pytest.warns(DeprecationWarning) as record:
+            Handoff.from_file(config_file)
+        deprecations = [w for w in record if issubclass(w.category, DeprecationWarning)]
+        assert len(deprecations) == 1, [str(w.message) for w in deprecations]
+        assert "from_file" in str(deprecations[0].message)

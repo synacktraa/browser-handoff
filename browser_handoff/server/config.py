@@ -6,9 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass
+@dataclass(frozen=True)
 class ServerConfig:
     """Configuration for the streaming server.
+
+    Immutable: a Handoff reuses one config across runs and shares it with the
+    streaming server, so values are fixed at construction. Build a new
+    ServerConfig to change settings.
 
     Attributes:
         host: Bind address. Defaults to 127.0.0.1 (loopback). Set to

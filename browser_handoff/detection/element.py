@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
+from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine
+from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from .base import BaseDetection, DetectionResult
 
@@ -12,74 +14,52 @@ if TYPE_CHECKING:
     from playwright.async_api import Page
 
 
-# Idempotent observer install: re-injected on every navigation, but the
-# JS-side flag prevents double-binding within a page context.
-MUTATION_OBSERVER_SCRIPT = """
-(function() {
-    if (window.__handoffMutationObserver) return;
+def _observer_setup_js(var: str) -> str:
+    """JS injected once per document: a MutationObserver that stamps a hidden
+    window property with Date.now() on any relevant DOM change. Python reads
+    that stamp by polling — a plain property read, with no injected binding or
+    callback function for the page to detect.
 
-    let debounceTimer = null;
-    const DEBOUNCE_MS = 100;
-
-    const observer = new MutationObserver(() => {
-        if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-            window.__handoffMutationCallback && window.__handoffMutationCallback();
-        }, DEBOUNCE_MS);
-    });
-
-    observer.observe(document.body || document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['class', 'style', 'hidden', 'disabled']
-    });
-
-    window.__handoffMutationObserver = observer;
-})();
-"""
-
-# Per-page state attached to the Page instance so that multiple
-# ElementDetection instances share one MutationObserver + one
-# expose_function call (which Playwright disallows registering twice
-# under the same name).
-_DISPATCHER_ATTR = "_browser_handoff_mutation_dispatcher"
+    `var` is a per-session random name, defined non-enumerable, so site JS can
+    neither list it (Object.keys / for-in / JSON.stringify skip it) nor guess
+    it to probe for it. The attributeFilter keeps the observer focused on the
+    attributes that actually change element presence/visibility.
+    """
+    return (
+        "(() => {"
+        f"if (window.{var} !== undefined) return;"
+        f"Object.defineProperty(window, '{var}', "
+        "{value: 0, writable: true, enumerable: false, configurable: true});"
+        f"const mark = () => {{ window.{var} = Date.now(); }};"
+        "try {"
+        "const mo = new MutationObserver(mark);"
+        # Observe the document node (always present, even at document_start
+        # when add_init_script re-injects after navigation — body/documentElement
+        # may still be null then). subtree:true covers the whole tree.
+        "mo.observe(document, "
+        "{childList:true, subtree:true, attributes:true, "
+        "attributeFilter:['class','style','hidden','disabled']});"
+        "} catch (e) {}"
+        "})();"
+    )
 
 
-class _MutationDispatcher:
-    """Fan-out for the page-wide MutationObserver callback."""
-
-    def __init__(self, page: "Page") -> None:
-        self.page = page
-        self.callbacks: list[Callable[[], Awaitable[None]]] = []
-        self.dom_listener: Callable[[], None] | None = None
-
-    async def fire(self) -> None:
-        for cb in list(self.callbacks):
-            try:
-                await cb()
-            except Exception:
-                pass
-
-
-def _get_or_create_dispatcher(
-    page: "Page", loop: asyncio.AbstractEventLoop
-) -> tuple[_MutationDispatcher, bool]:
-    """Return (dispatcher, is_first). is_first triggers one-time setup."""
-    existing = getattr(page, _DISPATCHER_ATTR, None)
-    if existing is not None:
-        return existing, False
-    dispatcher = _MutationDispatcher(page)
-    setattr(page, _DISPATCHER_ATTR, dispatcher)
-    return dispatcher, True
+def _observer_read_js(var: str) -> str:
+    """JS that returns the latest mutation stamp (0 if none yet)."""
+    return f"() => window.{var} || 0"
 
 
 @dataclass
 class ElementDetection(BaseDetection):
     """Detection based on DOM element presence, absence, or visibility.
 
-    Triggers on: page-wide MutationObserver, fanned out via a single
-    expose_function bound per page.
+    check() queries the page's DOM locally for the configured selectors. While
+    watching (register_listeners), a MutationObserver stamps a hidden window var
+    on every relevant DOM change and Python polls it, firing the callback (which
+    re-runs check()) whenever the stamp advances, plus once per navigation so
+    freshly-rendered DOM is evaluated. Each register_listeners is self-contained
+    — its own observer, var, and poll loop — so any number of detections can
+    watch one page independently.
 
     Example:
         detection = ElementDetection(
@@ -97,68 +77,71 @@ class ElementDetection(BaseDetection):
     visible: list[str] = field(default_factory=list)
     hidden: list[str] = field(default_factory=list)
 
+    # How often the loop polls the JS mutation stamp. Cheap (reads a number);
+    # doubles as the debounce window, so it's also the trigger latency.
+    _poll_interval: float = field(default=0.1, init=False, repr=False)
+
     def register_listeners(
         self,
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
         loop = asyncio.get_running_loop()
+        stop_event = asyncio.Event()
         cleanup_called = False
 
-        async def my_callback() -> None:
+        # Per-session, non-enumerable property name (see _observer_setup_js).
+        observer_var = f"__bh_{secrets.token_hex(8)}"
+        setup_js = _observer_setup_js(observer_var)
+        read_js = _observer_read_js(observer_var)
+
+        async def fire() -> None:
             if not cleanup_called:
-                await callback(self)
+                with suppress(Exception):
+                    await callback(self)
 
-        dispatcher, is_first = _get_or_create_dispatcher(page, loop)
-        dispatcher.callbacks.append(my_callback)
+        # Navigation is a check point: fire so a freshly-loaded (or SPA-routed)
+        # page that already satisfies the condition is evaluated.
+        def on_navigate(*_args: Any) -> None:
+            loop.create_task(fire())
 
-        if is_first:
-            async def setup() -> None:
+        page.on("framenavigated", on_navigate)
+
+        async def watch() -> None:
+            # Re-installs on every future document (init script) and on the one
+            # already loaded (evaluate).
+            with suppress(Exception):
+                await page.add_init_script(setup_js)
+            with suppress(Exception):
+                await page.evaluate(setup_js)
+
+            prev = 0
+            while not stop_event.is_set():
                 try:
-                    await page.evaluate(MUTATION_OBSERVER_SCRIPT)
+                    ms = await page.evaluate(read_js)
                 except Exception:
-                    pass
+                    ms = prev
+                if ms != prev:
+                    prev = ms
+                    # ms == 0 means a fresh/navigated document with no mutation
+                    # yet — the reset itself isn't a change to report.
+                    if ms:
+                        await fire()
+
                 try:
-                    await page.expose_function(
-                        "__handoffMutationCallback", dispatcher.fire
-                    )
-                except Exception:
-                    # Already exposed (e.g. handoff.run called twice on the
-                    # same page after a previous teardown). The dispatcher
-                    # we just stored is the live one — JS will call it.
+                    await asyncio.wait_for(stop_event.wait(), timeout=self._poll_interval)
+                except asyncio.TimeoutError:
                     pass
 
-            loop.create_task(setup())
-
-            # Re-inject the JS observer on every navigation; trigger one
-            # check per load so newly-rendered DOM is evaluated.
-            async def on_navigate() -> None:
-                try:
-                    await page.evaluate(MUTATION_OBSERVER_SCRIPT)
-                except Exception:
-                    pass
-                await dispatcher.fire()
-
-            dom_listener = lambda: loop.create_task(on_navigate())
-            dispatcher.dom_listener = dom_listener
-            page.on("domcontentloaded", dom_listener)
+        task = loop.create_task(watch())
 
         def cleanup() -> None:
             nonlocal cleanup_called
             cleanup_called = True
-            try:
-                dispatcher.callbacks.remove(my_callback)
-            except ValueError:
-                pass
-            # Last subscriber out turns off the navigation listener.
-            # (expose_function can't be unbound, but the dispatcher just
-            # iterates an empty list — harmless.)
-            if not dispatcher.callbacks and dispatcher.dom_listener is not None:
-                try:
-                    page.remove_listener("domcontentloaded", dispatcher.dom_listener)
-                except Exception:
-                    pass
-                dispatcher.dom_listener = None
+            stop_event.set()
+            task.cancel()
+            with suppress(Exception):
+                page.remove_listener("framenavigated", on_navigate)
 
         return cleanup
 

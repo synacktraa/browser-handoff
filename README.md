@@ -19,22 +19,25 @@ from playwright.async_api import async_playwright
 from browser_handoff import Handoff, Scenario
 from browser_handoff.detection import Detection
 
-handoff = Handoff(
-    scenarios=[
-        Scenario(
-            name="login",
-            trigger=Detection.url(path_contains=["/login"]),
-            complete=Detection.url(path_contains=["/dashboard"]),
-        ),
-    ],
-)
+handoff = Handoff()  # reusable: holds server + notifier config, nothing page-specific
 
 async with async_playwright() as pw:
     browser = await pw.chromium.launch(headless=False)
     page = await browser.new_page()
     await page.goto("https://example.com/start")
 
-    result = await handoff.run(page, timeout=30)
+    # Watch the page; hand off to a human when a trigger fires.
+    result = await handoff.run(
+        page,
+        scenarios=[
+            Scenario(
+                name="login",
+                trigger=Detection.url(path_contains=["/login"]),
+                complete=Detection.url(path_contains=["/dashboard"]),
+            ),
+        ],
+        timeout=30,
+    )
     if result.was_blocked and not result.timed_out:
         print(f"Human completed: {result.scenario_name}")
 
@@ -44,9 +47,19 @@ async with async_playwright() as pw:
 
 ## How it works
 
-A `Scenario` is a pair: a `trigger` that says "stop, a human is needed" and a `complete` that says "OK, they're done."
+A `Handoff` holds your transport config — the streaming server and notifiers — and is reusable across pages and runs. You decide *what* to watch for per call, so the same `Handoff` serves any number of scenarios.
 
-`handoff.run(page, timeout=...)` watches the page for any scenario's trigger. If none fires within `timeout` seconds, it returns `HandoffResult(was_blocked=False)` and your script keeps going. If one fires, it starts a local streaming server, surfaces the URL (printed to logs and pushed to your notifiers), and waits until the matching `complete` condition matches — or until `server.completion_timeout` elapses, in which case the result has `timed_out=True`. `handoff.run` never raises on completion timeout; check the result.
+**Let the library detect the moment** with `handoff.run(page, scenarios=[...])`. A `Scenario` is a pair: a `trigger` that says "stop, a human is needed" and a `complete` that says "OK, they're done." `run` watches every scenario's trigger. If none fires within `timeout` seconds, it returns `HandoffResult(was_blocked=False)` and your script keeps going. If one fires, it starts a local streaming server, surfaces the URL (printed to logs and pushed to your notifiers), and waits until that scenario's `complete` matches — or until `server.completion_timeout` elapses, in which case the result has `timed_out=True`. It never raises on completion timeout; check the result.
+
+**Already know a human is needed?** Skip trigger detection and stream right away with `handoff.wait_for_completion(page, on=...)`. This is the right call when something upstream already decided — e.g. an AI agent navigated to the payment page itself — so watching for a trigger would be redundant:
+
+```python
+await handoff.wait_for_completion(
+    page,
+    on=Detection.url(path_contains=["/payment_done"]),
+    reason="Payment page reached",
+)
+```
 
 ## Scope: what this is *not*
 
@@ -83,7 +96,6 @@ from browser_handoff.notifiers import (
 )
 
 Handoff(
-    scenarios=[...],
     notifiers=[
         SlackNotifier(webhook_url="https://hooks.slack.com/..."),
         DiscordNotifier(webhook_url="https://discord.com/api/webhooks/..."),
@@ -105,7 +117,6 @@ Defaults to `127.0.0.1:8080` (loopback only) with a 10-minute human-completion b
 from browser_handoff import ServerConfig
 
 Handoff(
-    scenarios=[...],
     server=ServerConfig(
         host="127.0.0.1",                             # "0.0.0.0" to expose on LAN
         port=8080,
@@ -117,87 +128,9 @@ Handoff(
 )
 ```
 
-## Config files
-
-JSON or YAML, with `${VAR}` interpolation:
-
-<table>
-<tr><th>JSON</th><th>YAML</th></tr>
-<tr>
-<td>
-
-```json
-{
-  "scenarios": [{
-    "name": "login",
-    "trigger": {
-      "type": "any",
-      "conditions": [
-        { "type": "url",
-          "path_contains": ["/login"] },
-        { "type": "element",
-          "present": ["input[type=password]"] }
-      ]
-    },
-    "complete": {
-      "type": "not",
-      "condition": {
-        "type": "url",
-        "path_contains": ["/login"]
-      }
-    }
-  }],
-  "server": {
-    "port": 8080,
-    "public_base": "${HANDOFF_URL}"
-  },
-  "notifiers": [
-    { "type": "slack",
-      "webhook_url": "${SLACK_WEBHOOK}" }
-  ]
-}
-```
-
-</td>
-<td>
-
-```yaml
-scenarios:
-  - name: login
-    trigger:
-      type: any
-      conditions:
-        - type: url
-          path_contains: ["/login"]
-        - type: element
-          present: ["input[type=password]"]
-    complete:
-      type: not
-      condition:
-        type: url
-        path_contains: ["/login"]
-
-server:
-  port: 8080
-  public_base: ${HANDOFF_URL}
-
-notifiers:
-  - type: slack
-    webhook_url: ${SLACK_WEBHOOK}
-```
-
-</td>
-</tr>
-</table>
-
-```python
-handoff = Handoff.from_file("handoff.yaml")
-# or: Handoff.from_json(s) / Handoff.from_yaml(s) / Handoff.from_dict(d)
-```
-
 ## Examples
 
-See [`examples/claude_oauth_login_handoff/`](examples/claude_oauth_login_handoff/) for a working Claude OAuth flow that pairs `browser-handoff` with [`ccauth`](https://github.com/synacktraa/ccauth) — `local.py` runs the flow on your machine; `in_daytona.py` runs the exact same `local.py` inside a Daytona sandbox so the human can log in from anywhere via the sandbox's preview URL.
+- [`Claude OAuth login handoff`](examples/claude_oauth_login_handoff/) — a working Claude OAuth flow that pairs `browser-handoff` with [`ccauth`](https://github.com/synacktraa/ccauth). `local.py` runs the flow on your machine; `in_daytona.py` runs the exact same `local.py` inside a Daytona sandbox so the human can log in from anywhere via the sandbox's preview URL.
 
 ## License
 
