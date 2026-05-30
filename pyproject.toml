@@ -1,6 +1,6 @@
 [project]
 name = "browser-handoff"
-version = "0.3.0"
+version = "0.3.1"
 description = "Pause Playwright automation, hand the browser to a human, resume when they're done."
 readme = "README.md"
 license = "MIT"
