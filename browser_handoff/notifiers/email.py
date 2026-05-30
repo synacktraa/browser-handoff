@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import logging
 import smtplib
 from dataclasses import dataclass, field
@@ -90,16 +91,10 @@ class EmailNotifier(Notifier):
         # Plain text part
         msg.attach(MIMEText(message, "plain"))
 
-        # HTML part with basic formatting
-        html = f"""
-        <html>
-        <body>
-            <h2>{title}</h2>
-            <pre style="font-family: sans-serif; white-space: pre-wrap;">{message}</pre>
-        </body>
-        </html>
-        """
-        msg.attach(MIMEText(html, "html"))
+        # HTML part with basic formatting. Title and message are caller-supplied
+        # strings (often containing URLs/reasons from upstream input), so they
+        # are escaped before interpolation to prevent HTML injection.
+        msg.attach(MIMEText(self._build_html(title, message), "html"))
 
         # Send in executor to avoid blocking the event loop.
         try:
@@ -108,6 +103,19 @@ class EmailNotifier(Notifier):
         except Exception as e:
             logger.error(f"EmailNotifier: Failed to send email: {e}")
             return False
+
+    @staticmethod
+    def _build_html(title: str, message: str) -> str:
+        """Render the HTML body with `title` and `message` HTML-escaped."""
+        safe_title = html_lib.escape(title)
+        safe_message = html_lib.escape(message)
+        return (
+            "<html><body>"
+            f"<h2>{safe_title}</h2>"
+            f'<pre style="font-family: sans-serif; white-space: pre-wrap;">'
+            f"{safe_message}</pre>"
+            "</body></html>"
+        )
 
     def _send_sync(self, msg: MIMEMultipart) -> None:
         """Synchronous send operation."""

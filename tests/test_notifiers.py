@@ -175,6 +175,28 @@ class TestEmailNotifier:
         assert notifier.smtp_port == 25
         assert notifier.to == ["recipient@test.com"]
 
+    def test_html_body_escapes_title_and_message(self):
+        """Title and message are HTML-escaped to prevent injection.
+
+        Callers pass arbitrary upstream strings (task reasons, URLs, scenario
+        names) — an unescaped `<` or `"` could break the markup or smuggle in
+        attributes/tags in HTML mail clients that render them.
+        """
+        body = EmailNotifier._build_html(
+            title='<script>alert("x")</script>',
+            message='click "<a href=evil>here</a>" & wait',
+        )
+        # Raw injection vectors must not appear verbatim.
+        assert "<script>" not in body
+        assert "<a href=evil>" not in body
+        # Escaped forms must appear instead.
+        assert "&lt;script&gt;" in body
+        assert "&lt;a href=evil&gt;" in body
+        assert "&amp; wait" in body
+        # The wrapping tags we control are still present.
+        assert "<h2>" in body and "</h2>" in body
+        assert "<pre" in body and "</pre>" in body
+
 
 class TestNotifierFromDict:
     """Tests for notifier_from_dict factory function."""
