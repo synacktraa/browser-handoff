@@ -1,14 +1,10 @@
 """Integration tests for ElementDetection against a real Chromium.
 
-This is the meatiest of the four — the previous implementation had
-several silent bugs (multi-detection shadowing via expose_function,
-broken cleanup, no re-injection after navigation). These tests pin
-each of those down.
-
-ElementDetection now uses a poll model (a MutationObserver stamps a hidden
-window var; Python polls it) rather than expose_function, so each detection's
-register_listeners is fully independent — see test_detection.py for the unit
-coverage and test_no_detectable_instrumentation below for the stealth contract.
+Covers `check()` semantics for present/missing/visible/hidden, listener
+registration (per-subscription callbacks, cleanup ordering, re-registration,
+re-injection after navigation), the page-shared watcher invariants (one
+observer/var/poll loop per page, no init-script leak after full teardown),
+and the stealth contract (nothing the page can enumerate on `window`).
 """
 
 from __future__ import annotations
@@ -139,11 +135,11 @@ async def test_listener_fires_on_mutation(page: Page, base_url: str) -> None:
 
 
 async def test_multiple_detections_fire_independently(page: Page, base_url: str) -> None:
-    """Two ElementDetections on the same page both fire on mutation.
+    """Two ElementDetections on the same page both fire on a single mutation.
 
-    With the old expose_function model the second binding collided and only
-    the first detection fired. The poll model makes each register_listeners
-    independent (its own observer + var + poll loop), so both fire.
+    Subscriptions share one page-level watcher, but every subscriber's callback
+    is invoked on each stamp advance, so adding a second detection doesn't
+    starve the first (and vice versa).
     """
     await page.goto(f"{base_url}/dynamic")
 
@@ -216,9 +212,9 @@ async def test_per_subscription_cleanup(page: Page, base_url: str) -> None:
 async def test_re_registration_after_full_teardown(page: Page, base_url: str) -> None:
     """Fresh register on the same page after all subscribers cleanup.
 
-    With no shared per-page binding to keep alive, a second registration on
-    the same page after teardown just stands up its own observer + poll loop
-    and works exactly like the first.
+    When the last subscriber leaves, the page watcher is torn down and evicted
+    from the registry. The next register_listeners on the same page installs a
+    new watcher from scratch and works exactly like the first.
     """
     await page.goto(f"{base_url}/dynamic")
 
@@ -283,6 +279,114 @@ async def test_observer_reinjected_after_navigation(page: Page, base_url: str) -
         assert len(calls) > baseline, "observer not active after navigation"
     finally:
         cleanup()
+
+
+# ---- shared per-page watcher --------------------------------------------
+
+
+async def _bh_var_count(page: Page) -> int:
+    """Count `__bh_*` own properties on `window` (vars are non-enumerable, so
+    `Object.keys` skips them — we need `getOwnPropertyNames`)."""
+    return await page.evaluate(
+        "() => Object.getOwnPropertyNames(window)"
+        ".filter(k => k.startsWith('__bh_')).length"
+    )
+
+
+async def _noop_cb(_d):  # type: ignore[no-untyped-def]
+    """Awaitable callback that does nothing — these tests measure JS-side state,
+    not callback invocations, so the callback's body is irrelevant."""
+    return None
+
+
+async def test_subscribers_on_one_page_share_one_observer_var(
+    page: Page, base_url: str
+) -> None:
+    """N detections on one page install exactly one observer var.
+
+    The whole point of the shared watcher: linear-with-N cost (observers,
+    poll loops, init scripts) collapses to constant cost per page.
+    """
+    await page.goto(f"{base_url}/dynamic")
+
+    cleanups = [
+        Detection.element(present=["#a"]).register_listeners(page, _noop_cb),
+        Detection.element(present=["#b"]).register_listeners(page, _noop_cb),
+        Detection.element(present=["#c"]).register_listeners(page, _noop_cb),
+    ]
+    try:
+        await asyncio.sleep(MUTATION_WAIT)
+        assert await _bh_var_count(page) == 1, (
+            "three subscriptions on one page should share a single observer var"
+        )
+    finally:
+        for c in cleanups:
+            c()
+
+
+async def test_last_cleanup_evicts_watcher_no_init_script_leak(
+    page: Page, base_url: str
+) -> None:
+    """After the last cleanup, navigating produces no `__bh_*` var.
+
+    The page watcher installs exactly one init script and tears down on the
+    last unsubscribe. With nothing subscribed, the next navigation must leave
+    a clean `window` — no leftover setup scripts re-installing observers.
+    """
+    await page.goto(f"{base_url}/dynamic")
+
+    c1 = Detection.element(present=["#a"]).register_listeners(page, _noop_cb)
+    c2 = Detection.element(present=["#b"]).register_listeners(page, _noop_cb)
+    await asyncio.sleep(MUTATION_WAIT)
+    assert await _bh_var_count(page) == 1, "precondition: shared watcher installed"
+
+    c1()
+    c2()
+    # Let the async unsubscribe + teardown tasks settle.
+    await asyncio.sleep(MUTATION_WAIT)
+
+    await page.goto(f"{base_url}/dynamic")
+    await asyncio.sleep(MUTATION_WAIT)
+
+    assert await _bh_var_count(page) == 0, (
+        "no subscribers and post-teardown navigation should leave window clean"
+    )
+
+
+async def test_re_registration_after_teardown_uses_fresh_var(
+    page: Page, base_url: str
+) -> None:
+    """A fresh registration after full teardown creates a new var, not reuse.
+
+    Each page watcher generates its own per-session random var name, so the
+    re-installed watcher must not collide with the previous one's name."""
+    await page.goto(f"{base_url}/dynamic")
+
+    c = Detection.element(present=["#a"]).register_listeners(page, _noop_cb)
+    await asyncio.sleep(MUTATION_WAIT)
+    first_names = await page.evaluate(
+        "() => Object.getOwnPropertyNames(window).filter(k => k.startsWith('__bh_'))"
+    )
+    assert len(first_names) == 1
+    c()
+    await asyncio.sleep(MUTATION_WAIT)
+
+    # New registration → new watcher → new var name on the (still same) document.
+    c2 = Detection.element(present=["#a"]).register_listeners(page, _noop_cb)
+    try:
+        await asyncio.sleep(MUTATION_WAIT)
+        second_names = await page.evaluate(
+            "() => Object.getOwnPropertyNames(window).filter(k => k.startsWith('__bh_'))"
+        )
+        # The old var lingers on the existing document (we can't unset it),
+        # but the new watcher's name must be distinct.
+        new_only = set(second_names) - set(first_names)
+        assert len(new_only) == 1, (
+            f"re-registration should produce a fresh var, got "
+            f"first={first_names} second={second_names}"
+        )
+    finally:
+        c2()
 
 
 # ---- stealth contract ----------------------------------------------------
