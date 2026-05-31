@@ -80,9 +80,15 @@ class _PageWatcher:
     init script, and a single 100ms poll loop instead of N of each.
     """
 
-    def __init__(self, page: "Page", loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self,
+        page: "Page",
+        loop: asyncio.AbstractEventLoop,
+        poll_interval: float,
+    ) -> None:
         self._page = page
         self._loop = loop
+        self._poll_interval = poll_interval
         self._var = f"__bh_{secrets.token_hex(8)}"
         self._subscribers: set[_Subscriber] = set()
         # Serialises install / teardown decisions so a subscribe arriving
@@ -182,7 +188,7 @@ class _PageWatcher:
                 if ms:
                     await self._fire_all()
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=0.1)
+                await asyncio.wait_for(self._stop.wait(), timeout=self._poll_interval)
             except asyncio.TimeoutError:
                 pass
 
@@ -203,12 +209,15 @@ class _PageWatcher:
 _watchers: dict[int, _PageWatcher] = {}
 
 
-def _watcher_for(page: "Page", loop: asyncio.AbstractEventLoop) -> _PageWatcher:
+def _watcher_for(
+    page: "Page", loop: asyncio.AbstractEventLoop, poll_interval: float
+) -> _PageWatcher:
+    """First call for a page wins the poll interval; later subscribers share it."""
     key = id(page)
     watcher = _watchers.get(key)
     if watcher is not None:
         return watcher
-    watcher = _PageWatcher(page, loop)
+    watcher = _PageWatcher(page, loop, poll_interval)
     _watchers[key] = watcher
 
     def _on_close(*_: Any) -> None:
@@ -249,6 +258,13 @@ class ElementDetection(BaseDetection):
     visible: list[str] = field(default_factory=list)
     hidden: list[str] = field(default_factory=list)
 
+    # How often the shared page watcher polls the JS mutation stamp. Cheap
+    # (reads a number); doubles as the debounce window, so it's also the
+    # trigger latency. Lowering it on a detection only matters when that
+    # detection is the FIRST subscriber on a page — the watcher inherits the
+    # interval from whichever detection brings it up.
+    _poll_interval: float = field(default=0.1, init=False, repr=False)
+
     def register_listeners(
         self,
         page: "Page",
@@ -264,7 +280,7 @@ class ElementDetection(BaseDetection):
             # the dict during a separate scheduling tick), evict the stale
             # entry and retry — the next _watcher_for creates a fresh one.
             while True:
-                watcher = _watcher_for(page, loop)
+                watcher = _watcher_for(page, loop, self._poll_interval)
                 if await watcher.add(sub):
                     return watcher
                 if _watchers.get(id(page)) is watcher:
