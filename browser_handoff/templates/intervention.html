@@ -144,6 +144,28 @@
           touch-action: none;
       }
 
+      /* Click feedback ring: visible immediately on mousedown so the
+       * operator knows their input was registered, even before the
+       * remote's response frame arrives over the WAN. Pure cosmetic —
+       * pointer-events:none keeps it from intercepting later events. */
+      .click-ring {
+          position: absolute;
+          width: 28px;
+          height: 28px;
+          margin-left: -14px;
+          margin-top: -14px;
+          border: 2px solid rgba(76, 175, 80, 0.9);
+          border-radius: 50%;
+          pointer-events: none;
+          z-index: 5;
+          animation: clickRing 380ms ease-out forwards;
+      }
+
+      @keyframes clickRing {
+          from { transform: scale(0.3); opacity: 0.9; }
+          to   { transform: scale(1.6); opacity: 0; }
+      }
+
       #completion-overlay {
           position: absolute;
           top: 0;
@@ -376,6 +398,20 @@
       // click, never a drag-select.
       stream.ondragstart = (e) => e.preventDefault();
 
+      const streamContainer = document.getElementById('stream-container');
+
+      function spawnClickRing(clientX, clientY) {
+          const rect = streamContainer.getBoundingClientRect();
+          const ring = document.createElement('div');
+          ring.className = 'click-ring';
+          ring.style.left = (clientX - rect.left) + 'px';
+          ring.style.top = (clientY - rect.top) + 'px';
+          streamContainer.appendChild(ring);
+          // Self-remove after the animation; listening once keeps the DOM
+          // clean even under rapid clicks.
+          ring.addEventListener('animationend', () => ring.remove(), {once: true});
+      }
+
       stream.onmousedown = (e) => {
           // preventDefault on the left button so the local browser doesn't try
           // to start a selection / drag on the <img> itself — all movement
@@ -383,6 +419,9 @@
           if (e.button === 0) e.preventDefault();
           const coords = getCoords(e);
           if (!coords) return; // Ignore clicks on padding
+          // Local feedback first — confirms the click registered before the
+          // WAN round trip delivers the remote's response frame.
+          spawnClickRing(e.clientX, e.clientY);
           send({type: 'mouse', action: 'mousedown', x: coords.x, y: coords.y, button: e.button, clickCount: e.detail || 1});
       };
 
