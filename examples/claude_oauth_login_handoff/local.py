@@ -3,7 +3,6 @@
 # dependencies = [
 #   "ccauth @ git+https://github.com/synacktraa/ccauth.git@a1eeea8",
 #   "browser-handoff @ git+https://github.com/synacktraa/browser-handoff.git",
-#   "rich"
 # ]
 # ///
 """

@@ -162,6 +162,14 @@ class StreamingServer:
                                 await self._handle_keyboard(cdp, message)
                             elif msg_type == "navigate":
                                 await self._handle_navigate(page, message)
+                            elif msg_type == "paste":
+                                await self._handle_paste(cdp, message)
+                            elif msg_type == "copy_request":
+                                text = await self._read_selection(page)
+                                with suppress(Exception):
+                                    await websocket.send_json(
+                                        {"type": "copy_response", "text": text}
+                                    )
                         except Exception as e:
                             logger.error(f"Error handling {msg_type} event: {e}")
             except Exception as e:
@@ -423,6 +431,10 @@ class StreamingServer:
 
         if action in ["mousedown", "mouseup"]:
             logger.info(f"Mouse {action} at ({x}, {y})")
+            # clickCount drives the remote's double/triple-click detection
+            # (word/paragraph selection). The client forwards `e.detail` from
+            # the local MouseEvent, which is the consecutive-click count.
+            click_count = int(message.get("clickCount", 1) or 1)
             await cdp.send(
                 "Input.dispatchMouseEvent",
                 {
@@ -430,11 +442,22 @@ class StreamingServer:
                     "x": x,
                     "y": y,
                     "button": button_map.get(message.get("button", 0), "left"),
-                    "clickCount": 1,
+                    "clickCount": click_count,
                 },
             )
         elif action == "mousemove":
-            await cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+            # CDP needs the held-button identity on mouseMoved for drag
+            # semantics — without it, a move during a held click is treated
+            # as a hover and the remote never extends a text selection.
+            buttons = int(message.get("buttons", 0) or 0)
+            params: dict[str, Any] = {"type": "mouseMoved", "x": x, "y": y, "buttons": buttons}
+            if buttons & 1:
+                params["button"] = "left"
+            elif buttons & 2:
+                params["button"] = "right"
+            elif buttons & 4:
+                params["button"] = "middle"
+            await cdp.send("Input.dispatchMouseEvent", params)
         elif action == "wheel":
             await cdp.send(
                 "Input.dispatchMouseEvent",
@@ -583,6 +606,32 @@ class StreamingServer:
         action = message.get("action")
         if action == "reload":
             await page.reload()
+
+    @staticmethod
+    async def _handle_paste(cdp: "CDPSession", message: dict[str, Any]) -> None:
+        """Insert clipboard text from the operator at the page's focus.
+
+        The remote browser has its own clipboard, isolated from the operator's,
+        so `Input.insertText` is used instead of dispatching ctrl+v — the
+        operator's local clipboard is the authority and the remote just drops
+        the text where the caret is.
+        """
+        text = message.get("text", "")
+        if not text:
+            return
+        await cdp.send("Input.insertText", {"text": text})
+
+    @staticmethod
+    async def _read_selection(page: "Page") -> str:
+        """Return the current text selection on the remote page.
+
+        Empty string when nothing is selected — used as the copy payload sent
+        back to the operator's clipboard.
+        """
+        try:
+            return await page.evaluate("() => window.getSelection().toString()")
+        except Exception:
+            return ""
 
     async def notify_task_completed(self, session_id: str, reason: str | None = None) -> None:
         """Notify frontend that task is completed.

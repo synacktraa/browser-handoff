@@ -222,7 +222,7 @@
       </div>
 
       <div id="stream-container">
-        <img id="stream" alt="Browser Stream" />
+        <img id="stream" alt="Browser Stream" draggable="false" />
         <div id="completion-overlay">
           <div class="completion-checkmark">&#x2705;</div>
           <div class="completion-title">Task Completed</div>
@@ -303,6 +303,13 @@
           const message = JSON.parse(event.data);
           if (message.type === 'task_completed') {
               showCompletionOverlay(message.reason);
+          } else if (message.type === 'copy_response') {
+              // The remote selection comes back here so we can drop it onto
+              // the operator's local clipboard. Failure (no permission, no
+              // selection) is silent — operator can retry.
+              if (message.text && navigator.clipboard && navigator.clipboard.writeText) {
+                  navigator.clipboard.writeText(message.text).catch(() => {});
+              }
           }
       };
 
@@ -364,16 +371,25 @@
           };
       }
 
+      // Suppress native image drag — without this, the browser swallows
+      // mousemoves into its drag-and-drop machinery and the remote sees a
+      // click, never a drag-select.
+      stream.ondragstart = (e) => e.preventDefault();
+
       stream.onmousedown = (e) => {
+          // preventDefault on the left button so the local browser doesn't try
+          // to start a selection / drag on the <img> itself — all movement
+          // semantics belong to the remote.
+          if (e.button === 0) e.preventDefault();
           const coords = getCoords(e);
           if (!coords) return; // Ignore clicks on padding
-          send({type: 'mouse', action: 'mousedown', x: coords.x, y: coords.y, button: e.button});
+          send({type: 'mouse', action: 'mousedown', x: coords.x, y: coords.y, button: e.button, clickCount: e.detail || 1});
       };
 
       stream.onmouseup = (e) => {
           const coords = getCoords(e);
           if (!coords) return; // Ignore clicks on padding
-          send({type: 'mouse', action: 'mouseup', x: coords.x, y: coords.y, button: e.button});
+          send({type: 'mouse', action: 'mouseup', x: coords.x, y: coords.y, button: e.button, clickCount: e.detail || 1});
       };
 
       stream.onmousemove = (e) => {
@@ -386,7 +402,11 @@
 
           const coords = getCoords(e);
           if (!coords) return; // Ignore moves on padding
-          send({type: 'mouse', action: 'mousemove', x: coords.x, y: coords.y});
+          // e.buttons is the bitmask of currently held buttons (1=left,
+          // 2=right, 4=middle). The server needs this so drags (mousedown →
+          // move → mouseup) become real drags on the remote instead of
+          // hover events sandwiched between a click.
+          send({type: 'mouse', action: 'mousemove', x: coords.x, y: coords.y, buttons: e.buttons});
       };
 
       stream.onwheel = (e) => {
@@ -396,11 +416,51 @@
           send({type: 'mouse', action: 'wheel', x: coords.x, y: coords.y, deltaX: e.deltaX, deltaY: e.deltaY});
       };
 
-      document.onkeydown = (e) => {
+      // Clipboard relay: the remote browser has its own (isolated) clipboard,
+      // so ctrl/cmd + v / c are intercepted here. Paste reads the operator's
+      // local clipboard and sends the text; copy asks the server for the
+      // remote selection and writes it back to the local clipboard.
+      function isClipboardShortcut(e) {
+          if (!(e.ctrlKey || e.metaKey)) return null;
+          // Prefer e.code (physical key) so non-Latin layouts (e.g. Cyrillic
+          // 'м' on the V key) still trigger the intercept. Fall back to e.key
+          // for environments where code isn't populated.
+          const code = e.code || '';
+          if (code === 'KeyV') return 'v';
+          if (code === 'KeyC') return 'c';
+          const k = (e.key || '').toLowerCase();
+          return (k === 'v' || k === 'c') ? k : null;
+      }
+
+      document.onkeydown = async (e) => {
+          // Every keystroke is meant for the remote, never for this page's
+          // chrome. Without preventDefault, ctrl+A selects the toolbar text,
+          // ctrl+R reloads the stream viewer, ctrl+F opens local find, etc.
+          // Browser-reserved shortcuts (ctrl+T/W/N, F11, F12) are unaffected —
+          // preventDefault doesn't apply to those.
+          e.preventDefault();
+          const clip = isClipboardShortcut(e);
+          if (clip === 'v') {
+              try {
+                  const text = await navigator.clipboard.readText();
+                  if (text) send({type: 'paste', text});
+              } catch (err) {
+                  // Permission denied / unavailable — fall back to the raw key
+                  // so behavior matches today's broken-but-familiar baseline.
+                  send({type: 'keyboard', action: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
+              }
+              return;
+          }
+          if (clip === 'c') {
+              send({type: 'copy_request'});
+              return;
+          }
           send({type: 'keyboard', action: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
       };
 
       document.onkeyup = (e) => {
+          e.preventDefault();
+          if (isClipboardShortcut(e)) return;
           send({type: 'keyboard', action: 'keyup', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
       };
 
