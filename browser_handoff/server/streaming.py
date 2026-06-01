@@ -446,7 +446,18 @@ class StreamingServer:
                 },
             )
         elif action == "mousemove":
-            await cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+            # CDP needs the held-button identity on mouseMoved for drag
+            # semantics — without it, a move during a held click is treated
+            # as a hover and the remote never extends a text selection.
+            buttons = int(message.get("buttons", 0) or 0)
+            params: dict[str, Any] = {"type": "mouseMoved", "x": x, "y": y, "buttons": buttons}
+            if buttons & 1:
+                params["button"] = "left"
+            elif buttons & 2:
+                params["button"] = "right"
+            elif buttons & 4:
+                params["button"] = "middle"
+            await cdp.send("Input.dispatchMouseEvent", params)
         elif action == "wheel":
             await cdp.send(
                 "Input.dispatchMouseEvent",

@@ -158,6 +158,43 @@ async def test_read_selection_empty_when_nothing_selected(page: Page) -> None:
     assert (await StreamingServer._read_selection(page)) == ""
 
 
+async def test_drag_selects_text(page: Page) -> None:
+    """Holding the left button while moving the mouse must extend a text
+    selection on the remote. Without the buttons bitmask reaching CDP,
+    moves are treated as hovers and the drag selects nothing."""
+    server = StreamingServer()
+    cdp = await _cdp(page)
+    await page.set_content(
+        "<p id='p' style='font-size:24px;font-family:monospace'>"
+        "hello world handoff</p>"
+    )
+    box = await page.locator("#p").bounding_box()
+    assert box is not None
+    y = box["y"] + box["height"] / 2
+    x_start = box["x"] + 2
+    x_end = box["x"] + box["width"] - 2
+
+    await server._handle_mouse(
+        cdp,
+        {"action": "mousedown", "x": x_start, "y": y, "button": 0, "clickCount": 1},
+    )
+    # Several intermediate moves with left button held (buttons=1) so the
+    # remote sees a real drag, not a teleport from mousedown to mouseup.
+    steps = 10
+    for i in range(1, steps + 1):
+        xi = x_start + (x_end - x_start) * i / steps
+        await server._handle_mouse(
+            cdp, {"action": "mousemove", "x": xi, "y": y, "buttons": 1}
+        )
+    await server._handle_mouse(
+        cdp,
+        {"action": "mouseup", "x": x_end, "y": y, "button": 0, "clickCount": 1},
+    )
+
+    selected = await StreamingServer._read_selection(page)
+    assert selected, "drag should produce a non-empty selection on the remote"
+
+
 async def test_double_click_selects_word(page: Page) -> None:
     """clickCount must propagate so a double-click selects the word at the
     click point — without it the remote sees two separate single-clicks."""

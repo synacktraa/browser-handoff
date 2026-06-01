@@ -402,7 +402,11 @@
 
           const coords = getCoords(e);
           if (!coords) return; // Ignore moves on padding
-          send({type: 'mouse', action: 'mousemove', x: coords.x, y: coords.y});
+          // e.buttons is the bitmask of currently held buttons (1=left,
+          // 2=right, 4=middle). The server needs this so drags (mousedown →
+          // move → mouseup) become real drags on the remote instead of
+          // hover events sandwiched between a click.
+          send({type: 'mouse', action: 'mousemove', x: coords.x, y: coords.y, buttons: e.buttons});
       };
 
       stream.onwheel = (e) => {
