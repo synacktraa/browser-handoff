@@ -433,9 +433,14 @@
       }
 
       document.onkeydown = async (e) => {
+          // Every keystroke is meant for the remote, never for this page's
+          // chrome. Without preventDefault, ctrl+A selects the toolbar text,
+          // ctrl+R reloads the stream viewer, ctrl+F opens local find, etc.
+          // Browser-reserved shortcuts (ctrl+T/W/N, F11, F12) are unaffected —
+          // preventDefault doesn't apply to those.
+          e.preventDefault();
           const clip = isClipboardShortcut(e);
           if (clip === 'v') {
-              e.preventDefault();
               try {
                   const text = await navigator.clipboard.readText();
                   if (text) send({type: 'paste', text});
@@ -447,7 +452,6 @@
               return;
           }
           if (clip === 'c') {
-              e.preventDefault();
               send({type: 'copy_request'});
               return;
           }
@@ -455,10 +459,8 @@
       };
 
       document.onkeyup = (e) => {
-          if (isClipboardShortcut(e)) {
-              e.preventDefault();
-              return;
-          }
+          e.preventDefault();
+          if (isClipboardShortcut(e)) return;
           send({type: 'keyboard', action: 'keyup', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
       };
 
