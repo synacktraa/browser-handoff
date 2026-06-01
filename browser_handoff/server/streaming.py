@@ -431,6 +431,10 @@ class StreamingServer:
 
         if action in ["mousedown", "mouseup"]:
             logger.info(f"Mouse {action} at ({x}, {y})")
+            # clickCount drives the remote's double/triple-click detection
+            # (word/paragraph selection). The client forwards `e.detail` from
+            # the local MouseEvent, which is the consecutive-click count.
+            click_count = int(message.get("clickCount", 1) or 1)
             await cdp.send(
                 "Input.dispatchMouseEvent",
                 {
@@ -438,7 +442,7 @@ class StreamingServer:
                     "x": x,
                     "y": y,
                     "button": button_map.get(message.get("button", 0), "left"),
-                    "clickCount": 1,
+                    "clickCount": click_count,
                 },
             )
         elif action == "mousemove":

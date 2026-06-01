@@ -222,7 +222,7 @@
       </div>
 
       <div id="stream-container">
-        <img id="stream" alt="Browser Stream" />
+        <img id="stream" alt="Browser Stream" draggable="false" />
         <div id="completion-overlay">
           <div class="completion-checkmark">&#x2705;</div>
           <div class="completion-title">Task Completed</div>
@@ -371,16 +371,25 @@
           };
       }
 
+      // Suppress native image drag — without this, the browser swallows
+      // mousemoves into its drag-and-drop machinery and the remote sees a
+      // click, never a drag-select.
+      stream.ondragstart = (e) => e.preventDefault();
+
       stream.onmousedown = (e) => {
+          // preventDefault on the left button so the local browser doesn't try
+          // to start a selection / drag on the <img> itself — all movement
+          // semantics belong to the remote.
+          if (e.button === 0) e.preventDefault();
           const coords = getCoords(e);
           if (!coords) return; // Ignore clicks on padding
-          send({type: 'mouse', action: 'mousedown', x: coords.x, y: coords.y, button: e.button});
+          send({type: 'mouse', action: 'mousedown', x: coords.x, y: coords.y, button: e.button, clickCount: e.detail || 1});
       };
 
       stream.onmouseup = (e) => {
           const coords = getCoords(e);
           if (!coords) return; // Ignore clicks on padding
-          send({type: 'mouse', action: 'mouseup', x: coords.x, y: coords.y, button: e.button});
+          send({type: 'mouse', action: 'mouseup', x: coords.x, y: coords.y, button: e.button, clickCount: e.detail || 1});
       };
 
       stream.onmousemove = (e) => {

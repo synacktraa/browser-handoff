@@ -158,6 +158,24 @@ async def test_read_selection_empty_when_nothing_selected(page: Page) -> None:
     assert (await StreamingServer._read_selection(page)) == ""
 
 
+async def test_double_click_selects_word(page: Page) -> None:
+    """clickCount must propagate so a double-click selects the word at the
+    click point — without it the remote sees two separate single-clicks."""
+    server = StreamingServer()
+    cdp = await _cdp(page)
+    await page.set_content("<p id='p' style='font-size:24px'>handoff</p>")
+    box = await page.locator("#p").bounding_box()
+    assert box is not None
+    x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+    await server._handle_mouse(cdp, {"action": "mousedown", "x": x, "y": y, "button": 0, "clickCount": 1})
+    await server._handle_mouse(cdp, {"action": "mouseup", "x": x, "y": y, "button": 0, "clickCount": 1})
+    await server._handle_mouse(cdp, {"action": "mousedown", "x": x, "y": y, "button": 0, "clickCount": 2})
+    await server._handle_mouse(cdp, {"action": "mouseup", "x": x, "y": y, "button": 0, "clickCount": 2})
+
+    assert (await StreamingServer._read_selection(page)) == "handoff"
+
+
 async def test_context_menu_suppressed(page: Page) -> None:
     """The native right-click menu can't be shown over the stream, so the guard
     must cancel the contextmenu event on the page."""
