@@ -162,6 +162,14 @@ class StreamingServer:
                                 await self._handle_keyboard(cdp, message)
                             elif msg_type == "navigate":
                                 await self._handle_navigate(page, message)
+                            elif msg_type == "paste":
+                                await self._handle_paste(cdp, message)
+                            elif msg_type == "copy_request":
+                                text = await self._read_selection(page)
+                                with suppress(Exception):
+                                    await websocket.send_json(
+                                        {"type": "copy_response", "text": text}
+                                    )
                         except Exception as e:
                             logger.error(f"Error handling {msg_type} event: {e}")
             except Exception as e:
@@ -583,6 +591,32 @@ class StreamingServer:
         action = message.get("action")
         if action == "reload":
             await page.reload()
+
+    @staticmethod
+    async def _handle_paste(cdp: "CDPSession", message: dict[str, Any]) -> None:
+        """Insert clipboard text from the operator at the page's focus.
+
+        The remote browser has its own clipboard, isolated from the operator's,
+        so `Input.insertText` is used instead of dispatching ctrl+v — the
+        operator's local clipboard is the authority and the remote just drops
+        the text where the caret is.
+        """
+        text = message.get("text", "")
+        if not text:
+            return
+        await cdp.send("Input.insertText", {"text": text})
+
+    @staticmethod
+    async def _read_selection(page: "Page") -> str:
+        """Return the current text selection on the remote page.
+
+        Empty string when nothing is selected — used as the copy payload sent
+        back to the operator's clipboard.
+        """
+        try:
+            return await page.evaluate("() => window.getSelection().toString()")
+        except Exception:
+            return ""
 
     async def notify_task_completed(self, session_id: str, reason: str | None = None) -> None:
         """Notify frontend that task is completed.

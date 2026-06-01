@@ -303,6 +303,13 @@
           const message = JSON.parse(event.data);
           if (message.type === 'task_completed') {
               showCompletionOverlay(message.reason);
+          } else if (message.type === 'copy_response') {
+              // The remote selection comes back here so we can drop it onto
+              // the operator's local clipboard. Failure (no permission, no
+              // selection) is silent — operator can retry.
+              if (message.text && navigator.clipboard && navigator.clipboard.writeText) {
+                  navigator.clipboard.writeText(message.text).catch(() => {});
+              }
           }
       };
 
@@ -396,11 +403,49 @@
           send({type: 'mouse', action: 'wheel', x: coords.x, y: coords.y, deltaX: e.deltaX, deltaY: e.deltaY});
       };
 
-      document.onkeydown = (e) => {
+      // Clipboard relay: the remote browser has its own (isolated) clipboard,
+      // so ctrl/cmd + v / c are intercepted here. Paste reads the operator's
+      // local clipboard and sends the text; copy asks the server for the
+      // remote selection and writes it back to the local clipboard.
+      function isClipboardShortcut(e) {
+          if (!(e.ctrlKey || e.metaKey)) return null;
+          // Prefer e.code (physical key) so non-Latin layouts (e.g. Cyrillic
+          // 'м' on the V key) still trigger the intercept. Fall back to e.key
+          // for environments where code isn't populated.
+          const code = e.code || '';
+          if (code === 'KeyV') return 'v';
+          if (code === 'KeyC') return 'c';
+          const k = (e.key || '').toLowerCase();
+          return (k === 'v' || k === 'c') ? k : null;
+      }
+
+      document.onkeydown = async (e) => {
+          const clip = isClipboardShortcut(e);
+          if (clip === 'v') {
+              e.preventDefault();
+              try {
+                  const text = await navigator.clipboard.readText();
+                  if (text) send({type: 'paste', text});
+              } catch (err) {
+                  // Permission denied / unavailable — fall back to the raw key
+                  // so behavior matches today's broken-but-familiar baseline.
+                  send({type: 'keyboard', action: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
+              }
+              return;
+          }
+          if (clip === 'c') {
+              e.preventDefault();
+              send({type: 'copy_request'});
+              return;
+          }
           send({type: 'keyboard', action: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
       };
 
       document.onkeyup = (e) => {
+          if (isClipboardShortcut(e)) {
+              e.preventDefault();
+              return;
+          }
           send({type: 'keyboard', action: 'keyup', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
       };
 
