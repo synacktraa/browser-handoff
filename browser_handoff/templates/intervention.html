@@ -204,7 +204,9 @@
         text-decoration-color: var(--orange);
       }
 
-      /* Dropdown floats below the header, anchored to the reason text. */
+      /* Dropdown floats below the header, anchored to the reason text.
+         word-break + overflow-wrap let long unbreakable strings (URLs, IDs)
+         wrap at any character instead of busting out of the box. */
       .reason-dropdown {
         position: absolute;
         top: calc(100% + 16px);
@@ -221,6 +223,8 @@
         font-size: 13px;
         line-height: 1.6;
         color: var(--text);
+        word-break: break-word;
+        overflow-wrap: anywhere;
         z-index: 60;
         display: none;
         box-shadow: 0 20px 50px -15px rgba(0, 0, 0, 0.7);
