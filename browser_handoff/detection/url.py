@@ -6,7 +6,7 @@ import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from .base import BaseDetection, DetectionResult
 
@@ -145,11 +145,14 @@ class UrlDetection(BaseDetection):
                         reason=f"Query does not contain '{substring}'",
                     )
 
-        # All conditions passed
+        # All conditions passed. unquote keeps the URL human-readable in
+        # the reason string — raw percent-encoded URLs (full of %2F, %3A,
+        # %3D) are unreadable in the breadcrumb. `details["url"]` keeps
+        # the raw form for programmatic consumers.
         return DetectionResult(
             matched=True,
             detection_type=self.detection_type,
-            reason=f"URL '{url}' matches all conditions",
+            reason=f"URL '{unquote(url)}' matches all conditions",
             details={"url": url},
         )
 
