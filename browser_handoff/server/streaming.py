@@ -177,6 +177,33 @@ class StreamingServer:
                                     await websocket.send_json(
                                         {"type": "copy_response", "text": text}
                                     )
+                            elif msg_type == "cut_request":
+                                # Read the selection, ship it back as the
+                                # copy payload, then dispatch Delete to
+                                # remove it. Only effective in editable
+                                # contexts (input/textarea/contenteditable)
+                                # — same behavior as native ctrl+x.
+                                text = await self._read_selection(page)
+                                with suppress(Exception):
+                                    await websocket.send_json(
+                                        {"type": "copy_response", "text": text, "cut": True}
+                                    )
+                                if text:
+                                    with suppress(Exception):
+                                        await cdp.send("Input.dispatchKeyEvent", {
+                                            "type": "keyDown",
+                                            "key": "Delete",
+                                            "code": "Delete",
+                                            "windowsVirtualKeyCode": 46,
+                                            "nativeVirtualKeyCode": 46,
+                                        })
+                                        await cdp.send("Input.dispatchKeyEvent", {
+                                            "type": "keyUp",
+                                            "key": "Delete",
+                                            "code": "Delete",
+                                            "windowsVirtualKeyCode": 46,
+                                            "nativeVirtualKeyCode": 46,
+                                        })
                             elif msg_type == "ping":
                                 # Echo the client's timestamp straight back so
                                 # the viewer can measure RTT against its own

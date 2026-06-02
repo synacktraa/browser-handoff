@@ -782,6 +782,10 @@
               <span class="keys"><kbd>Ctrl</kbd><kbd>C</kbd></span>
             </div>
             <div class="help-row">
+              <span class="label">Cut selection</span>
+              <span class="keys"><kbd>Ctrl</kbd><kbd>X</kbd></span>
+            </div>
+            <div class="help-row">
               <span class="label">Select all</span>
               <span class="keys"><kbd>Ctrl</kbd><kbd>A</kbd></span>
             </div>
@@ -984,10 +988,12 @@
         } else if (message.type === 'copy_response') {
           // The page selection round-trips here so we can drop it onto the
           // operator's local clipboard. Silent failure (no permission, no
-          // selection) — operator can retry.
+          // selection) — operator can retry. `cut` flag distinguishes a
+          // cut from a copy so the toast reads correctly.
           if (message.text && navigator.clipboard && navigator.clipboard.writeText) {
+            const toastKind = message.cut ? 'cut' : 'copy';
             navigator.clipboard.writeText(message.text)
-              .then(() => showToast('copy'))
+              .then(() => showToast(toastKind))
               .catch(() => {});
           }
         } else if (message.type === 'url_changed') {
@@ -1030,6 +1036,11 @@
           msg: 'Copied selection to clipboard',
           cls: '',
           icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+        },
+        cut: {
+          msg: 'Cut selection to clipboard',
+          cls: '',
+          icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>',
         },
         warn: {
           msg: 'Allow clipboard access to paste',
@@ -1173,8 +1184,9 @@
         const code = e.code || '';
         if (code === 'KeyV') return 'v';
         if (code === 'KeyC') return 'c';
+        if (code === 'KeyX') return 'x';
         const k = (e.key || '').toLowerCase();
-        return (k === 'v' || k === 'c') ? k : null;
+        return (k === 'v' || k === 'c' || k === 'x') ? k : null;
       }
 
       document.onkeydown = async (e) => {
@@ -1224,6 +1236,10 @@
         }
         if (clip === 'c') {
           send({type: 'copy_request'});
+          return;
+        }
+        if (clip === 'x') {
+          send({type: 'cut_request'});
           return;
         }
         send({type: 'keyboard', action: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
