@@ -3,250 +3,809 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Browser Handoff - Human Intervention</title>
+    <title>Browser Handoff — Human Intervention</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
     <style>
+      :root {
+        --bg-0: #08080a;
+        --glass: rgba(20, 20, 22, 0.62);
+        --glass-strong: rgba(30, 30, 34, 0.82);
+        --border: rgba(255, 255, 255, 0.08);
+        --border-strong: rgba(255, 255, 255, 0.14);
+        --text: #f5f5f5;
+        --text-dim: #a8a8ad;
+        --text-mute: #6b6b73;
+        --orange: #ff6a13;
+        --orange-soft: #ff8438;
+        --orange-wash: rgba(255, 106, 19, 0.14);
+        --grey-soft: #d4d4d8;
+        --green: #34c759;
+        --amber: #ff9500;
+        --red: #ff3b30;
+
+        --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+        --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+      }
+
       * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { height: 100%; }
 
       body {
-          background: #0a0a0a;
-          color: #e0e0e0;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          min-height: 100vh;
-          padding: 20px;
+        background: var(--bg-0);
+        color: var(--text);
+        font-family: var(--font-sans);
+        font-feature-settings: 'ss01' on, 'cv01' on;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        padding: 28px 20px;
+        position: relative;
+        overflow: hidden;
+        -webkit-font-smoothing: antialiased;
       }
 
-      #browser-window {
-          width: {{ viewport_width }}px;
-          max-width: calc(100vw - 40px);
-          background: #2a2a2a;
-          border-radius: 8px;
-          overflow: hidden;
-          box-shadow: 0 10px 40px rgba(0,0,0,0.7);
+      /* Warm ambient backdrop — single light source upper-right plus a cool
+         lower-left fill. Sparing on the orange so the glass has something to
+         pick up without the wash dominating the page. */
+      body::before {
+        content: '';
+        position: fixed;
+        inset: 0;
+        background:
+          radial-gradient(55% 60% at 85% 15%, rgba(255, 106, 19, 0.12), transparent 60%),
+          radial-gradient(40% 50% at 10% 95%, rgba(255, 132, 56, 0.05), transparent 70%),
+          radial-gradient(50% 40% at 50% 50%, rgba(255, 255, 255, 0.02), transparent 70%);
+        z-index: -2;
+        pointer-events: none;
       }
 
-      #toolbar {
-          height: 50px;
-          background: linear-gradient(to bottom, #3a3a3a, #2e2e2e);
-          border-bottom: 1px solid #1a1a1a;
-          display: flex;
-          align-items: center;
-          padding: 0 16px;
-          gap: 10px;
-          flex-shrink: 0;
+      /* Film grain — gives the matte black some tooth. */
+      body::after {
+        content: '';
+        position: fixed;
+        inset: 0;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.08 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+        opacity: 0.5;
+        mix-blend-mode: overlay;
+        z-index: -1;
+        pointer-events: none;
       }
 
-      .browser-icon {
-          font-size: 18px;
-          margin-right: 8px;
-          opacity: 0.7;
+      .session-header {
+        position: relative;
+        z-index: 50;
+        width: {{ viewport_width }}px;
+        max-width: calc(100vw - 40px);
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 11px 16px;
+        margin-bottom: 14px;
+        font-size: 12px;
+        color: var(--text-dim);
+        background: var(--glass);
+        backdrop-filter: blur(20px) saturate(160%);
+        -webkit-backdrop-filter: blur(20px) saturate(160%);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-family: var(--font-mono);
+        letter-spacing: 0.2px;
       }
 
-      .nav-buttons {
-          display: flex;
-          gap: 4px;
+      .session-header .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        color: var(--text);
+        font-weight: 600;
+        text-transform: uppercase;
+        font-size: 11px;
+        letter-spacing: 1.4px;
       }
 
-      .nav-button {
-          width: 32px;
-          height: 32px;
-          background: #444;
-          border: 1px solid #555;
-          border-radius: 4px;
-          color: #e0e0e0;
-          cursor: pointer;
-          font-size: 14px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          transition: all 0.2s;
+      .session-header .brand-mark {
+        width: 18px;
+        height: 18px;
+        border: 1.5px solid var(--orange);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+      }
+      .session-header .brand-mark::after {
+        content: '';
+        width: 6px;
+        height: 6px;
+        background: var(--orange);
+        box-shadow: 0 0 8px rgba(255, 106, 19, 0.7);
       }
 
-      .nav-button:hover:not(:disabled) {
-          background: #555;
-          border-color: #666;
+      .session-header .sep {
+        color: var(--text-mute);
+        opacity: 0.5;
       }
 
-      .nav-button:active:not(:disabled) {
-          background: #333;
+      .session-header .scenario {
+        color: var(--text);
+        text-transform: uppercase;
+        font-size: 11px;
+        letter-spacing: 1px;
+      }
+      /* Reason wrapper holds the truncated text + Show more affordance +
+         the dropdown anchored under it. */
+      .session-header .reason-wrap {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex: 1;
+        min-width: 0;
+      }
+      .session-header .reason {
+        color: var(--text-dim);
+        font-family: var(--font-sans);
+        letter-spacing: 0;
+        font-size: 12.5px;
+        white-space: nowrap;
+        overflow: hidden;
+        min-width: 0;
+        flex: 1;
+      }
+      /* When the reason overflows, fade the right edge to transparent and
+         expose the inline "Show more" link. The fade + link read as one
+         continuous signal instead of an ellipsis competing with a button. */
+      .reason-wrap.truncated .reason {
+        cursor: pointer;
+        -webkit-mask-image: linear-gradient(to right, black 82%, transparent 100%);
+                mask-image: linear-gradient(to right, black 82%, transparent 100%);
       }
 
-      .nav-button:disabled {
-          background: #2a2a2a;
-          border-color: #333;
-          color: #666;
-          cursor: not-allowed;
-          opacity: 0.5;
+      .reason-expand {
+        display: none;
+        grid-template-areas: "label";
+        align-items: center;
+        justify-items: start;
+        margin-left: 2px;
+        padding: 0 2px;
+        background: transparent;
+        border: none;
+        color: var(--orange);
+        cursor: pointer;
+        font-family: var(--font-sans);
+        font-size: 12.5px;
+        font-weight: 500;
+        letter-spacing: 0;
+        flex-shrink: 0;
+        text-decoration: underline;
+        text-decoration-thickness: 1px;
+        text-underline-offset: 3px;
+        text-decoration-color: rgba(255, 106, 19, 0.45);
+        transition: color 0.15s, text-decoration-color 0.15s;
+      }
+      .reason-wrap.truncated .reason-expand { display: inline-grid; }
+      /* The invisible ::before reserves space for the longer "Show more"
+         label so toggling to "Show less" doesn't shift the layout. */
+      .reason-expand::before {
+        content: 'Show more';
+        grid-area: label;
+        visibility: hidden;
+        pointer-events: none;
+      }
+      .reason-expand > span { grid-area: label; }
+      .reason-expand:hover {
+        color: var(--orange-soft);
+        text-decoration-color: var(--orange);
       }
 
-      #task-info {
-          flex: 1;
-          margin-left: 12px;
-          padding: 6px 12px;
-          background: #1a1a1a;
-          border-radius: 4px;
-          font-size: 13px;
-          color: #bbb;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
+      /* Dropdown floats below the header, anchored to the reason text.
+         word-break + overflow-wrap let long unbreakable strings (URLs, IDs)
+         wrap at any character instead of busting out of the box. */
+      .reason-dropdown {
+        position: absolute;
+        top: calc(100% + 16px);
+        left: 0;
+        width: max-content;
+        max-width: min(600px, calc(100vw - 80px));
+        background: rgba(22, 22, 26, 0.94);
+        backdrop-filter: blur(24px) saturate(160%);
+        -webkit-backdrop-filter: blur(24px) saturate(160%);
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        padding: 14px 18px;
+        font-family: var(--font-sans);
+        font-size: 13px;
+        line-height: 1.6;
+        color: var(--text);
+        word-break: break-word;
+        overflow-wrap: anywhere;
+        z-index: 60;
+        display: none;
+        box-shadow: 0 20px 50px -15px rgba(0, 0, 0, 0.7);
+        animation: reasonIn 0.18s ease-out;
+      }
+      .reason-dropdown.show { display: block; }
+      .reason-dropdown::before {
+        content: '';
+        position: absolute;
+        top: -1px;
+        left: 18px;
+        width: 28px;
+        height: 2px;
+        background: var(--orange);
+      }
+      @keyframes reasonIn {
+        from { opacity: 0; transform: translateY(-4px); }
+        to   { opacity: 1; transform: translateY(0); }
       }
 
-      #task-info .label {
-          color: #888;
-          margin-right: 6px;
+      .browser-window {
+        width: {{ viewport_width }}px;
+        max-width: calc(100vw - 40px);
+        background: var(--glass);
+        backdrop-filter: blur(28px) saturate(170%);
+        -webkit-backdrop-filter: blur(28px) saturate(170%);
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow:
+          0 40px 90px -25px rgba(0, 0, 0, 0.8),
+          0 0 0 1px rgba(255, 255, 255, 0.025) inset,
+          0 0 80px -30px rgba(255, 106, 19, 0.18);
       }
 
-      #status {
-          margin-left: 12px;
-          font-size: 12px;
-          display: flex;
-          align-items: center;
-          gap: 6px;
+      .toolbar {
+        height: 52px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--border);
+        background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0));
       }
 
-      .status-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
+      .icon-btn {
+        width: 32px; height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        color: var(--text-dim);
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s, border-color 0.15s;
+      }
+      .icon-btn:hover {
+        background: rgba(255,255,255,0.06);
+        color: var(--text);
+        border-color: var(--border);
+      }
+      .icon-btn:active { background: rgba(255,255,255,0.10); }
+      .icon-btn svg { width: 16px; height: 16px; transition: transform 0.2s; }
+      .icon-btn.spinning { color: var(--orange); }
+      .icon-btn.spinning svg { animation: icon-spin 0.7s linear infinite; }
+      @keyframes icon-spin {
+        from { transform: rotate(0deg); }
+        to   { transform: rotate(360deg); }
       }
 
-      .connected { color: #4caf50; }
-      .connected .status-dot { background: #4caf50; }
-      .connecting { color: #ff9800; }
-      .connecting .status-dot { background: #ff9800; }
-      .completed { color: #4caf50; }
-      .completed .status-dot { background: #4caf50; }
+      /* URL bar: readonly <input> so native arrow-key cursor movement,
+         Home/End scrolling, and mouse drag-selection work across the full
+         URL — same model as a real omnibox. Loses syntax coloring vs. a
+         styled span, but the orange glow border gives the bar its identity. */
+      .url-bar {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 34px;
+        padding: 0 12px;
+        background: rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 106, 19, 0.28);
+        border-radius: 6px;
+        box-shadow:
+          0 0 0 1px rgba(255, 106, 19, 0.04),
+          0 0 14px rgba(255, 106, 19, 0.10);
+        transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+        min-width: 0;
+      }
+      .url-bar:focus-within {
+        border-color: var(--orange);
+        background: rgba(0, 0, 0, 0.5);
+        box-shadow:
+          0 0 0 3px var(--orange-wash),
+          0 0 22px rgba(255, 106, 19, 0.22);
+      }
+
+      .url-bar .lock {
+        flex-shrink: 0;
+        color: var(--grey-soft);
+        display: inline-flex;
+      }
+      .url-bar .lock svg { width: 13px; height: 13px; }
+      .url-bar .lock .lock-insecure { display: none; }
+      .url-bar .lock.insecure { color: var(--text-mute); }
+      .url-bar .lock.insecure .lock-secure   { display: none; }
+      .url-bar .lock.insecure .lock-insecure { display: inline; }
+
+      .url-input {
+        flex: 1;
+        min-width: 0;
+        background: transparent;
+        border: none;
+        outline: none;
+        color: var(--text);
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        font-weight: 400;
+        letter-spacing: 0.1px;
+        padding: 0;
+        cursor: text;
+        height: 100%;
+        text-overflow: ellipsis;
+      }
+      .url-input::selection {
+        background: var(--orange-wash);
+        color: var(--text);
+      }
+      .url-input:focus { caret-color: var(--orange); }
+
+      /* Latency pill doubles as the connection-state indicator. Lives in the
+         toolbar so it can't occlude the stream. */
+      .latency-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        height: 26px;
+        padding: 0 10px;
+        background: rgba(255, 255, 255, 0.035);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        color: var(--text);
+        flex-shrink: 0;
+      }
+      .latency-pill .lat-dot {
+        width: 6px; height: 6px;
+        border-radius: 50%;
+        background: var(--green);
+      }
+      .latency-pill.warn .lat-dot {
+        background: var(--amber);
+        box-shadow: 0 0 6px rgba(255, 149, 0, 0.6);
+      }
+      .latency-pill.bad .lat-dot {
+        background: var(--red);
+        box-shadow: 0 0 10px rgba(255, 59, 48, 0.9);
+        animation: pulse-dot 0.9s ease-in-out infinite;
+      }
+      .latency-pill.connecting .lat-dot {
+        background: var(--amber);
+        box-shadow: 0 0 6px rgba(255, 149, 0, 0.7);
+        animation: pulse-dot 1.2s ease-in-out infinite;
+      }
+      .latency-pill.disconnected .lat-dot {
+        background: var(--red);
+        box-shadow: 0 0 8px rgba(255, 59, 48, 0.85);
+        animation: pulse-dot 1.2s ease-in-out infinite;
+      }
+      .latency-pill.connecting,
+      .latency-pill.disconnected {
+        color: var(--text-dim);
+        text-transform: uppercase;
+        letter-spacing: 1.2px;
+      }
+      @keyframes pulse-dot {
+        0%, 100% { opacity: 1; }
+        50%      { opacity: 0.4; }
+      }
 
       #stream-container {
-          width: {{ viewport_width }}px;
-          height: {{ viewport_height }}px;
-          max-width: 100%;
-          max-height: calc(100vh - 120px);
-          background: #000;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          position: relative;
+        position: relative;
+        width: {{ viewport_width }}px;
+        height: {{ viewport_height }}px;
+        max-width: 100%;
+        max-height: calc(100vh - 200px);
+        background: #000;
+        overflow: hidden;
       }
+      #stream-container:focus { outline: none; }
 
       #stream {
-          width: 100%;
-          height: 100%;
-          object-fit: contain;
-          cursor: default;
-          user-select: none;
-          display: block;
-          overscroll-behavior: none;
-          touch-action: none;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        cursor: default;
+        user-select: none;
+        display: block;
+        overscroll-behavior: none;
+        touch-action: none;
       }
 
-      /* Click feedback ring: visible immediately on mousedown so the
-       * operator knows their input was registered, even before the
-       * remote's response frame arrives over the WAN. Pure cosmetic —
-       * pointer-events:none keeps it from intercepting later events. */
+      /* Focus indicator — appears when the stream owns keyboard input so the
+         operator knows typing will go to the page. */
+      #stream-container.has-focus::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        border: 1.5px solid var(--orange);
+        pointer-events: none;
+        z-index: 8;
+        box-shadow: inset 0 0 0 1px rgba(255, 106, 19, 0.18);
+      }
+
+      /* Click feedback ring — confirms a click registered locally before the
+         WAN round-trip delivers the next frame. */
       .click-ring {
-          position: absolute;
-          width: 28px;
-          height: 28px;
-          margin-left: -14px;
-          margin-top: -14px;
-          border: 2px solid rgba(76, 175, 80, 0.9);
-          border-radius: 50%;
-          pointer-events: none;
-          z-index: 5;
-          animation: clickRing 380ms ease-out forwards;
+        position: absolute;
+        width: 28px;
+        height: 28px;
+        margin-left: -14px;
+        margin-top: -14px;
+        border: 2px solid rgba(255, 106, 19, 0.9);
+        border-radius: 50%;
+        pointer-events: none;
+        z-index: 5;
+        animation: clickRing 380ms ease-out forwards;
       }
-
       @keyframes clickRing {
-          from { transform: scale(0.3); opacity: 0.9; }
-          to   { transform: scale(1.6); opacity: 0; }
+        from { transform: scale(0.3); opacity: 0.9; }
+        to   { transform: scale(1.6); opacity: 0; }
       }
 
-      #completion-overlay {
-          position: absolute;
-          top: 0;
-          left: 0;
-          width: 100%;
-          height: 100%;
-          background: linear-gradient(135deg, #1a1a1a 0%, #0a0a0a 100%);
-          display: none;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          z-index: 10;
-          animation: fadeIn 0.3s ease-in-out;
+      /* Reconnect indicator: sweeping top bar + center pill + dim wash. */
+      .reconnect-indicator {
+        position: absolute;
+        inset: 0;
+        z-index: 6;
+        pointer-events: none;
+        display: none;
+      }
+      #stream-container.reconnecting .reconnect-indicator { display: block; }
+      .reconnect-indicator::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: rgba(8, 8, 10, 0.22);
+      }
+      .reconnect-indicator::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 2px;
+        width: 30%;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          var(--orange) 30%,
+          var(--orange-soft) 50%,
+          var(--orange) 70%,
+          transparent
+        );
+        box-shadow: 0 0 10px rgba(255, 106, 19, 0.6);
+        animation: reconnect-sweep 1.4s ease-in-out infinite;
+      }
+      @keyframes reconnect-sweep {
+        0%   { left: -32%; }
+        100% { left: 100%; }
+      }
+      .reconnect-pill {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        padding: 8px 14px;
+        background: var(--glass-strong);
+        backdrop-filter: blur(14px);
+        border: 1px solid var(--border-strong);
+        border-radius: 999px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 1.6px;
+        color: var(--text);
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+      }
+      .reconnect-pill::before {
+        content: '';
+        width: 7px; height: 7px;
+        border-radius: 50%;
+        background: var(--orange);
+        box-shadow: 0 0 10px rgba(255, 106, 19, 0.8);
+        animation: pulse-orange 1s ease-in-out infinite;
+      }
+      @keyframes pulse-orange {
+        0%, 100% { opacity: 1; }
+        50%      { opacity: 0.4; }
       }
 
-      #completion-overlay.show {
-          display: flex;
+      .toast-stack {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        z-index: 9;
+        max-width: 320px;
+        pointer-events: none;
+      }
+      .toast {
+        padding: 10px 14px;
+        background: var(--glass-strong);
+        backdrop-filter: blur(14px);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--green);
+        border-radius: 6px;
+        font-size: 12.5px;
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        animation: toastIn 0.22s ease-out;
+      }
+      .toast.warn { border-left-color: var(--amber); }
+      .toast.fading { animation: toastOut 0.25s ease-in forwards; }
+      .toast .toast-icon { flex-shrink: 0; display: inline-flex; color: var(--green); }
+      .toast.warn .toast-icon { color: var(--amber); }
+      .toast .toast-icon svg { width: 14px; height: 14px; }
+      @keyframes toastIn {
+        from { opacity: 0; transform: translateX(8px); }
+        to   { opacity: 1; transform: translateX(0); }
+      }
+      @keyframes toastOut {
+        from { opacity: 1; transform: translateX(0); }
+        to   { opacity: 0; transform: translateX(8px); }
       }
 
+      .help-overlay {
+        position: absolute;
+        inset: 0;
+        background: rgba(8, 8, 10, 0.75);
+        backdrop-filter: blur(10px);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 15;
+        animation: fadeIn 0.2s ease-out;
+      }
+      .help-overlay.show { display: flex; }
+      .help-card {
+        background: var(--glass-strong);
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        padding: 26px 30px;
+        min-width: 360px;
+        max-width: 480px;
+        position: relative;
+      }
+      .help-card::before {
+        content: '';
+        position: absolute;
+        top: -1px; left: 24px;
+        width: 36px; height: 2px;
+        background: var(--orange);
+      }
+      .help-card h3 {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-dim);
+        margin-bottom: 18px;
+        text-transform: uppercase;
+        letter-spacing: 1.6px;
+        font-family: var(--font-mono);
+      }
+      .help-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 9px 0;
+        font-size: 13px;
+        border-bottom: 1px solid rgba(255,255,255,0.04);
+      }
+      .help-row:last-child { border-bottom: none; }
+      .help-row .keys { display: inline-flex; gap: 4px; }
+      .help-row kbd {
+        padding: 2px 8px;
+        background: rgba(255,255,255,0.05);
+        border: 1px solid var(--border);
+        border-bottom-width: 2px;
+        border-radius: 4px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text);
+      }
+      .help-row .label { color: var(--text-dim); }
+
+      .completion-overlay {
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(60% 50% at 50% 40%, rgba(255, 106, 19, 0.10), transparent 70%),
+          rgba(14, 14, 18, 0.82);
+        backdrop-filter: blur(18px) saturate(140%);
+        -webkit-backdrop-filter: blur(18px) saturate(140%);
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        z-index: 20;
+        animation: fadeIn 0.3s ease-in-out;
+      }
+      .completion-overlay.show { display: flex; }
       @keyframes fadeIn {
-          from { opacity: 0; }
-          to { opacity: 1; }
+        from { opacity: 0; }
+        to   { opacity: 1; }
       }
-
-      .completion-checkmark {
-          font-size: 80px;
-          margin-bottom: 24px;
-          animation: scaleIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      .completion-check {
+        width: 72px; height: 72px;
+        border-radius: 50%;
+        background: rgba(255, 106, 19, 0.12);
+        border: 1.5px solid var(--orange);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 22px;
+        animation: scaleIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        box-shadow: 0 0 40px rgba(255, 106, 19, 0.3);
       }
-
+      .completion-check svg { width: 30px; height: 30px; color: var(--orange); }
       @keyframes scaleIn {
-          from { transform: scale(0); }
-          to { transform: scale(1); }
+        from { transform: scale(0); }
+        to   { transform: scale(1); }
       }
-
       .completion-title {
-          font-size: 32px;
-          font-weight: 600;
-          color: #4caf50;
-          margin-bottom: 16px;
-          text-align: center;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text);
+        margin-bottom: 10px;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        font-family: var(--font-mono);
       }
-
       .completion-reason {
-          font-size: 16px;
-          color: #bbb;
-          margin-bottom: 32px;
-          text-align: center;
-          max-width: 80%;
-          line-height: 1.5;
+        font-size: 13.5px;
+        color: #d4d4d8;
+        max-width: 460px;
+        width: 80%;
+        text-align: center;
+        line-height: 1.6;
+        margin-bottom: 24px;
+        white-space: pre-line; /* honor server-side \n if present */
+        word-break: break-word;
       }
-
       .completion-message {
-          font-size: 14px;
-          color: #888;
-          text-align: center;
+        font-size: 11px;
+        color: #9ca0aa;
+        text-transform: uppercase;
+        letter-spacing: 1.4px;
+        font-family: var(--font-mono);
       }
     </style>
   </head>
   <body>
-    <div id="browser-window">
-      <div id="toolbar">
-        <span class="browser-icon">&#x1f310;</span>
+    <div class="session-header">
+      <span class="brand">
+        <span class="brand-mark"></span>
+        browser-handoff
+      </span>
+      {% if scenario_name %}
+        <span class="sep">/</span>
+        <span class="scenario">{{ scenario_name }}</span>
+      {% endif %}
+      <span class="sep">/</span>
+      <span class="reason-wrap" id="reason-wrap">
+        <span class="reason" id="header-reason">{{ reason }}</span>
+        <button class="reason-expand" id="reason-expand" type="button" aria-label="Show full reason">
+          <span id="reason-expand-label">Show more</span>
+        </button>
+        <div class="reason-dropdown" id="reason-dropdown"></div>
+      </span>
+    </div>
 
-        <div class="nav-buttons">
-          <button id="reload" class="nav-button" title="Reload">&#x27f3;</button>
+    <div class="browser-window">
+      <div class="toolbar">
+        <button class="icon-btn" id="reload-btn" title="Reload">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12a9 9 0 0 1 15.5-6.3L21 8"/>
+            <path d="M21 3v5h-5"/>
+            <path d="M21 12a9 9 0 0 1-15.5 6.3L3 16"/>
+            <path d="M3 21v-5h5"/>
+          </svg>
+        </button>
+
+        <button class="icon-btn" id="help-btn" title="Keyboard shortcuts (?)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+        </button>
+
+        <div class="url-bar">
+          <span class="lock" id="lock-indicator" title="Secure">
+            <svg class="lock-secure" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="4" y="11" width="16" height="10" rx="2"/>
+              <path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+            </svg>
+            <svg class="lock-insecure" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="4" y="11" width="16" height="10" rx="2"/>
+              <path d="M8 11V7a4 4 0 0 1 7.9-1"/>
+            </svg>
+          </span>
+          <input
+            type="text"
+            class="url-input"
+            id="url-input"
+            readonly
+            spellcheck="false"
+            value=""
+          />
         </div>
 
-        <div id="task-info"><span class="label">Task:</span>{{ reason }}</div>
-
-        <div id="status">
-          <span class="connecting"
-            ><span class="status-dot"></span>Connecting...</span
-          >
+        <div class="latency-pill connecting" id="latency-pill">
+          <span class="lat-dot"></span>
+          <span class="lat-value" id="latency-value">Connecting</span>
         </div>
       </div>
 
-      <div id="stream-container">
+      <div id="stream-container" class="has-focus" tabindex="0">
         <img id="stream" alt="Browser Stream" draggable="false" />
-        <div id="completion-overlay">
-          <div class="completion-checkmark">&#x2705;</div>
+
+        <div class="reconnect-indicator">
+          <div class="reconnect-pill">Reconnecting</div>
+        </div>
+
+        <div class="toast-stack" id="toast-stack"></div>
+
+        <div class="help-overlay" id="help-overlay">
+          <div class="help-card">
+            <h3>Keyboard shortcuts</h3>
+            <div class="help-row">
+              <span class="label">Paste from clipboard</span>
+              <span class="keys"><kbd>Ctrl</kbd><kbd>V</kbd></span>
+            </div>
+            <div class="help-row">
+              <span class="label">Copy selection</span>
+              <span class="keys"><kbd>Ctrl</kbd><kbd>C</kbd></span>
+            </div>
+            <div class="help-row">
+              <span class="label">Cut selection</span>
+              <span class="keys"><kbd>Ctrl</kbd><kbd>X</kbd></span>
+            </div>
+            <div class="help-row">
+              <span class="label">Select all</span>
+              <span class="keys"><kbd>Ctrl</kbd><kbd>A</kbd></span>
+            </div>
+            <div class="help-row">
+              <span class="label">Reload page</span>
+              <span class="keys"><kbd>Click</kbd> reload icon</span>
+            </div>
+            <div class="help-row">
+              <span class="label">Close this overlay</span>
+              <span class="keys"><kbd>Esc</kbd> or <kbd>?</kbd></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="completion-overlay" id="completion-overlay">
+          <div class="completion-check">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+          </div>
           <div class="completion-title">Task Completed</div>
           <div class="completion-reason" id="completion-reason-text"></div>
           <div class="completion-message">You may close this window</div>
@@ -258,252 +817,451 @@
       const ACCESS_TOKEN = "{{ access_token }}";
 
       const stream = document.getElementById('stream');
-      const statusEl = document.getElementById('status').querySelector('span');
+      const streamContainer = document.getElementById('stream-container');
+      const latencyPill = document.getElementById('latency-pill');
+      const latencyValue = document.getElementById('latency-value');
+      const urlInput = document.getElementById('url-input');
+      const lockEl = document.getElementById('lock-indicator');
+      const helpOverlay = document.getElementById('help-overlay');
       const completionOverlay = document.getElementById('completion-overlay');
       const completionReasonText = document.getElementById('completion-reason-text');
+      const toastStack = document.getElementById('toast-stack');
+      const reloadBtn = document.getElementById('reload-btn');
+      const helpBtn = document.getElementById('help-btn');
+      const headerReasonEl = document.getElementById('header-reason');
+      const reasonWrap = document.getElementById('reason-wrap');
+      const reasonExpand = document.getElementById('reason-expand');
+      const reasonExpandLabel = document.getElementById('reason-expand-label');
+      const reasonDropdown = document.getElementById('reason-dropdown');
 
-      // Determine WebSocket protocol based on page protocol
+      // Show more / Show less for long reasons. The header truncates with a
+      // right-edge fade; clicking the inline "Show more" link drops a panel
+      // with the full text over the stream (z-index: 60), so the layout
+      // doesn't shift.
+      function checkReasonOverflow() {
+        const overflows = headerReasonEl.scrollWidth > headerReasonEl.clientWidth + 1;
+        reasonWrap.classList.toggle('truncated', overflows);
+        if (!overflows) closeReasonDropdown();
+      }
+      function openReasonDropdown() {
+        reasonDropdown.textContent = headerReasonEl.textContent;
+        reasonDropdown.classList.add('show');
+        reasonExpandLabel.textContent = 'Show less';
+      }
+      function closeReasonDropdown() {
+        reasonDropdown.classList.remove('show');
+        reasonExpandLabel.textContent = 'Show more';
+      }
+      function toggleReasonDropdown() {
+        if (reasonDropdown.classList.contains('show')) closeReasonDropdown();
+        else openReasonDropdown();
+      }
+      reasonExpand.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleReasonDropdown();
+      });
+      headerReasonEl.addEventListener('click', (e) => {
+        if (!reasonWrap.classList.contains('truncated')) return;
+        e.stopPropagation();
+        toggleReasonDropdown();
+      });
+      document.addEventListener('click', (e) => {
+        if (reasonDropdown.contains(e.target)) return;
+        if (reasonWrap.contains(e.target)) return;
+        closeReasonDropdown();
+      });
+      window.addEventListener('resize', checkReasonOverflow);
+      new ResizeObserver(checkReasonOverflow).observe(headerReasonEl);
+      // First measurement before font swap can mis-report overflow when
+      // Plex's metrics differ from the fallback system font.
+      checkReasonOverflow();
+      if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(checkReasonOverflow);
+      }
+
+      // Determine WebSocket protocol based on page protocol.
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?t=${ACCESS_TOKEN}`);
       ws.binaryType = 'blob';
       let mouseThrottle = null;
 
-      // Track stream connection
+      // Once the task is marked completed, the server tears down and the WS
+      // closes — that's expected. This flag suppresses any further connection-
+      // state updates so the latency pill doesn't flip to Offline and the
+      // reconnecting overlay doesn't reappear under the completion overlay.
+      let isCompleted = false;
       let streamConnected = false;
+      let lastLatency = null;
 
-      function updateStatus() {
-          if (streamConnected) {
-              statusEl.className = 'connected';
-              statusEl.innerHTML = '<span class="status-dot"></span>Connected';
-          } else {
-              statusEl.className = 'connecting';
-              statusEl.innerHTML = '<span class="status-dot"></span>Connecting...';
-          }
+      function applyLatencyState(state) {
+        if (isCompleted) return;
+        latencyPill.classList.remove('warn', 'bad', 'connecting', 'disconnected');
+        if (state === 'connecting') {
+          latencyPill.classList.add('connecting');
+          latencyValue.textContent = 'Connecting';
+        } else if (state === 'disconnected') {
+          latencyPill.classList.add('disconnected');
+          latencyValue.textContent = 'Offline';
+        } else if (state === 'connected' && lastLatency !== null) {
+          setLatencyValue(lastLatency);
+        }
+        streamContainer.classList.toggle(
+          'reconnecting', state === 'connecting' || state === 'disconnected'
+        );
       }
 
-      // Latest-frame-wins client-side. We may receive frames faster than
-      // the screen can paint; only the newest unrendered frame matters.
-      // requestAnimationFrame coalesces multiple receive ticks into a
-      // single paint per refresh cycle.
+      function setLatencyValue(ms) {
+        lastLatency = ms;
+        if (isCompleted) return;
+        if (latencyPill.classList.contains('connecting') ||
+            latencyPill.classList.contains('disconnected')) return;
+        latencyValue.textContent = ms + ' ms';
+        latencyPill.classList.remove('warn', 'bad');
+        if (ms >= 300)      latencyPill.classList.add('bad');
+        else if (ms >= 120) latencyPill.classList.add('warn');
+      }
+
+      // URL bar + lock — driven by url_changed events from the server.
+      function setUrl(url) {
+        if (!url) return;
+        urlInput.value = url;
+        urlInput.scrollLeft = 0;
+        const isSecure = /^https:\/\//i.test(url);
+        lockEl.classList.toggle('insecure', !isSecure);
+        lockEl.title = isSecure ? 'Secure' : 'Not secure';
+      }
+
+      // Latest-frame-wins client-side. We may receive frames faster than the
+      // screen can paint; only the newest unrendered frame matters.
+      // requestAnimationFrame coalesces multiple receive ticks into a single
+      // paint per refresh cycle.
       let pendingBlob = null;
       let rafScheduled = false;
       let currentObjectUrl = null;
 
       function renderPendingFrame() {
-          rafScheduled = false;
-          if (!pendingBlob) return;
-          const url = URL.createObjectURL(pendingBlob);
-          pendingBlob = null;
-          const previous = currentObjectUrl;
-          currentObjectUrl = url;
-          stream.src = url;
-          if (previous) URL.revokeObjectURL(previous);
-          if (!streamConnected) {
-              streamConnected = true;
-              updateStatus();
-          }
+        rafScheduled = false;
+        if (!pendingBlob) return;
+        const url = URL.createObjectURL(pendingBlob);
+        pendingBlob = null;
+        const previous = currentObjectUrl;
+        currentObjectUrl = url;
+        stream.src = url;
+        if (previous) URL.revokeObjectURL(previous);
+        if (!streamConnected) {
+          streamConnected = true;
+          applyLatencyState('connected');
+          // Stop the spinner now that frames are arriving.
+          reloadBtn.classList.remove('spinning');
+        }
       }
 
-      ws.onopen = () => console.log('WS Connected');
-      ws.onerror = (e) => console.error('WS Error:', e);
+      ws.onopen = () => {
+        // Keep the pill in 'connecting' until the first frame actually
+        // arrives — a clean ws.onopen with no frames yet still feels stalled.
+      };
 
       ws.onclose = () => {
-          streamConnected = false;
-          updateStatus();
+        if (isCompleted) return;
+        streamConnected = false;
+        applyLatencyState('disconnected');
+      };
+
+      ws.onerror = () => {
+        if (isCompleted) return;
+        applyLatencyState('disconnected');
       };
 
       ws.onmessage = (event) => {
-          if (typeof event.data !== 'string') {
-              // Binary frame: drop any unrendered older frame, keep newest.
-              pendingBlob = event.data;
-              if (!rafScheduled) {
-                  rafScheduled = true;
-                  requestAnimationFrame(renderPendingFrame);
-              }
-              return;
+        if (typeof event.data !== 'string') {
+          // Binary frame: drop any unrendered older frame, keep newest.
+          pendingBlob = event.data;
+          if (!rafScheduled) {
+            rafScheduled = true;
+            requestAnimationFrame(renderPendingFrame);
           }
-          const message = JSON.parse(event.data);
-          if (message.type === 'task_completed') {
-              showCompletionOverlay(message.reason);
-          } else if (message.type === 'copy_response') {
-              // The remote selection comes back here so we can drop it onto
-              // the operator's local clipboard. Failure (no permission, no
-              // selection) is silent — operator can retry.
-              if (message.text && navigator.clipboard && navigator.clipboard.writeText) {
-                  navigator.clipboard.writeText(message.text).catch(() => {});
-              }
+          return;
+        }
+        const message = JSON.parse(event.data);
+        if (message.type === 'task_completed') {
+          showCompletionOverlay(message.reason);
+        } else if (message.type === 'copy_response') {
+          // The page selection round-trips here so we can drop it onto the
+          // operator's local clipboard. Silent failure (no permission, no
+          // selection) — operator can retry. `cut` flag distinguishes a
+          // cut from a copy so the toast reads correctly.
+          if (message.text && navigator.clipboard && navigator.clipboard.writeText) {
+            const toastKind = message.cut ? 'cut' : 'copy';
+            navigator.clipboard.writeText(message.text)
+              .then(() => showToast(toastKind))
+              .catch(() => {});
           }
+        } else if (message.type === 'url_changed') {
+          setUrl(message.url);
+        } else if (message.type === 'pong') {
+          // Echo'd timestamp from the server — RTT is now() minus that ts.
+          if (typeof message.ts === 'number') {
+            const rtt = Date.now() - message.ts;
+            if (rtt >= 0) setLatencyValue(rtt);
+          }
+        }
       };
 
       function showCompletionOverlay(reason) {
-          completionReasonText.textContent = reason;
-          completionOverlay.classList.add('show');
-          statusEl.className = 'completed';
-          statusEl.innerHTML = '<span class="status-dot"></span>Completed';
+        completionReasonText.textContent = reason || '';
+        completionOverlay.classList.add('show');
+        isCompleted = true;
+        // Pill is meaningless after completion — hide it. The overlay is the
+        // source of truth for end-of-session state.
+        latencyPill.style.display = 'none';
+        streamContainer.classList.remove('reconnecting');
       }
 
       function send(data) {
-          if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify(data));
-          }
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(data));
+        }
       }
 
-      document.getElementById('reload').onclick = () => send({type: 'navigate', action: 'reload'});
+      // Toast system — cap at 3 visible so a burst of clipboard events
+      // doesn't bury the stream.
+      const MAX_TOASTS = 3;
+      const TOAST_SPECS = {
+        paste: {
+          msg: 'Pasted clipboard contents',
+          cls: '',
+          icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+        },
+        copy: {
+          msg: 'Copied selection to clipboard',
+          cls: '',
+          icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+        },
+        cut: {
+          msg: 'Cut selection to clipboard',
+          cls: '',
+          icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>',
+        },
+        warn: {
+          msg: 'Allow clipboard access to paste',
+          cls: 'warn',
+          icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+        },
+      };
+      function showToast(kind) {
+        const spec = TOAST_SPECS[kind];
+        if (!spec) return;
+        while (toastStack.children.length >= MAX_TOASTS) {
+          toastStack.removeChild(toastStack.firstChild);
+        }
+        const el = document.createElement('div');
+        el.className = 'toast ' + spec.cls;
+        el.innerHTML = `<span class="toast-icon">${spec.icon}</span><span>${spec.msg}</span>`;
+        toastStack.appendChild(el);
+        setTimeout(() => {
+          el.classList.add('fading');
+          el.addEventListener('animationend', () => el.remove(), {once: true});
+        }, 2800);
+      }
+
+      reloadBtn.onclick = () => {
+        reloadBtn.classList.add('spinning');
+        // Safety net: even if no frame arrives, drop the spinner after 2s so
+        // it doesn't stay spinning forever on a stalled stream.
+        setTimeout(() => reloadBtn.classList.remove('spinning'), 2000);
+        send({type: 'navigate', action: 'reload'});
+      };
+
+      helpBtn.onclick = () => helpOverlay.classList.toggle('show');
+      helpOverlay.addEventListener('click', (e) => {
+        if (e.target === helpOverlay) helpOverlay.classList.remove('show');
+      });
 
       function getCoords(e) {
-          const rect = stream.getBoundingClientRect();
+        const rect = stream.getBoundingClientRect();
 
-          // Use the actual frame dimensions, not VIEWPORT_WIDTH/HEIGHT. The
-          // template values can disagree with what CDP actually captures
-          // (Xvfb display size, window decorations, devicePixelRatio, or
-          // Page.startScreencast clamping). naturalWidth/Height is the truth.
-          const naturalW = stream.naturalWidth;
-          const naturalH = stream.naturalHeight;
-          if (!naturalW || !naturalH) return null;
+        // Use actual frame dimensions, not VIEWPORT_WIDTH/HEIGHT. The
+        // template values can disagree with what CDP actually captures
+        // (Xvfb display size, window decorations, devicePixelRatio, or
+        // Page.startScreencast clamping). naturalWidth/Height is the truth.
+        const naturalW = stream.naturalWidth;
+        const naturalH = stream.naturalHeight;
+        if (!naturalW || !naturalH) return null;
 
-          const containerAspect = rect.width / rect.height;
-          const imageAspect = naturalW / naturalH;
+        const containerAspect = rect.width / rect.height;
+        const imageAspect = naturalW / naturalH;
 
-          let imageWidth, imageHeight, offsetX, offsetY;
-          if (imageAspect > containerAspect) {
-              imageWidth = rect.width;
-              imageHeight = rect.width / imageAspect;
-              offsetX = 0;
-              offsetY = (rect.height - imageHeight) / 2;
-          } else {
-              imageHeight = rect.height;
-              imageWidth = rect.height * imageAspect;
-              offsetX = (rect.width - imageWidth) / 2;
-              offsetY = 0;
-          }
+        let imageWidth, imageHeight, offsetX, offsetY;
+        if (imageAspect > containerAspect) {
+          imageWidth = rect.width;
+          imageHeight = rect.width / imageAspect;
+          offsetX = 0;
+          offsetY = (rect.height - imageHeight) / 2;
+        } else {
+          imageHeight = rect.height;
+          imageWidth = rect.height * imageAspect;
+          offsetX = (rect.width - imageWidth) / 2;
+          offsetY = 0;
+        }
 
-          const x = e.clientX - rect.left;
-          const y = e.clientY - rect.top;
-          if (x < offsetX || x > offsetX + imageWidth ||
-              y < offsetY || y > offsetY + imageHeight) {
-              return null; // padding area
-          }
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        if (x < offsetX || x > offsetX + imageWidth ||
+            y < offsetY || y > offsetY + imageHeight) {
+          return null;
+        }
 
-          // Map displayed-pixel → frame-pixel. Input.dispatchMouseEvent
-          // expects page CSS pixels; with devicePixelRatio=1 (default Xvfb),
-          // frame pixels equal viewport CSS pixels, so this is what CDP wants.
-          return {
-              x: Math.round((x - offsetX) * (naturalW / imageWidth)),
-              y: Math.round((y - offsetY) * (naturalH / imageHeight))
-          };
+        // Map displayed-pixel → frame-pixel. Input.dispatchMouseEvent expects
+        // page CSS pixels; with devicePixelRatio=1 (default Xvfb), frame
+        // pixels equal viewport CSS pixels, so this is what CDP wants.
+        return {
+          x: Math.round((x - offsetX) * (naturalW / imageWidth)),
+          y: Math.round((y - offsetY) * (naturalH / imageHeight)),
+        };
       }
 
-      // Suppress native image drag — without this, the browser swallows
-      // mousemoves into its drag-and-drop machinery and the remote sees a
+      // Suppress native image drag — without this the browser swallows
+      // mousemoves into its drag-and-drop machinery and the page sees a
       // click, never a drag-select.
       stream.ondragstart = (e) => e.preventDefault();
 
-      const streamContainer = document.getElementById('stream-container');
-
       function spawnClickRing(clientX, clientY) {
-          const rect = streamContainer.getBoundingClientRect();
-          const ring = document.createElement('div');
-          ring.className = 'click-ring';
-          ring.style.left = (clientX - rect.left) + 'px';
-          ring.style.top = (clientY - rect.top) + 'px';
-          streamContainer.appendChild(ring);
-          // Self-remove after the animation; listening once keeps the DOM
-          // clean even under rapid clicks.
-          ring.addEventListener('animationend', () => ring.remove(), {once: true});
+        const rect = streamContainer.getBoundingClientRect();
+        const ring = document.createElement('div');
+        ring.className = 'click-ring';
+        ring.style.left = (clientX - rect.left) + 'px';
+        ring.style.top = (clientY - rect.top) + 'px';
+        streamContainer.appendChild(ring);
+        ring.addEventListener('animationend', () => ring.remove(), {once: true});
       }
 
       stream.onmousedown = (e) => {
-          // preventDefault on the left button so the local browser doesn't try
-          // to start a selection / drag on the <img> itself — all movement
-          // semantics belong to the remote.
-          if (e.button === 0) e.preventDefault();
-          const coords = getCoords(e);
-          if (!coords) return; // Ignore clicks on padding
-          // Local feedback first — confirms the click registered before the
-          // WAN round trip delivers the remote's response frame.
-          spawnClickRing(e.clientX, e.clientY);
-          send({type: 'mouse', action: 'mousedown', x: coords.x, y: coords.y, button: e.button, clickCount: e.detail || 1});
+        // preventDefault on the left button so the local browser doesn't try
+        // to start a selection / drag on the <img>. All movement semantics
+        // belong to the page being streamed.
+        if (e.button === 0) e.preventDefault();
+        const coords = getCoords(e);
+        if (!coords) return;
+        spawnClickRing(e.clientX, e.clientY);
+        send({type: 'mouse', action: 'mousedown', x: coords.x, y: coords.y, button: e.button, clickCount: e.detail || 1});
       };
 
       stream.onmouseup = (e) => {
-          const coords = getCoords(e);
-          if (!coords) return; // Ignore clicks on padding
-          send({type: 'mouse', action: 'mouseup', x: coords.x, y: coords.y, button: e.button, clickCount: e.detail || 1});
+        const coords = getCoords(e);
+        if (!coords) return;
+        send({type: 'mouse', action: 'mouseup', x: coords.x, y: coords.y, button: e.button, clickCount: e.detail || 1});
       };
 
       stream.onmousemove = (e) => {
-          // Throttle mouse move events to ~60 FPS
-          if (mouseThrottle) return;
+        if (mouseThrottle) return;
+        mouseThrottle = setTimeout(() => { mouseThrottle = null; }, 16);
 
-          mouseThrottle = setTimeout(() => {
-              mouseThrottle = null;
-          }, 16);
-
-          const coords = getCoords(e);
-          if (!coords) return; // Ignore moves on padding
-          // e.buttons is the bitmask of currently held buttons (1=left,
-          // 2=right, 4=middle). The server needs this so drags (mousedown →
-          // move → mouseup) become real drags on the remote instead of
-          // hover events sandwiched between a click.
-          send({type: 'mouse', action: 'mousemove', x: coords.x, y: coords.y, buttons: e.buttons});
+        const coords = getCoords(e);
+        if (!coords) return;
+        // e.buttons is the bitmask of currently held buttons (1=left,
+        // 2=right, 4=middle). The server needs this so drags (mousedown →
+        // move → mouseup) become real drags on the page instead of hover
+        // events sandwiched between a click.
+        send({type: 'mouse', action: 'mousemove', x: coords.x, y: coords.y, buttons: e.buttons});
       };
 
       stream.onwheel = (e) => {
-          e.preventDefault();
-          const coords = getCoords(e);
-          if (!coords) return; // Ignore wheel on padding
-          send({type: 'mouse', action: 'wheel', x: coords.x, y: coords.y, deltaX: e.deltaX, deltaY: e.deltaY});
+        e.preventDefault();
+        const coords = getCoords(e);
+        if (!coords) return;
+        send({type: 'mouse', action: 'wheel', x: coords.x, y: coords.y, deltaX: e.deltaX, deltaY: e.deltaY});
       };
 
-      // Clipboard relay: the remote browser has its own (isolated) clipboard,
-      // so ctrl/cmd + v / c are intercepted here. Paste reads the operator's
-      // local clipboard and sends the text; copy asks the server for the
-      // remote selection and writes it back to the local clipboard.
+      // Clipboard relay: the streamed browser has its own (isolated)
+      // clipboard, so ctrl/cmd + v / c are intercepted here. Paste reads the
+      // operator's local clipboard and sends the text; copy asks the server
+      // for the page's current selection and writes it to the local
+      // clipboard.
       function isClipboardShortcut(e) {
-          if (!(e.ctrlKey || e.metaKey)) return null;
-          // Prefer e.code (physical key) so non-Latin layouts (e.g. Cyrillic
-          // 'м' on the V key) still trigger the intercept. Fall back to e.key
-          // for environments where code isn't populated.
-          const code = e.code || '';
-          if (code === 'KeyV') return 'v';
-          if (code === 'KeyC') return 'c';
-          const k = (e.key || '').toLowerCase();
-          return (k === 'v' || k === 'c') ? k : null;
+        if (!(e.ctrlKey || e.metaKey)) return null;
+        // Prefer e.code (physical key) so non-Latin layouts still trigger
+        // the intercept. Fall back to e.key when code isn't populated.
+        const code = e.code || '';
+        if (code === 'KeyV') return 'v';
+        if (code === 'KeyC') return 'c';
+        if (code === 'KeyX') return 'x';
+        const k = (e.key || '').toLowerCase();
+        return (k === 'v' || k === 'c' || k === 'x') ? k : null;
       }
 
       document.onkeydown = async (e) => {
-          // Every keystroke is meant for the remote, never for this page's
-          // chrome. Without preventDefault, ctrl+A selects the toolbar text,
-          // ctrl+R reloads the stream viewer, ctrl+F opens local find, etc.
-          // Browser-reserved shortcuts (ctrl+T/W/N, F11, F12) are unaffected —
-          // preventDefault doesn't apply to those.
+        // While the operator's interacting with the URL bar, hand the keys
+        // to the browser so arrow keys / Home / End / Ctrl+C of the URL
+        // text work natively.
+        if (document.activeElement === urlInput) return;
+
+        // `?` toggles the help overlay; Esc closes it.
+        if (e.key === '?' || (e.shiftKey && e.key === '/')) {
           e.preventDefault();
-          const clip = isClipboardShortcut(e);
-          if (clip === 'v') {
-              try {
-                  const text = await navigator.clipboard.readText();
-                  if (text) send({type: 'paste', text});
-              } catch (err) {
-                  // Permission denied / unavailable — fall back to the raw key
-                  // so behavior matches today's broken-but-familiar baseline.
-                  send({type: 'keyboard', action: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
-              }
-              return;
+          helpOverlay.classList.toggle('show');
+          return;
+        }
+        if (e.key === 'Escape') {
+          const helpShown = helpOverlay.classList.contains('show');
+          const dropdownShown = reasonDropdown.classList.contains('show');
+          if (helpShown || dropdownShown) {
+            e.preventDefault();
+            if (helpShown) helpOverlay.classList.remove('show');
+            if (dropdownShown) closeReasonDropdown();
+            return;
           }
-          if (clip === 'c') {
-              send({type: 'copy_request'});
-              return;
+        }
+
+        // Every keystroke is meant for the page, never for this viewer's
+        // chrome. Without preventDefault, ctrl+A selects toolbar text,
+        // ctrl+R reloads the viewer, ctrl+F opens local find, etc.
+        // Browser-reserved shortcuts (ctrl+T/W/N, F11, F12) are unaffected.
+        e.preventDefault();
+
+        const clip = isClipboardShortcut(e);
+        if (clip === 'v') {
+          try {
+            const text = await navigator.clipboard.readText();
+            if (text) {
+              send({type: 'paste', text});
+              showToast('paste');
+            }
+          } catch (err) {
+            showToast('warn');
+            // Fall back to the raw key so behavior matches today's
+            // broken-but-familiar baseline.
+            send({type: 'keyboard', action: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
           }
-          send({type: 'keyboard', action: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
+          return;
+        }
+        if (clip === 'c') {
+          send({type: 'copy_request'});
+          return;
+        }
+        if (clip === 'x') {
+          send({type: 'cut_request'});
+          return;
+        }
+        send({type: 'keyboard', action: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
       };
 
       document.onkeyup = (e) => {
-          e.preventDefault();
-          if (isClipboardShortcut(e)) return;
-          send({type: 'keyboard', action: 'keyup', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
+        if (document.activeElement === urlInput) return;
+        e.preventDefault();
+        if (isClipboardShortcut(e)) return;
+        send({type: 'keyboard', action: 'keyup', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
       };
 
       stream.oncontextmenu = (e) => e.preventDefault();
+
+      // Latency ping/pong: client measures RTT against its own clock.
+      setInterval(() => {
+        if (ws.readyState !== WebSocket.OPEN || isCompleted) return;
+        send({type: 'ping', ts: Date.now()});
+      }, 2000);
+
+      // Boot in 'connecting' until the first frame paints.
+      applyLatencyState('connecting');
     </script>
   </body>
 </html>

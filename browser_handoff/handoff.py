@@ -368,6 +368,7 @@ class Handoff:
                 page=page,
                 context=context,
                 reason=reason,
+                scenario_name=name,
                 viewport_size=viewport_size,
             )
 
