@@ -144,6 +144,13 @@ class StreamingServer:
                 with suppress(Exception):
                     await websocket.send_bytes(session_state.latest_frame)
 
+            # Seed the URL bar so it isn't blank until the next navigation.
+            if session_state.current_url is not None:
+                with suppress(Exception):
+                    await websocket.send_json(
+                        {"type": "url_changed", "url": session_state.current_url}
+                    )
+
             sender_task = asyncio.create_task(
                 self._stream_frames_to_ws(websocket, session_state)
             )
@@ -169,6 +176,14 @@ class StreamingServer:
                                 with suppress(Exception):
                                     await websocket.send_json(
                                         {"type": "copy_response", "text": text}
+                                    )
+                            elif msg_type == "ping":
+                                # Echo the client's timestamp straight back so
+                                # the viewer can measure RTT against its own
+                                # clock. Avoids any server/client clock skew.
+                                with suppress(Exception):
+                                    await websocket.send_json(
+                                        {"type": "pong", "ts": message.get("ts")}
                                     )
                         except Exception as e:
                             logger.error(f"Error handling {msg_type} event: {e}")
@@ -217,6 +232,7 @@ class StreamingServer:
         page: "Page",
         context: "BrowserContext",
         reason: str,
+        scenario_name: str | None = None,
         viewport_size: dict[str, int] | None = None,
     ) -> HandoffSession:
         """Register a new Page for streaming.
@@ -226,6 +242,7 @@ class StreamingServer:
             page: Playwright page to stream.
             context: Browser context the page belongs to.
             reason: Reason for handoff (shown to user).
+            scenario_name: Label of the matched scenario (breadcrumb header).
             viewport_size: Optional viewport dimensions.
 
         Returns:
@@ -240,6 +257,7 @@ class StreamingServer:
             context=context,
             cdp=cdp,
             reason=reason,
+            scenario_name=scenario_name,
             viewport_size=viewport_size or DEFAULT_VIEWPORT.copy(),
         )
         # The token can't outlive the handoff itself, which is bounded by
@@ -249,6 +267,14 @@ class StreamingServer:
         self._token_to_session[session.access_token] = session_id
 
         await self._suppress_context_menu(page)
+
+        # Seed the URL with whatever Playwright has now, then track every
+        # subsequent main-frame navigation so the viewer's URL bar matches
+        # the page. Subframe navigations are ignored — operators care about
+        # the document URL, not third-party iframes.
+        with suppress(Exception):
+            session.current_url = page.url
+        self._attach_url_tracker(session)
 
         # Take initial screenshot as first frame so the page paints
         # immediately when a client connects, before screencast warms up.
@@ -262,6 +288,40 @@ class StreamingServer:
         session.capture_task = asyncio.create_task(self._capture_frames(session))
 
         return session
+
+    def _attach_url_tracker(self, session: HandoffSession) -> None:
+        """Push main-frame URL changes to every connected viewer.
+
+        Playwright fires framenavigated on the loop thread but from a sync
+        callback, so the async fan-out has to be scheduled via the
+        background-task pattern. Subframes (ads, embeds) are filtered out
+        — the URL bar is for the document.
+        """
+        page = session.page
+
+        def on_framenavigated(frame: Any) -> None:
+            if frame != page.main_frame:
+                return
+            try:
+                url = frame.url
+            except Exception:
+                return
+            session.current_url = url
+            payload = {"type": "url_changed", "url": url}
+            for ws in list(session.websockets):
+                self._spawn_tracked(session, self._safe_send_json(ws, payload))
+
+        page.on("framenavigated", on_framenavigated)
+
+    @staticmethod
+    async def _safe_send_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
+        """send_json that swallows transport errors.
+
+        A disconnected viewer must not abort a fan-out: the same payload is
+        being delivered to N other viewers concurrently.
+        """
+        with suppress(Exception):
+            await websocket.send_json(payload)
 
     @staticmethod
     async def _suppress_context_menu(page: "Page") -> None:
@@ -666,6 +726,7 @@ class StreamingServer:
         return template.render(
             access_token=session.access_token,
             reason=reason,
+            scenario_name=session.scenario_name,
             viewport_width=session.viewport_size["width"],
             viewport_height=session.viewport_size["height"],
         )

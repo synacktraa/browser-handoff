@@ -24,6 +24,14 @@ class HandoffSession:
     context: "BrowserContext"
     cdp: "CDPSession"
     reason: str
+    # Label of the scenario that triggered this handoff. Rendered as the
+    # middle segment of the stream viewer's breadcrumb header so the
+    # operator knows which trigger fired.
+    scenario_name: str | None = None
+    # Last URL Playwright reported for the page's main frame. Updated on
+    # every main-frame navigation and pushed to all connected viewers so
+    # the URL bar reflects where the page actually is.
+    current_url: str | None = None
     # The capability secret in the stream URL. ~256-bit, CSPRNG, decoupled from
     # session_id (which is the correlation key in logs) so the secret never
     # lands in general logging. The streaming endpoints resolve by this, not by
