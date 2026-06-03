@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Browser Handoff — Human Intervention</title>
+    <title>Browser Handoff — {{ scenario_name or 'Human Intervention' }}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -448,7 +448,13 @@
         display: block;
         overscroll-behavior: none;
         touch-action: none;
+        /* Hidden until the first frame paints so the browser's
+           broken-image / alt-text placeholder doesn't flash during the
+           connect window (a few hundred ms locally, 1–2s over WAN). The
+           black stream-container background fills the space meanwhile. */
+        visibility: hidden;
       }
+      #stream.has-frame { visibility: visible; }
 
       /* Focus indicator — appears when the stream owns keyboard input so the
          operator knows typing will go to the page. */
@@ -803,7 +809,7 @@
         <img id="stream" alt="Browser Stream" draggable="false" />
 
         <div class="reconnect-indicator">
-          <div class="reconnect-pill">Reconnecting</div>
+          <div class="reconnect-pill" id="reconnect-pill">Connecting</div>
         </div>
 
         <div class="toast-stack" id="toast-stack"></div>
@@ -871,6 +877,7 @@
       const reasonExpand = document.getElementById('reason-expand');
       const reasonExpandLabel = document.getElementById('reason-expand-label');
       const reasonDropdown = document.getElementById('reason-dropdown');
+      const reconnectPill = document.getElementById('reconnect-pill');
 
       // Show more / Show less for long reasons. The header truncates with a
       // right-edge fade; clicking the inline "Show more" link drops a panel
@@ -937,9 +944,14 @@
         if (state === 'connecting') {
           latencyPill.classList.add('connecting');
           latencyValue.textContent = 'Connecting';
+          // "Connecting" reads correctly for the initial connect window
+          // (no frame yet). The overlay covers the blank stream so a slow
+          // handshake doesn't look stuck.
+          reconnectPill.textContent = 'Connecting';
         } else if (state === 'disconnected') {
           latencyPill.classList.add('disconnected');
           latencyValue.textContent = 'Offline';
+          reconnectPill.textContent = 'Reconnecting';
         } else if (state === 'connected' && lastLatency !== null) {
           setLatencyValue(lastLatency);
         }
@@ -988,6 +1000,9 @@
         if (previous) URL.revokeObjectURL(previous);
         if (!streamConnected) {
           streamConnected = true;
+          // Reveal the <img> now that it has a real frame to display;
+          // before this point the alt-text placeholder would show.
+          stream.classList.add('has-frame');
           applyLatencyState('connected');
           // Stop the spinner now that frames are arriving.
           reloadBtn.classList.remove('spinning');
