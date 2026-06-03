@@ -16,7 +16,7 @@ LLM-based detection (optional): `pip install browser-handoff[llm]`
 
 Opens [the-internet.herokuapp.com/login](https://the-internet.herokuapp.com/login) — a public testing site that displays its own credentials on the page (`tomsmith` / `SuperSecretPassword!`). The handoff fires as soon as the page loads, prints a stream URL for you to open, and resumes once you sign in successfully.
 
-https://github.com/user-attachments/assets/87dcfdf3-88f0-4ca2-bf6a-4338d92d6729
+https://github.com/user-attachments/assets/d45b9f42-1a3c-4553-9b7a-a00872b0f112
 
 ```python
 import asyncio
