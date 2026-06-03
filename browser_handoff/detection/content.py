@@ -72,43 +72,41 @@ class ContentDetection(BaseDetection):
                 reason=f"Failed to get page content: {e}",
             )
 
-        # Check title_contains
+        # Each success names the user-configured clause that fired so the
+        # operator can see which rule was responsible for the trigger.
         for pattern in self.title_contains:
             if pattern in title:
                 return DetectionResult(
                     matched=True,
                     detection_type=self.detection_type,
-                    reason=f"Title contains '{pattern}'",
+                    reason=f"Title matched: title_contains '{pattern}'",
                     details={"matched_pattern": pattern, "match_type": "title_contains"},
                 )
 
-        # Check title_matches (regex)
         for i, pattern in enumerate(self._title_patterns):
             if pattern.search(title):
                 return DetectionResult(
                     matched=True,
                     detection_type=self.detection_type,
-                    reason=f"Title matches pattern '{self.title_matches[i]}'",
+                    reason=f"Title matched: title_matches pattern '{self.title_matches[i]}'",
                     details={"matched_pattern": self.title_matches[i], "match_type": "title_matches"},
                 )
 
-        # Check body_contains
         for pattern in self.body_contains:
             if pattern in body:
                 return DetectionResult(
                     matched=True,
                     detection_type=self.detection_type,
-                    reason=f"Body contains '{pattern}'",
+                    reason=f"Body matched: body_contains '{pattern}'",
                     details={"matched_pattern": pattern, "match_type": "body_contains"},
                 )
 
-        # Check body_matches (regex)
         for i, pattern in enumerate(self._body_patterns):
             if pattern.search(body):
                 return DetectionResult(
                     matched=True,
                     detection_type=self.detection_type,
-                    reason=f"Body matches pattern '{self.body_matches[i]}'",
+                    reason=f"Body matched: body_matches pattern '{self.body_matches[i]}'",
                     details={"matched_pattern": self.body_matches[i], "match_type": "body_matches"},
                 )
 

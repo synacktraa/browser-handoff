@@ -11,6 +11,27 @@ if TYPE_CHECKING:
     from playwright.async_api import Page
 
 
+_AND_HEADER = "Matched conditions:\n"
+_AND_BULLET = "• "
+
+
+def _flatten_and_items(reason: str) -> list[str]:
+    """Return child reasons of an AND-shaped reason, or [reason] otherwise.
+
+    AND nested in AND is semantically the same as one flat AND, so its bullet
+    items get spliced into the outer list instead of producing a nested
+    "Matched conditions:" header.
+    """
+    if not reason.startswith(_AND_HEADER):
+        return [reason]
+    body = reason[len(_AND_HEADER):]
+    items: list[str] = []
+    for line in body.split("\n"):
+        if line.startswith(_AND_BULLET):
+            items.append(line[len(_AND_BULLET):])
+    return items or [reason]
+
+
 @dataclass
 class AllDetection(BaseDetection):
     """AND logic - all conditions must match.
@@ -48,6 +69,7 @@ class AllDetection(BaseDetection):
 
     async def check(self, page: "Page") -> DetectionResult:
         """Check if ALL conditions are met."""
+        child_reasons: list[str] = []
         for condition in self.conditions:
             result = await condition.check(page)
             if not result.matched:
@@ -57,11 +79,22 @@ class AllDetection(BaseDetection):
                     reason=f"Condition '{condition.detection_type}' not met: {result.reason}",
                     details={"failed_condition": condition.to_dict()},
                 )
+            # Flatten nested AND: an AND inside an AND is semantically the
+            # same as one flat AND, so its bullet items contribute directly
+            # rather than producing a nested "Matched conditions:" header.
+            child_reasons.extend(_flatten_and_items(result.reason))
+
+        if child_reasons:
+            reason = "Matched conditions:\n" + "\n".join(
+                f"• {r}" for r in child_reasons
+            )
+        else:
+            reason = "All conditions met (no conditions configured)"
 
         return DetectionResult(
             matched=True,
             detection_type=self.detection_type,
-            reason="All conditions met",
+            reason=reason,
             details={"conditions_count": len(self.conditions)},
         )
 

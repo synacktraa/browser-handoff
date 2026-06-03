@@ -225,6 +225,10 @@
         color: var(--text);
         word-break: break-word;
         overflow-wrap: anywhere;
+        /* pre-line preserves \n so AND combinator reasons render as a
+           bulleted list. The header (white-space: nowrap) collapses the
+           same \n into spaces for the truncated view. */
+        white-space: pre-line;
         z-index: 60;
         display: none;
         box-shadow: 0 20px 50px -15px rgba(0, 0, 0, 0.7);

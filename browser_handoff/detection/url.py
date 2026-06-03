@@ -79,7 +79,11 @@ class UrlDetection(BaseDetection):
                 reason=f"Failed to parse URL: {e}",
             )
 
-        # Check scheme_equals
+        # Each clause that fires records the user-configured condition that
+        # triggered it, so the success reason names the exact rules that
+        # matched instead of a generic "matches all conditions".
+        matched_clauses: list[str] = []
+
         if self.scheme_equals is not None:
             if parsed.scheme != self.scheme_equals:
                 return DetectionResult(
@@ -87,8 +91,8 @@ class UrlDetection(BaseDetection):
                     detection_type=self.detection_type,
                     reason=f"Scheme '{parsed.scheme}' does not equal '{self.scheme_equals}'",
                 )
+            matched_clauses.append(f"scheme_equals matched '{self.scheme_equals}'")
 
-        # Check host_equals (any match)
         if self.host_equals:
             if parsed.hostname not in self.host_equals:
                 return DetectionResult(
@@ -96,8 +100,8 @@ class UrlDetection(BaseDetection):
                     detection_type=self.detection_type,
                     reason=f"Host '{parsed.hostname}' not in {self.host_equals}",
                 )
+            matched_clauses.append(f"host_equals matched '{parsed.hostname}'")
 
-        # Check host_not_equals (none should match)
         if self.host_not_equals:
             if parsed.hostname in self.host_not_equals:
                 return DetectionResult(
@@ -105,36 +109,38 @@ class UrlDetection(BaseDetection):
                     detection_type=self.detection_type,
                     reason=f"Host '{parsed.hostname}' is in exclusion list",
                 )
+            matched_clauses.append(
+                f"host_not_equals matched (host '{parsed.hostname}' not excluded)"
+            )
 
-        # Check path_matches (any regex match)
         if self.path_matches:
-            matched = False
+            hit: str | None = None
             for i, pattern in enumerate(self._path_patterns):
                 if pattern.search(parsed.path):
-                    matched = True
+                    hit = self.path_matches[i]
                     break
-            if not matched:
+            if hit is None:
                 return DetectionResult(
                     matched=False,
                     detection_type=self.detection_type,
                     reason=f"Path '{parsed.path}' does not match any patterns",
                 )
+            matched_clauses.append(f"path_matches matched pattern '{hit}'")
 
-        # Check path_contains (any substring match)
         if self.path_contains:
-            matched = False
+            hit_substring: str | None = None
             for substring in self.path_contains:
                 if substring in parsed.path:
-                    matched = True
+                    hit_substring = substring
                     break
-            if not matched:
+            if hit_substring is None:
                 return DetectionResult(
                     matched=False,
                     detection_type=self.detection_type,
                     reason=f"Path '{parsed.path}' does not contain any patterns",
                 )
+            matched_clauses.append(f"path_contains matched '{hit_substring}'")
 
-        # Check query_contains (all must be present)
         if self.query_contains:
             query = parsed.query or ""
             for substring in self.query_contains:
@@ -144,15 +150,21 @@ class UrlDetection(BaseDetection):
                         detection_type=self.detection_type,
                         reason=f"Query does not contain '{substring}'",
                     )
+            matched_clauses.append(
+                "query_contains matched " + ", ".join(f"'{s}'" for s in self.query_contains)
+            )
 
-        # All conditions passed. unquote keeps the URL human-readable in
-        # the reason string — raw percent-encoded URLs (full of %2F, %3A,
-        # %3D) are unreadable in the breadcrumb. `details["url"]` keeps
-        # the raw form for programmatic consumers.
+        # All conditions passed. unquote keeps the URL human-readable.
+        # `details["url"]` keeps the raw encoded form for programmatic consumers.
+        if matched_clauses:
+            reason = f"URL '{unquote(url)}' matches: " + ", ".join(matched_clauses)
+        else:
+            reason = f"URL '{unquote(url)}' matches (no conditions configured)"
+
         return DetectionResult(
             matched=True,
             detection_type=self.detection_type,
-            reason=f"URL '{unquote(url)}' matches all conditions",
+            reason=reason,
             details={"url": url},
         )
 

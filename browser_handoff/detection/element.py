@@ -361,10 +361,28 @@ class ElementDetection(BaseDetection):
                         reason=f"Element '{selector}' should be hidden but is visible",
                     )
 
+            # Name the selectors that satisfied each configured clause so
+            # the operator can see what specifically matched — not just a
+            # generic "all conditions met".
+            parts: list[str] = []
+            if self.present:
+                parts.append("present=" + repr(self.present))
+            if self.missing:
+                parts.append("missing=" + repr(self.missing))
+            if self.visible:
+                parts.append("visible=" + repr(self.visible))
+            if self.hidden:
+                parts.append("hidden=" + repr(self.hidden))
+            reason = (
+                "Elements matched: " + ", ".join(parts)
+                if parts
+                else "Elements matched (no conditions configured)"
+            )
+
             return DetectionResult(
                 matched=True,
                 detection_type=self.detection_type,
-                reason="All element conditions met",
+                reason=reason,
                 details={
                     "present": self.present,
                     "missing": self.missing,
