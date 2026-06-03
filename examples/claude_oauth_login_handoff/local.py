@@ -2,7 +2,7 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #   "ccauth @ git+https://github.com/synacktraa/ccauth.git@a1eeea8",
-#   "browser-handoff @ git+https://github.com/synacktraa/browser-handoff.git",
+#   "browser-handoff @ git+https://github.com/synacktraa/browser-handoff.git@fix/stream-connect-window-polish",
 # ]
 # ///
 """
