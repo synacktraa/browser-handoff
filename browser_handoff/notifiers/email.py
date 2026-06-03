@@ -12,6 +12,7 @@ from email.mime.text import MIMEText
 from typing import Any
 
 from .base import Notifier, Urgency
+from .message import LinkItem, MessageItem, TextItem
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class EmailNotifier(Notifier):
     async def send(
         self,
         title: str,
-        message: str,
+        message: str | list[MessageItem],
         urgency: Urgency = "normal",
         **kwargs: Any,
     ) -> bool:
@@ -57,7 +58,7 @@ class EmailNotifier(Notifier):
 
         Args:
             title: Email subject.
-            message: Email body (plain text).
+            message: Plain string or list of structured message items.
             urgency: Urgency level (adds prefix to subject).
             **kwargs: Additional options.
 
@@ -82,19 +83,21 @@ class EmailNotifier(Notifier):
         prefix = prefix_map.get(urgency, "")
         subject = f"{prefix} {title}".strip()
 
+        items = self._normalize_items(message)
+
         # Create message
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = self.from_addr or self.username
         msg["To"] = ", ".join(self.to)
 
-        # Plain text part
-        msg.attach(MIMEText(message, "plain"))
+        # Plain text fallback flattens the items via the base helper.
+        msg.attach(MIMEText(self._items_to_plain_text(items), "plain"))
 
-        # HTML part with basic formatting. Title and message are caller-supplied
-        # strings (often containing URLs/reasons from upstream input), so they
-        # are escaped before interpolation to prevent HTML injection.
-        msg.attach(MIMEText(self._build_html(title, message), "html"))
+        # HTML part renders TextItems as <p> and LinkItems as proper
+        # <a href> anchors. All user-supplied strings are HTML-escaped
+        # before interpolation to prevent HTML injection.
+        msg.attach(MIMEText(self._build_html(title, items), "html"))
 
         # Send in executor to avoid blocking the event loop.
         try:
@@ -105,17 +108,23 @@ class EmailNotifier(Notifier):
             return False
 
     @staticmethod
-    def _build_html(title: str, message: str) -> str:
-        """Render the HTML body with `title` and `message` HTML-escaped."""
+    def _build_html(title: str, items: list[MessageItem]) -> str:
+        """Render the HTML body with all user-supplied strings escaped."""
         safe_title = html_lib.escape(title)
-        safe_message = html_lib.escape(message)
-        return (
-            "<html><body>"
-            f"<h2>{safe_title}</h2>"
-            f'<pre style="font-family: sans-serif; white-space: pre-wrap;">'
-            f"{safe_message}</pre>"
-            "</body></html>"
-        )
+        body_parts: list[str] = []
+        for item in items:
+            if isinstance(item, TextItem):
+                body_parts.append(f"<p>{html_lib.escape(item.text)}</p>")
+            elif isinstance(item, LinkItem):
+                href = html_lib.escape(item.url, quote=True)
+                body_parts.append(
+                    "<p>"
+                    f"{html_lib.escape(item.prefix)}"
+                    f'<a href="{href}">{html_lib.escape(item.url)}</a>'
+                    f"{html_lib.escape(item.suffix)}"
+                    "</p>"
+                )
+        return f"<html><body><h2>{safe_title}</h2>{''.join(body_parts)}</body></html>"
 
     def _send_sync(self, msg: MIMEMultipart) -> None:
         """Synchronous send operation."""

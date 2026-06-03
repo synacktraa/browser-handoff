@@ -8,6 +8,7 @@ from .base import Notifier, Urgency
 from .console import ConsoleNotifier
 from .discord import DiscordNotifier
 from .email import EmailNotifier
+from .message import LinkItem, MessageItem, TextItem
 from .slack import SlackNotifier
 
 
@@ -44,5 +45,8 @@ __all__ = [
     "SlackNotifier",
     "DiscordNotifier",
     "EmailNotifier",
+    "MessageItem",
+    "TextItem",
+    "LinkItem",
     "notifier_from_dict",
 ]

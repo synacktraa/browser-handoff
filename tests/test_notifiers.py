@@ -3,9 +3,12 @@
 import pytest
 
 from browser_handoff.notifiers import (
+    ConsoleNotifier,
     DiscordNotifier,
     EmailNotifier,
+    LinkItem,
     SlackNotifier,
+    TextItem,
     notifier_from_dict,
 )
 
@@ -176,15 +179,15 @@ class TestEmailNotifier:
         assert notifier.to == ["recipient@test.com"]
 
     def test_html_body_escapes_title_and_message(self):
-        """Title and message are HTML-escaped to prevent injection.
+        """Title and item content are HTML-escaped to prevent injection.
 
         Callers pass arbitrary upstream strings (task reasons, URLs, scenario
         names) — an unescaped `<` or `"` could break the markup or smuggle in
         attributes/tags in HTML mail clients that render them.
         """
         body = EmailNotifier._build_html(
-            title='<script>alert("x")</script>',
-            message='click "<a href=evil>here</a>" & wait',
+            '<script>alert("x")</script>',
+            [TextItem('click "<a href=evil>here</a>" & wait')],
         )
         # Raw injection vectors must not appear verbatim.
         assert "<script>" not in body
@@ -195,7 +198,7 @@ class TestEmailNotifier:
         assert "&amp; wait" in body
         # The wrapping tags we control are still present.
         assert "<h2>" in body and "</h2>" in body
-        assert "<pre" in body and "</pre>" in body
+        assert "<p>" in body and "</p>" in body
 
 
 class TestNotifierFromDict:
@@ -239,3 +242,66 @@ class TestNotifierFromDict:
         data = {"type": "unknown"}
         with pytest.raises(ValueError, match="Unknown notifier type"):
             notifier_from_dict(data)
+
+
+# ---- Structured message items -----------------------------------------------
+#
+# Each notifier accepts either a plain string (back-compat) or a list of
+# TextItem / LinkItem and renders them with channel-native primitives. The
+# normalization + plain-text fallback live on the base class so subclasses
+# can always operate on the structured form.
+
+
+class TestNormalizeItems:
+    """Notifier._normalize_items coerces the polymorphic message arg."""
+
+    def test_str_wrapped_as_text_item(self):
+        items = ConsoleNotifier._normalize_items("hello")
+        assert items == [TextItem("hello")]
+
+    def test_list_passed_through(self):
+        original = [TextItem("a"), LinkItem(url="https://example.com")]
+        items = ConsoleNotifier._normalize_items(original)
+        assert items == original
+
+    def test_to_plain_text_concatenates_paragraphs(self):
+        items = [
+            TextItem("First paragraph."),
+            TextItem("Second paragraph."),
+        ]
+        out = ConsoleNotifier._items_to_plain_text(items)
+        assert out == "First paragraph.\n\nSecond paragraph."
+
+    def test_to_plain_text_renders_link_with_prefix_suffix(self):
+        items = [
+            LinkItem(prefix="Visit: ", url="https://example.com", suffix=" (now)"),
+        ]
+        out = ConsoleNotifier._items_to_plain_text(items)
+        assert out == "Visit: https://example.com (now)"
+
+
+class TestEmailHtmlRendering:
+    """EmailNotifier renders TextItems as <p> and LinkItems as proper <a>."""
+
+    def test_text_item_renders_as_paragraph(self):
+        html = EmailNotifier._build_html("Title", [TextItem("body text")])
+        assert "<h2>Title</h2>" in html
+        assert "<p>body text</p>" in html
+
+    def test_link_item_renders_as_anchor(self):
+        html = EmailNotifier._build_html(
+            "T",
+            [LinkItem(prefix="Open: ", url="https://example.com/x?a=1")],
+        )
+        assert '<a href="https://example.com/x?a=1">' in html
+        assert "Open: " in html
+
+    def test_html_escapes_user_input(self):
+        html = EmailNotifier._build_html(
+            "<script>",
+            [TextItem("<b>not bold</b>")],
+        )
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
+        assert "<b>not bold</b>" not in html
+        assert "&lt;b&gt;not bold&lt;/b&gt;" in html

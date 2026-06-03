@@ -10,6 +10,7 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 from .base import Notifier, Urgency
+from .message import LinkItem, MessageItem, TextItem
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class SlackNotifier(Notifier):
     async def send(
         self,
         title: str,
-        message: str,
+        message: str | list[MessageItem],
         urgency: Urgency = "normal",
         **kwargs: Any,
     ) -> bool:
@@ -47,7 +48,7 @@ class SlackNotifier(Notifier):
 
         Args:
             title: Message title (shown in bold).
-            message: Message body.
+            message: Plain string or list of structured message items.
             urgency: Urgency level (affects emoji and color).
             **kwargs: Additional options.
 
@@ -77,6 +78,20 @@ class SlackNotifier(Notifier):
         color = color_map.get(urgency, "#2196f3")
         emoji = emoji_map.get(urgency, ":bell:")
 
+        items = self._normalize_items(message)
+
+        # Render items to Slack mrkdwn. Use <url|label> for explicit
+        # clickable hyperlinks so the URL itself is the visible label —
+        # behaves nicely with long URLs without breaking line selection.
+        parts: list[str] = []
+        for item in items:
+            if isinstance(item, TextItem):
+                parts.append(item.text)
+            elif isinstance(item, LinkItem):
+                hyperlink = f"<{item.url}|{item.url}>"
+                parts.append(f"{item.prefix}{hyperlink}{item.suffix}")
+        text = "\n\n".join(parts)
+
         payload: dict[str, Any] = {
             "username": self.username,
             "icon_emoji": self.icon_emoji,
@@ -84,7 +99,7 @@ class SlackNotifier(Notifier):
                 {
                     "color": color,
                     "title": f"{emoji} {title}",
-                    "text": message,
+                    "text": text,
                     "mrkdwn_in": ["text"],
                 }
             ],

@@ -12,11 +12,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from jinja2 import Environment, FileSystemLoader
-
 from .config import load_file, load_json, load_yaml
 from .detection.base import BaseDetection, DetectionResult
-from .notifiers import ConsoleNotifier, Notifier, notifier_from_dict
+from .notifiers import (
+    ConsoleNotifier,
+    LinkItem,
+    MessageItem,
+    Notifier,
+    TextItem,
+    notifier_from_dict,
+)
 from .scenario import Scenario
 from .server import ServerConfig, StreamingServer
 
@@ -24,14 +29,6 @@ if TYPE_CHECKING:
     from playwright.async_api import Page
 
 logger = logging.getLogger(__name__)
-
-TEMPLATE_DIR = Path(__file__).parent / "templates"
-# autoescape=False: the only template loaded here is notification.jinja,
-# which renders to plain text for Discord/Slack/email/rich-console.
-# HTML-escaping a single quote into `&#39;` mangles the URL the operator
-# is supposed to click. The HTML client template uses its own jinja env
-# (in server/streaming.py) which keeps autoescape on, as it should.
-jinja_env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=False)
 
 DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
 
@@ -515,13 +512,22 @@ class Handoff:
         # would just be noise.
         notifiers = self.notifiers or [ConsoleNotifier()]
 
-        notification_template = jinja_env.get_template("notification.jinja")
-        message = notification_template.render(reason=reason, stream_url=stream_url)
         title = "Human Intervention Required"
+        # Structured items let each notifier render natively (Rich link
+        # markup, Discord embed url field, Slack mrkdwn hyperlinks, HTML
+        # <a> in email) without parsing a flat template back out.
+        items: list[MessageItem] = [
+            TextItem(
+                "Human intervention is required to complete a browser automation task."
+            ),
+            TextItem(f"Reason: {reason}"),
+            LinkItem(prefix="Stream URL: ", url=stream_url),
+            TextItem("Please open the stream URL to assist with the task."),
+        ]
 
         async def send_notification(notifier: Notifier) -> None:
             try:
-                await notifier.send(title=title, message=message, urgency="critical")
+                await notifier.send(title=title, message=items, urgency="critical")
             except Exception as e:
                 logger.error(
                     "Failed to send notification via %s: %s",
