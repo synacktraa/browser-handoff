@@ -229,10 +229,25 @@
            bulleted list. The header (white-space: nowrap) collapses the
            same \n into spaces for the truncated view. */
         white-space: pre-line;
+        /* Long AND lists scroll inside the dropdown instead of growing
+           tall enough to bust the viewport. */
+        max-height: 300px;
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
         z-index: 60;
         display: none;
         box-shadow: 0 20px 50px -15px rgba(0, 0, 0, 0.7);
         animation: reasonIn 0.18s ease-out;
+      }
+      .reason-dropdown::-webkit-scrollbar { width: 6px; }
+      .reason-dropdown::-webkit-scrollbar-track { background: transparent; }
+      .reason-dropdown::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.18);
+        border-radius: 3px;
+      }
+      .reason-dropdown::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.28);
       }
       .reason-dropdown.show { display: block; }
       .reason-dropdown::before {
@@ -684,11 +699,30 @@
         color: #d4d4d8;
         max-width: 460px;
         width: 80%;
-        text-align: center;
+        /* Left-aligned reads naturally for AND combinator lists and
+           multi-line reasons. The block itself stays centered horizontally
+           by the parent flex; short single-line reasons still look fine. */
+        text-align: left;
         line-height: 1.6;
         margin-bottom: 24px;
         white-space: pre-line; /* honor server-side \n if present */
         word-break: break-word;
+        /* Long reasons (e.g. an AND of several long URLs) scroll inside
+           the overlay instead of pushing the layout. */
+        max-height: 220px;
+        overflow-y: auto;
+        padding-right: 6px;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+      }
+      .completion-reason::-webkit-scrollbar { width: 6px; }
+      .completion-reason::-webkit-scrollbar-track { background: transparent; }
+      .completion-reason::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.18);
+        border-radius: 3px;
+      }
+      .completion-reason::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.28);
       }
       .completion-message {
         font-size: 11px;
