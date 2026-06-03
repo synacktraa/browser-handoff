@@ -11,6 +11,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from .base import Notifier, Urgency
+from .message import LinkItem, MessageItem, TextItem
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class DiscordNotifier(Notifier):
     async def send(
         self,
         title: str,
-        message: str,
+        message: str | list[MessageItem],
         urgency: Urgency = "normal",
         **kwargs: Any,
     ) -> bool:
@@ -47,7 +48,7 @@ class DiscordNotifier(Notifier):
 
         Args:
             title: Message title (shown in embed).
-            message: Message body.
+            message: Plain string or list of structured message items.
             urgency: Urgency level (affects embed color).
             **kwargs: Additional options.
 
@@ -77,15 +78,34 @@ class DiscordNotifier(Notifier):
         color = color_map.get(urgency, 3447003)
         emoji = emoji_map.get(urgency, ":bell:")
 
+        items = self._normalize_items(message)
+
+        # Render items to Discord-flavoured Markdown. Bare URLs auto-link
+        # in the embed description.
+        description_parts: list[str] = []
+        for item in items:
+            if isinstance(item, TextItem):
+                description_parts.append(item.text)
+            elif isinstance(item, LinkItem):
+                description_parts.append(f"{item.prefix}{item.url}{item.suffix}")
+        description = "\n\n".join(description_parts)
+
+        # Promote the first LinkItem to the embed's `url` field so the
+        # title becomes a clickable hyperlink — most prominent place to
+        # surface the stream URL.
+        first_link = next((i for i in items if isinstance(i, LinkItem)), None)
+
+        embed: dict[str, Any] = {
+            "title": f"{emoji} {title}",
+            "description": description,
+            "color": color,
+        }
+        if first_link is not None:
+            embed["url"] = first_link.url
+
         payload: dict[str, Any] = {
             "username": self.username,
-            "embeds": [
-                {
-                    "title": f"{emoji} {title}",
-                    "description": message,
-                    "color": color,
-                }
-            ],
+            "embeds": [embed],
         }
 
         if self.avatar_url:
