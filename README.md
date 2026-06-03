@@ -14,35 +14,48 @@ LLM-based detection (optional): `pip install browser-handoff[llm]`
 
 ## 30-second example
 
+Opens [the-internet.herokuapp.com/login](https://the-internet.herokuapp.com/login) — a public testing site that displays its own credentials on the page (`tomsmith` / `SuperSecretPassword!`). The handoff fires as soon as the page loads, prints a stream URL for you to open, and resumes once you sign in successfully.
+
+https://github.com/user-attachments/assets/87dcfdf3-88f0-4ca2-bf6a-4338d92d6729
+
 ```python
+import asyncio
+
 from playwright.async_api import async_playwright
+
 from browser_handoff import Handoff, Scenario
 from browser_handoff.detection import Detection
 
-handoff = Handoff()  # reusable: holds server + notifier config, nothing page-specific
 
-async with async_playwright() as pw:
-    browser = await pw.chromium.launch(headless=False)
-    page = await browser.new_page()
-    await page.goto("https://example.com/start")
+async def main() -> None:
+    handoff = Handoff()  # reusable: holds server + notifier config, nothing page-specific
 
-    # Watch the page; hand off to a human when a trigger fires.
-    result = await handoff.run(
-        page,
-        scenarios=[
-            Scenario(
-                name="login",
-                trigger=Detection.url(path_contains=["/login"]),
-                complete=Detection.url(path_contains=["/dashboard"]),
-            ),
-        ],
-        timeout=30,
-    )
-    if result.was_blocked and not result.timed_out:
-        print(f"Human completed: {result.scenario_name}")
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=False)
+        page = await browser.new_page()
+        await page.goto("https://the-internet.herokuapp.com/login")
 
-    # Continue automation
-    await page.click("#continue")
+        # Watch the page; hand off to a human when a trigger fires.
+        result = await handoff.run(
+            page,
+            scenarios=[
+                Scenario(
+                    name="Heroku App Login",
+                    trigger=Detection.url(path_contains=["/login"]),
+                    complete=Detection.url(path_contains=["/secure"]),
+                ),
+            ],
+            timeout=10,
+        )
+        if result.was_blocked and not result.timed_out:
+            print(f"Human completed: {result.scenario_name} in {result.duration:.1f}s")
+
+        # Back in script mode — confirm we landed on the post-login page.
+        print(f"Now at: {page.url}")
+        await browser.close()
+
+
+asyncio.run(main())
 ```
 
 ## How it works
