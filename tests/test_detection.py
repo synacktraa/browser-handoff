@@ -278,6 +278,136 @@ class TestCombinators:
         assert isinstance(restored.conditions[1], NotDetection)
 
 
+# ---- Verbose reason strings ---------------------------------------------
+#
+# Each leaf detection's success reason names the user-configured clauses
+# that fired (not "matches all conditions" / "All element conditions met"
+# generic stubs), and the AND combinator joins child reasons as a bulleted
+# list with nested-AND flattening. The reason flows through to notifiers
+# and the stream-viewer breadcrumb, so coverage stays on the strings.
+
+
+class _StubElement:
+    def __init__(self, visible: bool = True) -> None:
+        self._visible = visible
+
+    async def is_visible(self) -> bool:
+        return self._visible
+
+
+class _StubPage:
+    """Minimal Playwright Page stand-in for reason-string tests — no browser."""
+
+    def __init__(
+        self,
+        *,
+        url: str = "http://example.com/",
+        title: str = "",
+        body: str = "",
+        selectors: dict[str, _StubElement] | None = None,
+    ) -> None:
+        self.url = url
+        self._title = title
+        self._body = body
+        self._selectors = selectors or {}
+
+    async def title(self) -> str:
+        return self._title
+
+    async def content(self) -> str:
+        return self._body
+
+    async def query_selector(self, selector: str):
+        return self._selectors.get(selector)
+
+
+class TestVerboseReasons:
+    """Leaf detections name the configured clauses that fired."""
+
+    async def test_url_reason_names_clauses(self):
+        det = UrlDetection(
+            host_equals=["example.com"],
+            path_contains=["/login"],
+        )
+        page = _StubPage(url="https://example.com/login?return=/dashboard")
+        result = await det.check(page)
+        assert result.matched
+        assert "host_equals matched 'example.com'" in result.reason
+        assert "path_contains matched '/login'" in result.reason
+
+    async def test_url_reason_no_conditions(self):
+        det = UrlDetection()
+        page = _StubPage(url="https://example.com/")
+        result = await det.check(page)
+        assert result.matched
+        assert "no conditions configured" in result.reason
+
+    async def test_element_reason_lists_selectors(self):
+        det = ElementDetection(
+            present=["button.submit"],
+            visible=[".banner"],
+        )
+        page = _StubPage(
+            selectors={
+                "button.submit": _StubElement(visible=True),
+                ".banner": _StubElement(visible=True),
+            }
+        )
+        result = await det.check(page)
+        assert result.matched
+        assert "present=['button.submit']" in result.reason
+        assert "visible=['.banner']" in result.reason
+
+    async def test_content_reason_names_clause(self):
+        det = ContentDetection(title_contains=["Sign in"])
+        page = _StubPage(title="Sign in to Claude")
+        result = await det.check(page)
+        assert result.matched
+        assert "title_contains 'Sign in'" in result.reason
+
+
+class TestAndReasonAggregation:
+    """AND combinator joins children as a bulleted list and flattens nested ANDs."""
+
+    async def test_joined_with_bullets(self):
+        url = UrlDetection(path_contains=["/login"])
+        element = ElementDetection(present=["button.submit"])
+        page = _StubPage(
+            url="https://example.com/login",
+            selectors={"button.submit": _StubElement(visible=True)},
+        )
+        det = AllDetection(conditions=[url, element])
+        result = await det.check(page)
+        assert result.matched
+        assert result.reason.startswith("Matched conditions:\n• ")
+        bullets = [
+            line for line in result.reason.split("\n") if line.startswith("• ")
+        ]
+        assert len(bullets) == 2
+        assert "path_contains matched '/login'" in result.reason
+        assert "present=['button.submit']" in result.reason
+
+    async def test_nested_and_flattens(self):
+        url = UrlDetection(path_contains=["/login"])
+        element = ElementDetection(present=["#submit"])
+        content = ContentDetection(title_contains=["Sign in"])
+        inner = AllDetection(conditions=[element, content])
+        outer = AllDetection(conditions=[url, inner])
+        page = _StubPage(
+            url="https://example.com/login",
+            title="Sign in to Claude",
+            selectors={"#submit": _StubElement(visible=True)},
+        )
+        result = await outer.check(page)
+        assert result.matched
+        # Three leaf bullets, no nested "Matched conditions:" header.
+        bullets = [
+            line for line in result.reason.split("\n") if line.startswith("• ")
+        ]
+        assert len(bullets) == 3
+        assert result.reason.count("Matched conditions:") == 1
+
+
 # ---- LLM detection: activity-debounced watch loop -----------------------
 #
 # These cover the cost-control logic added to LLMDetection.register_listeners:
