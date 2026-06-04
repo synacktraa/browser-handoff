@@ -58,11 +58,21 @@ class AllDetection(BaseDetection):
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
-        """Register listeners for all child conditions."""
+        """Register listeners for all child conditions.
+
+        Wraps the user's callback so it receives the combinator itself,
+        not the child whose listener actually fired. Without this wrap,
+        wait_for_completion's `result = await detection.check(page)` would
+        run on the child alone — defeating the AND semantics (a single
+        matching child would trigger completion).
+        """
         cleanups: list[Callable[[], None]] = []
 
+        async def on_child_event(_child: BaseDetection) -> None:
+            await callback(self)
+
         for condition in self.conditions:
-            cleanup = condition.register_listeners(page, callback)
+            cleanup = condition.register_listeners(page, on_child_event)
             cleanups.append(cleanup)
 
         def cleanup_all() -> None:
@@ -137,11 +147,21 @@ class AnyDetection(BaseDetection):
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
-        """Register listeners for all child conditions."""
+        """Register listeners for all child conditions.
+
+        Wraps the user's callback so it receives the combinator itself,
+        not the child whose listener fired. For OR the bug is subtler than
+        AND — a child firing IS sufficient — but wait_for_completion would
+        also report the child's `reason` instead of the OR's "Condition X
+        matched: …" framing, which is confusing in logs/notifications.
+        """
         cleanups: list[Callable[[], None]] = []
 
+        async def on_child_event(_child: BaseDetection) -> None:
+            await callback(self)
+
         for condition in self.conditions:
-            cleanup = condition.register_listeners(page, callback)
+            cleanup = condition.register_listeners(page, on_child_event)
             cleanups.append(cleanup)
 
         def cleanup_all() -> None:
@@ -203,11 +223,20 @@ class NotDetection(BaseDetection):
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
-        """Register listeners for the wrapped condition."""
+        """Register listeners for the wrapped condition.
+
+        Wraps the user's callback so it receives the NotDetection itself,
+        not the inner condition. Without this wrap, wait_for_completion's
+        `result = await detection.check(page)` would call the inner
+        condition's check directly — completely bypassing the inversion.
+        """
         if self.condition is None:
             return lambda: None
 
-        return self.condition.register_listeners(page, callback)
+        async def on_child_event(_child: BaseDetection) -> None:
+            await callback(self)
+
+        return self.condition.register_listeners(page, on_child_event)
 
     async def check(self, page: "Page") -> DetectionResult:
         """Check if condition is NOT met."""
