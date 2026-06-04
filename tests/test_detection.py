@@ -278,6 +278,125 @@ class TestCombinators:
         assert isinstance(restored.conditions[1], NotDetection)
 
 
+# ---- Combinator listener callback wiring --------------------------------
+#
+# register_listeners must pass the COMBINATOR up via callback, not the
+# child whose listener actually fired. wait_for_completion runs
+# `detection.check(page)` on whatever the callback hands it — so a naive
+# pass-through bypasses AND/OR/NOT semantics entirely (matching the
+# child alone is enough to fire the completion event regardless of the
+# combinator's truth value). The bug was missed for months because the
+# original tests only exercised check() directly, never the callback path.
+
+
+class _ManualTriggerDetection:
+    """BaseDetection-shaped fake that lets the test fire the callback at will.
+
+    `check_result` is whatever subsequent check() calls return.
+    `trigger()` simulates the "listener fired" event by invoking the most
+    recently registered callback with self.
+    """
+
+    detection_type = "_manual"
+
+    def __init__(self, check_result):
+        self.check_result = check_result
+        self._callback = None
+        self.check_calls = 0
+
+    def bind(self, **_kwargs):
+        pass
+
+    def register_listeners(self, page, callback):
+        self._callback = callback
+        return lambda: None
+
+    async def check(self, page):
+        self.check_calls += 1
+        return self.check_result
+
+    def to_dict(self):
+        return {"type": self.detection_type}
+
+    async def trigger(self):
+        assert self._callback is not None, "register_listeners not called"
+        await self._callback(self)
+
+
+class TestCombinatorListenerWiring:
+    """Combinator listeners must invoke the user callback with self, not the
+    child detection. Otherwise wait_for_completion's check() bypasses the
+    combinator's logic."""
+
+    async def _capture(self, detection):
+        seen = []
+
+        async def cb(d):
+            seen.append(d)
+
+        detection.register_listeners(page=None, callback=cb)
+        return seen
+
+    async def test_not_inverts_child_event(self):
+        # Child reports matched=True, but NOT must invert it before
+        # completion fires. Failure mode (pre-fix): the callback gets the
+        # child, wait_for_completion runs child.check → matched=True →
+        # completion fires immediately. The user hit this on /signup.
+        from browser_handoff.detection.base import DetectionResult
+
+        child = _ManualTriggerDetection(
+            DetectionResult(matched=True, detection_type="_manual", reason="match")
+        )
+        det = NotDetection(condition=child)
+        seen = await self._capture(det)
+        await child.trigger()
+
+        assert seen == [det], "callback must receive the NotDetection, not the child"
+        result = await seen[0].check(page=None)
+        assert result.matched is False, "NOT must invert the child's matched=True"
+
+    async def test_all_callback_receives_combinator(self):
+        # Even though ONE child fires, the callback must pass the All up
+        # so check() runs over all children. Failure mode (pre-fix): one
+        # child firing completes the handoff regardless of the others.
+        from browser_handoff.detection.base import DetectionResult
+
+        child_a = _ManualTriggerDetection(
+            DetectionResult(matched=True, detection_type="_manual", reason="a")
+        )
+        child_b = _ManualTriggerDetection(
+            DetectionResult(matched=False, detection_type="_manual", reason="b")
+        )
+        det = AllDetection(conditions=[child_a, child_b])
+        seen = await self._capture(det)
+        await child_a.trigger()
+
+        assert seen == [det]
+        result = await seen[0].check(page=None)
+        assert result.matched is False, "AND with one False child must be False"
+
+    async def test_any_callback_receives_combinator(self):
+        # OR fires correctly even on the buggy path, but the reason string
+        # must come from the combinator's framing — pinning it here so a
+        # future refactor doesn't silently revert.
+        from browser_handoff.detection.base import DetectionResult
+
+        child_a = _ManualTriggerDetection(
+            DetectionResult(matched=False, detection_type="_manual", reason="a")
+        )
+        child_b = _ManualTriggerDetection(
+            DetectionResult(matched=True, detection_type="_manual", reason="b")
+        )
+        det = AnyDetection(conditions=[child_a, child_b])
+        seen = await self._capture(det)
+        await child_b.trigger()
+
+        assert seen == [det]
+        result = await seen[0].check(page=None)
+        assert result.matched is True
+        assert "matched" in result.reason
+
+
 # ---- Verbose reason strings ---------------------------------------------
 #
 # Each leaf detection's success reason names the user-configured clauses

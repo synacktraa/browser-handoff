@@ -45,6 +45,242 @@ _CONTEXT_MENU_GUARD_JS = """
 """
 
 
+# Injected into a streamed page to replace native input UIs that the CDP
+# screencast can't capture — same fundamental problem as the right-click
+# menu above. Native <select> popups, <input type=date|time|...> pickers,
+# and color pickers are OS-level overlays rendered outside the page
+# viewport, so the operator clicks them and sees nothing happen.
+#
+# Strategy:
+#   * <select> (non-multiple): intercept mousedown, render a DOM overlay
+#     of <option>/<optgroup> children. Click an option to set the value
+#     and dispatch input + change events so site listeners still fire.
+#   * <input type=date|time|datetime-local|month|week>: suppress the
+#     native picker, focus the input so the operator can type a value in
+#     the input's own native format (browsers accept typed input even
+#     when the picker is suppressed).
+#
+# Out of scope for v1: <select multiple>, <input type=color>,
+# <input type=file> (OS file picker is unreachable from page JS).
+#
+# Globals are non-enumerable so site code that walks window won't see
+# them. Listeners run in the capture phase so they fire before site
+# handlers; preventDefault on mousedown blocks the native picker, focus()
+# is called manually to compensate for the suppressed default focus.
+_NATIVE_INPUT_SHIM_JS = """
+(() => {
+  if (window.__bhInputShim) return;
+  Object.defineProperty(window, '__bhInputShim',
+    {value: true, enumerable: false, configurable: true});
+
+  const OVERLAY_ID = '__bh_select_overlay';
+  const STYLE_ID = '__bh_select_overlay_style';
+  const NATIVE_PICKER_TYPES = ['date', 'time', 'datetime-local', 'month', 'week'];
+
+  // Webkit scrollbars inside fixed overlays render very thin (near-invisible
+  // until hover). Inline styles can't carry pseudo-elements, so a one-time
+  // <style> is the cleanest way to make the scrollbar visible.
+  //
+  // Inject lazily, not at script-load time: add_init_script runs before
+  // document construction, so document.head and document.documentElement
+  // are BOTH null on first execution. Doing it the first time we actually
+  // open an overlay guarantees the DOM exists.
+  function ensureScrollbarStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    const host = document.head || document.documentElement;
+    if (!host) return;  // truly nothing to attach to — skip silently
+    const styleEl = document.createElement('style');
+    styleEl.id = STYLE_ID;
+    styleEl.textContent =
+      '#' + OVERLAY_ID + '::-webkit-scrollbar{width:12px;height:12px}' +
+      '#' + OVERLAY_ID + '::-webkit-scrollbar-track{background:#f1f1f1}' +
+      '#' + OVERLAY_ID + '::-webkit-scrollbar-thumb' +
+      '{background:#b0b0b0;border-radius:6px;border:2px solid #f1f1f1}' +
+      '#' + OVERLAY_ID + '::-webkit-scrollbar-thumb:hover{background:#909090}';
+    host.appendChild(styleEl);
+  }
+
+  let currentOverlay = null;
+  let currentSelect = null;
+
+  function closeOverlay() {
+    if (currentOverlay) {
+      try { currentOverlay.remove(); } catch (e) {}
+      currentOverlay = null;
+    }
+    currentSelect = null;
+    window.removeEventListener('resize', closeOverlay, true);
+  }
+
+  function selectOption(option) {
+    if (!currentSelect || option.disabled) return;
+    const select = currentSelect;
+    select.value = option.value;
+    select.dispatchEvent(new Event('input', {bubbles: true}));
+    select.dispatchEvent(new Event('change', {bubbles: true}));
+    closeOverlay();
+  }
+
+  function openSelectOverlay(select) {
+    closeOverlay();
+    if (select.disabled || select.multiple) return;
+    // Hidden controls have no rendered position to anchor to.
+    if (!select.offsetParent && select.offsetHeight === 0) return;
+    // Lazy install — DOM is guaranteed to exist by the time the operator
+    // can click a select.
+    ensureScrollbarStyle();
+
+    const rect = select.getBoundingClientRect();
+    const overlay = document.createElement('div');
+    overlay.id = OVERLAY_ID;
+    overlay.style.cssText = [
+      'position:fixed',
+      'background:#fff',
+      'border:1px solid #999',
+      'box-shadow:0 4px 12px rgba(0,0,0,.18)',
+      'font:14px system-ui,-apple-system,sans-serif',
+      'color:#111',
+      'border-radius:4px',
+      'max-height:280px',
+      'overflow-y:auto',
+      'z-index:2147483647',
+      'min-width:' + rect.width + 'px',
+      'left:' + rect.left + 'px',
+    ].join(';');
+
+    // Place below by default; flip above if there's not enough room and
+    // more space exists upward.
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    if (spaceBelow < 200 && spaceAbove > spaceBelow) {
+      overlay.style.bottom = (window.innerHeight - rect.top) + 'px';
+    } else {
+      overlay.style.top = rect.bottom + 'px';
+    }
+
+    let selectedRow = null;
+
+    function appendNode(node, indent) {
+      if (node.tagName === 'OPTGROUP') {
+        const label = document.createElement('div');
+        label.textContent = node.label || '';
+        label.style.cssText =
+          'padding:6px 12px;font-weight:600;color:#666;background:#f3f3f3';
+        overlay.appendChild(label);
+        for (const child of node.children) appendNode(child, indent + 1);
+      } else if (node.tagName === 'OPTION') {
+        const row = document.createElement('div');
+        row.textContent = node.label || node.textContent;
+        const padLeft = 12 + indent * 12;
+        row.style.cssText = [
+          'padding:6px 12px 6px ' + padLeft + 'px',
+          'cursor:' + (node.disabled ? 'not-allowed' : 'pointer'),
+          'color:' + (node.disabled ? '#aaa' : '#111'),
+          'user-select:none',
+        ].join(';');
+        if (node.selected) {
+          row.style.background = '#e6f0ff';
+          selectedRow = row;
+        }
+        if (!node.disabled) {
+          row.addEventListener('mouseenter', () => {
+            row.style.background = '#e6f0ff';
+          });
+          row.addEventListener('mouseleave', () => {
+            row.style.background = node.selected ? '#e6f0ff' : '';
+          });
+          // mousedown (not click) so we beat any focusout/blur that would
+          // close the overlay before the click registers.
+          row.addEventListener('mousedown', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            selectOption(node);
+          });
+        }
+        overlay.appendChild(row);
+      }
+    }
+    for (const child of select.children) appendNode(child, 0);
+
+    currentOverlay = overlay;
+    currentSelect = select;
+    document.body.appendChild(overlay);
+
+    // Manually scroll the overlay on wheel and swallow the event before
+    // anyone else can see it. Without this, the page's own wheel listeners
+    // (parallax scripts, modal scroll-lock libs) preventDefault on every
+    // wheel they see and the operator can't scroll the option list. The
+    // page-level scroll-close handler also reads window.scroll, which
+    // shouldn't fire here because we scroll the element, not the window.
+    overlay.addEventListener(
+      'wheel',
+      (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        overlay.scrollTop += ev.deltaY;
+      },
+      {passive: false, capture: true}
+    );
+
+    // position:fixed pins the overlay to the viewport, so a page scroll
+    // doesn't actually displace it — no need to close on scroll. Resize
+    // does displace it (the anchored left/top become wrong relative to
+    // the moved select), so resize-close stays.
+    window.addEventListener('resize', closeOverlay, true);
+
+    if (selectedRow) {
+      try { selectedRow.scrollIntoView({block: 'nearest'}); } catch (e) {}
+    }
+  }
+
+  document.addEventListener('mousedown', (e) => {
+    const t = e.target;
+    if (!t) return;
+
+    if (t.tagName === 'SELECT' && !t.multiple && !t.disabled) {
+      // Don't focus() the select — focus triggers the browser's
+      // "scroll focused element into view" which fires a window scroll
+      // and trips any open-overlay teardown the page might do. The
+      // overlay is the actual UI now; the select doesn't need focus.
+      e.preventDefault();
+      if (currentSelect === t) {
+        closeOverlay();  // toggle
+      } else {
+        openSelectOverlay(t);
+      }
+      return;
+    }
+
+    if (
+      t.tagName === 'INPUT' &&
+      NATIVE_PICKER_TYPES.indexOf(t.type) !== -1 &&
+      !t.disabled &&
+      !t.readOnly
+    ) {
+      // Suppress the native picker, focus the input so the operator can
+      // type. Browsers still accept typed values for these types.
+      e.preventDefault();
+      try { t.focus(); } catch (err) {}
+      return;
+    }
+
+    // Click outside an open overlay closes it. Clicks inside the overlay
+    // bubble through; the option row's own mousedown handler picks them up.
+    if (currentOverlay && !currentOverlay.contains(t)) {
+      closeOverlay();
+    }
+  }, true);
+
+  document.addEventListener('keydown', (e) => {
+    if (currentOverlay && e.key === 'Escape') {
+      e.preventDefault();
+      closeOverlay();
+    }
+  }, true);
+})();
+"""
+
+
 class StreamingServer:
     """Server that manages streaming sessions for human intervention.
 
@@ -294,6 +530,7 @@ class StreamingServer:
         self._token_to_session[session.access_token] = session_id
 
         await self._suppress_context_menu(page)
+        await self._inject_native_input_shim(page)
 
         # Seed the URL with whatever Playwright has now, then track every
         # subsequent main-frame navigation so the viewer's URL bar matches
@@ -362,6 +599,21 @@ class StreamingServer:
             await page.add_init_script(_CONTEXT_MENU_GUARD_JS)
         with suppress(Exception):
             await page.evaluate(_CONTEXT_MENU_GUARD_JS)
+
+    @staticmethod
+    async def _inject_native_input_shim(page: "Page") -> None:
+        """Replace native <select> popups and date/time pickers with DOM UI.
+
+        Same install pattern as the context-menu guard: add_init_script for
+        future documents, evaluate for the already-loaded one. Both
+        best-effort — a transient failure must not abort the handoff, the
+        operator can still drive the page via keyboard / type-to-search even
+        if the shim doesn't install.
+        """
+        with suppress(Exception):
+            await page.add_init_script(_NATIVE_INPUT_SHIM_JS)
+        with suppress(Exception):
+            await page.evaluate(_NATIVE_INPUT_SHIM_JS)
 
     @staticmethod
     async def _publish_frame(session: HandoffSession, frame_bytes: bytes) -> None:
