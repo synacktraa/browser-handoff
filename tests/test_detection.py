@@ -1,6 +1,7 @@
 """Tests for detection types."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from browser_handoff.detection import Detection
@@ -9,6 +10,21 @@ from browser_handoff.detection.content import ContentDetection
 from browser_handoff.detection.element import ElementDetection
 from browser_handoff.detection.llm import LLMDetection
 from browser_handoff.detection.url import UrlDetection
+from browser_handoff.server.operator_activity import OperatorActivity
+
+
+def _fake_session(operator_activity: OperatorActivity | None = None, reason: str = "") -> SimpleNamespace:
+    """Minimal session-like stub for bind() tests.
+
+    BaseDetection.bind() takes a HandoffSession, but constructing a real one
+    means dummies for session_id / page / context / cdp / etc. Detections
+    only read `.operator_activity` and `.reason`, so SimpleNamespace duck-
+    types cleanly and keeps the tests focused.
+    """
+    return SimpleNamespace(
+        operator_activity=operator_activity if operator_activity is not None else OperatorActivity(),
+        reason=reason,
+    )
 
 
 class TestDetectionFactory:
@@ -680,7 +696,7 @@ class TestLLMSerialization:
 
     def test_from_dict_defaults(self):
         back = LLMDetection.from_dict({"type": "llm", "condition": "x"})
-        assert back.idle_seconds == 2.0
+        assert back.idle_seconds == 3.0
         assert back.max_interval == 30.0
 
 
@@ -775,6 +791,179 @@ class TestLLMWatchLoop:
             assert len(calls) == 1
         finally:
             cleanup()
+
+
+# ---- OperatorActivity primitive -----------------------------------------
+#
+# Owned by HandoffSession, mutated by the streaming server on each routed
+# operator event, read by LLMDetection.bind() to gate vision calls on
+# operator presence. These pin the primitive itself; the wiring through
+# the server lives in integration tests.
+
+
+class TestOperatorActivity:
+    """OperatorActivity bump / wait_for_first_interaction semantics."""
+
+    def test_starts_idle(self):
+        a = OperatorActivity()
+        assert a.last_activity is None
+        assert a.has_ever_interacted is False
+
+    def test_bump_records_monotonic_time(self):
+        a = OperatorActivity()
+        a.bump()
+        assert a.last_activity is not None
+        assert a.has_ever_interacted is True
+
+    async def test_wait_for_first_interaction_blocks_until_bump(self):
+        a = OperatorActivity()
+        wait_task = asyncio.create_task(a.wait_for_first_interaction())
+        # Yielding gives the task a chance to advance; it should still be
+        # pending because no bump has happened.
+        await asyncio.sleep(0.02)
+        assert not wait_task.done()
+        a.bump()
+        await asyncio.wait_for(wait_task, timeout=0.5)
+
+    async def test_wait_for_first_interaction_returns_immediately_after_bump(self):
+        # Gate stays open for the rest of the handoff so late waiters don't
+        # block — load-bearing for watch-loop restart scenarios.
+        a = OperatorActivity()
+        a.bump()
+        await asyncio.wait_for(a.wait_for_first_interaction(), timeout=0.1)
+
+
+# ---- LLMDetection: operator-activity-gated path (bound) -----------------
+#
+# When bind() supplies an OperatorActivity, the loop must (a) make zero
+# vision calls until the operator interacts at all, and (b) after that, fire
+# exactly one debounced check per idle settle — same _should_check logic as
+# the page-activity path, just a different timestamp source.
+
+
+class TestLLMOperatorGatedWatchLoop:
+    """LLMDetection watch loop bound to an OperatorActivity."""
+
+    async def test_no_calls_until_first_operator_interaction(self):
+        det = LLMDetection(condition="x", idle_seconds=0.15, max_interval=0.0)
+        det._poll_interval = 0.02
+        activity = OperatorActivity()
+        det.bind(session=_fake_session(operator_activity=activity))
+        calls: list = []
+
+        async def cb(d):
+            calls.append(d)
+
+        # page is not consulted in the bound path — pass a sentinel that
+        # would explode if any method got called on it.
+        cleanup = det.register_listeners(page=None, callback=cb)
+        try:
+            # Long enough that the page-activity path's safety net would
+            # have fired at least once. Nothing should happen here.
+            await asyncio.sleep(0.4)
+            assert calls == []
+        finally:
+            cleanup()
+
+    async def test_one_debounced_check_per_idle_settle(self):
+        det = LLMDetection(condition="x", idle_seconds=0.15, max_interval=0.0)
+        det._poll_interval = 0.02
+        activity = OperatorActivity()
+        det.bind(session=_fake_session(operator_activity=activity))
+        calls: list = []
+
+        async def cb(d):
+            calls.append(d)
+
+        cleanup = det.register_listeners(page=None, callback=cb)
+        try:
+            # First interaction opens the gate and starts the idle window.
+            activity.bump()
+            await asyncio.sleep(0.06)
+            assert calls == []  # still inside idle_seconds
+            await asyncio.sleep(0.22)
+            assert len(calls) == 1
+
+            # No new activity → no second check.
+            await asyncio.sleep(0.25)
+            assert len(calls) == 1
+
+            # Fresh interaction → one more after idle_seconds settles.
+            activity.bump()
+            await asyncio.sleep(0.3)
+            assert len(calls) == 2
+        finally:
+            cleanup()
+
+    async def test_cleanup_before_first_interaction_does_not_hang(self):
+        # The "wait for first interaction" select must lose cleanly to
+        # cleanup, otherwise the watch task would leak forever when the
+        # operator never shows up.
+        det = LLMDetection(condition="x", idle_seconds=0.15)
+        det._poll_interval = 0.02
+        activity = OperatorActivity()
+        det.bind(session=_fake_session(operator_activity=activity))
+
+        async def cb(_d):
+            pass
+
+        cleanup = det.register_listeners(page=None, callback=cb)
+        await asyncio.sleep(0.05)  # task is parked on wait_for_first_interaction
+        cleanup()
+        # Give the cancel a tick to propagate. If the task were leaking we'd
+        # see a "Task was destroyed but it is pending" warning, but the
+        # functional check is just that this point is reached without a hang.
+        await asyncio.sleep(0.05)
+
+
+# ---- Combinator bind() propagation --------------------------------------
+
+
+class _RecordingDetection(LLMDetection):
+    """Tracks bind() calls — used to verify combinator propagation.
+
+    Subclassing LLMDetection (rather than BaseDetection) keeps the inherited
+    bind() override under test; combinators must walk into it.
+    """
+
+    def __init__(self):
+        super().__init__(condition="x")
+        self.bound_to: list = []
+
+    def bind(self, *, session=None):
+        self.bound_to.append(session)
+        super().bind(session=session)
+
+
+class TestCombinatorBindPropagation:
+    """AllDetection / AnyDetection / NotDetection propagate bind() to children."""
+
+    def test_all_propagates_to_each_child(self):
+        a, b = _RecordingDetection(), _RecordingDetection()
+        all_det = AllDetection(conditions=[a, b])
+        session = _fake_session()
+        all_det.bind(session=session)
+        assert a.bound_to == [session]
+        assert b.bound_to == [session]
+
+    def test_any_propagates_to_each_child(self):
+        a, b = _RecordingDetection(), _RecordingDetection()
+        any_det = AnyDetection(conditions=[a, b])
+        session = _fake_session()
+        any_det.bind(session=session)
+        assert a.bound_to == [session]
+        assert b.bound_to == [session]
+
+    def test_not_propagates_to_wrapped(self):
+        inner = _RecordingDetection()
+        not_det = NotDetection(condition=inner)
+        session = _fake_session()
+        not_det.bind(session=session)
+        assert inner.bound_to == [session]
+
+    def test_not_with_no_condition_is_safe(self):
+        # NotDetection allows condition=None; bind() must not blow up.
+        NotDetection(condition=None).bind(session=_fake_session())
 
 
 # ---- Element detection: poll-based watch loop (no expose_function) -------

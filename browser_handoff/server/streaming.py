@@ -399,14 +399,24 @@ class StreamingServer:
                         msg_type = message.get("type")
 
                         try:
+                            # Bumping operator_activity on each routed event
+                            # is what lets detections (LLMDetection today)
+                            # gate work on operator presence + idleness
+                            # instead of page activity. Skipped for ping,
+                            # copy_request, cut_request — passive reads, not
+                            # real interaction.
                             if msg_type == "mouse":
                                 await self._handle_mouse(cdp, message)
+                                session_state.operator_activity.bump()
                             elif msg_type == "keyboard":
                                 await self._handle_keyboard(cdp, message)
+                                session_state.operator_activity.bump()
                             elif msg_type == "navigate":
                                 await self._handle_navigate(page, message)
+                                session_state.operator_activity.bump()
                             elif msg_type == "paste":
                                 await self._handle_paste(cdp, message)
+                                session_state.operator_activity.bump()
                             elif msg_type == "copy_request":
                                 text = await self._read_selection(page)
                                 with suppress(Exception):

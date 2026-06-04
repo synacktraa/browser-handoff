@@ -360,7 +360,7 @@ class Handoff:
             except Exception as e:
                 logger.info(f"Could not get viewport: {e}, using default: {viewport_size}")
 
-            await server.register_session(
+            session = await server.register_session(
                 session_id=session_id,
                 page=page,
                 context=context,
@@ -368,6 +368,13 @@ class Handoff:
                 scenario_name=name,
                 viewport_size=viewport_size,
             )
+
+            # Bind the per-handoff session before register_listeners so
+            # detections that want session context (LLMDetection reads
+            # operator_activity for watch-loop gating and reason for the
+            # prompt) can wire up against it. Cheap detections
+            # (URL/Element/Content) ignore the binding.
+            on.bind(session=session)
 
             listener_cleanups.append(
                 on.register_listeners(page, on_completion_detected)
