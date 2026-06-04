@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
-    from ..server.operator_activity import OperatorActivity
+    from ..server.session import HandoffSession
 
 
 @dataclass
@@ -30,18 +30,22 @@ class BaseDetection(ABC):
 
     detection_type: str = "base"
 
-    def bind(self, *, operator_activity: "OperatorActivity | None" = None) -> None:
-        """Receive per-handoff session context before register_listeners.
+    def bind(self, *, session: "HandoffSession | None" = None) -> None:
+        """Receive the per-handoff session before register_listeners runs.
 
         Called by Handoff.wait_for_completion immediately after a session is
         registered. Default is a no-op — cheap, page-driven detections
-        (URL/Element/Content) don't need any session context.
+        (URL/Element/Content) don't need anything from the session.
 
-        LLMDetection overrides this to stash the OperatorActivity handle so
-        its watch loop can gate vision calls on operator presence + idleness
-        instead of page activity (which is noisy on real sites). Combinator
-        detections (AllDetection / AnyDetection / NotDetection) forward
-        bind() to their children so a nested LLMDetection still gets gated.
+        Subclasses override to read whatever they need: LLMDetection picks
+        up `session.operator_activity` (gate vision calls on operator
+        presence, not page noise) and `session.reason` (the trigger-time
+        explanation the agent gave the human, which is much more
+        informative for the model than the bare `condition` alone — the
+        condition is often the agent's over-specific guess at the resume
+        state, while reason names the actual task). Combinator detections
+        forward bind() to their children so a nested LLMDetection still
+        sees the session.
 
         Detections used standalone (no Handoff) simply never have bind()
         called and fall back to their pre-bound behavior.

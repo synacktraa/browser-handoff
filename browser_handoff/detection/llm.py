@@ -15,35 +15,45 @@ from .base import BaseDetection, DetectionResult
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
-    from ..server.operator_activity import OperatorActivity
+    from ..server.session import HandoffSession
 
 # System prompt for LLM detection
-SYSTEM_PROMPT = """You are analyzing a browser session to determine whether a \
-completion condition is met.
+SYSTEM_PROMPT = """You decide when a human has finished an intervention \
+task in a streamed browser session so an automation agent can resume.
 
-You receive a screenshot of the current page along with its URL and title. \
-Use all three signals together — the URL and title often disambiguate \
-look-alike states the screenshot alone cannot (e.g. a half-filled signup \
-form vs. a successful signup landing page).
+Match against the task — not the literal condition. The condition is the \
+agent's guess at the resume page and is often over-specific; the user may \
+finish on an intermediate or downstream page (e.g. a post-action \
+confirmation screen, a success banner on a different route, a redirect \
+back to home with a logged-in indicator). Answer yes whenever the work \
+the human was asked to do is observably done, regardless of which page \
+they end up on.
 
-Bias against false positives:
-  - If a form is still being filled (focus inside an input, partial values, \
-    visible validation messages, required fields blank), answer "no".
-  - If the page is still loading, transitioning, or showing a spinner, \
-    answer "no".
-  - If you are uncertain, answer "no".
+Answer "no" while work is still in progress:
+  * a form is being filled (focus in an input, partial values, blank \
+required fields, visible validation errors).
+  * the page is loading, transitioning, or showing a spinner mid-action.
+  * a modal/overlay is obviously waiting for more human action.
 
-Only answer "yes" when the page clearly satisfies the condition.
+Use the URL and title alongside the screenshot to disambiguate \
+look-alike states.
 
 Respond with only "yes" or "no"."""
 
 USER_PROMPT_TEMPLATE = """Page URL: {url}
 Page title: {title}
+{reason_block}
+Agent's expected end state (its guess, may be over-specific): {condition}
 
-Condition: {condition}
+Has the human's underlying intervention task completed? Answer "yes" if \
+the task implied by the reason / condition is observably done on this page \
+— even on an intermediate or downstream page from the one the condition \
+literally describes. Otherwise "no". Respond with only "yes" or "no"."""
 
-Based on the screenshot above together with the URL and title, is the \
-condition true? Answer only "yes" or "no"."""
+# Rendered into USER_PROMPT_TEMPLATE only when a Handoff session is bound
+# (so the operator-facing reason string is available). Omitted entirely in
+# standalone use to avoid printing an empty heading.
+_REASON_BLOCK_TEMPLATE = "\nTask given to the human: {reason}\n"
 
 def _activity_setup_js(var: str) -> str:
     """JS injected once per document: passive listeners that stamp a hidden
@@ -126,10 +136,16 @@ class LLMDetection(BaseDetection):
 
     # Bound by Handoff.wait_for_completion via bind() — when set, the watch
     # loop gates checks on operator activity (clicks/keys forwarded through
-    # the stream) instead of in-page activity. Unbound use (LLMDetection as
-    # a trigger in run(), or standalone in tests) keeps the page-activity
-    # hook below.
-    _operator_activity: "OperatorActivity | None" = field(
+    # the stream) instead of in-page activity, and check() pulls the
+    # handoff's `reason` string into the prompt so the model knows what the
+    # human was actually asked to do (much more informative than the
+    # condition alone, which is the agent's over-specific guess at the
+    # resume state).
+    #
+    # Unbound use (LLMDetection as a trigger in run(), or standalone in
+    # tests) keeps the page-activity hook below and omits the reason line
+    # from the prompt.
+    _session: "HandoffSession | None" = field(
         default=None, init=False, repr=False
     )
 
@@ -160,16 +176,17 @@ class LLMDetection(BaseDetection):
         stale = max_interval > 0 and (now - last_check) >= max_interval
         return settled or stale
 
-    def bind(self, *, operator_activity: "OperatorActivity | None" = None) -> None:
-        """Stash the per-handoff OperatorActivity so the watch loop can gate
-        on operator presence + idleness instead of page activity.
+    def bind(self, *, session: "HandoffSession | None" = None) -> None:
+        """Stash the per-handoff session so the watch loop can gate on
+        `session.operator_activity` and `check()` can read `session.reason`
+        for the prompt.
 
         Called by Handoff.wait_for_completion. Without it, register_listeners
-        falls back to the page-activity JS hook (cheap, but noisy on real
-        sites — useful for trigger-mode use in run() where there is no
-        operator to gate on yet).
+        falls back to the page-activity JS hook (useful for trigger-mode use
+        in run() where there is no operator yet) and the prompt omits the
+        reason line.
         """
-        self._operator_activity = operator_activity
+        self._session = session
 
     def register_listeners(
         self,
@@ -191,7 +208,7 @@ class LLMDetection(BaseDetection):
             where the alternative would be timed polling against an empty
             page, not fine for completion use where vision calls cost money.
         """
-        if self._operator_activity is not None:
+        if self._session is not None:
             return self._watch_operator_activity(callback)
         return self._watch_page_activity(page, callback)
 
@@ -211,8 +228,8 @@ class LLMDetection(BaseDetection):
              same debounce + safety-net logic, just reading a different
              timestamp source.
         """
-        activity = self._operator_activity
-        assert activity is not None  # register_listeners guarantees this
+        assert self._session is not None  # register_listeners guarantees this
+        activity = self._session.operator_activity
 
         stop_event = asyncio.Event()
         state: dict[str, Any] = {
@@ -363,10 +380,13 @@ class LLMDetection(BaseDetection):
             base64_image = base64.b64encode(screenshot).decode("utf-8")
 
             # URL + title disambiguate look-alike screenshots (e.g. partial
-            # form fill vs. successful submission landing page). Captured
-            # defensively — both can throw on closed pages or during
-            # navigation, and a missing string is strictly better than
-            # aborting the whole check.
+            # form fill vs. successful submission landing page). Reason
+            # (when a session is bound) is the operator-facing explanation
+            # the agent gave — much more informative than `condition` alone,
+            # which is the agent's over-specific guess at the resume state.
+            # All captured defensively — each can throw on closed pages or
+            # during navigation, and a missing string is strictly better
+            # than aborting the whole check.
             url = ""
             title = ""
             try:
@@ -377,6 +397,11 @@ class LLMDetection(BaseDetection):
                 title = await page.title()
             except Exception:
                 pass
+            reason_block = ""
+            if self._session is not None and self._session.reason:
+                reason_block = _REASON_BLOCK_TEMPLATE.format(
+                    reason=self._session.reason
+                )
 
             # Call LLM
             kwargs: dict[str, Any] = {
@@ -397,6 +422,7 @@ class LLMDetection(BaseDetection):
                                 "text": USER_PROMPT_TEMPLATE.format(
                                     url=url or "(unavailable)",
                                     title=title or "(unavailable)",
+                                    reason_block=reason_block,
                                     condition=self.condition,
                                 ),
                             },

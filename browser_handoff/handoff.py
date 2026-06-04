@@ -369,11 +369,12 @@ class Handoff:
                 viewport_size=viewport_size,
             )
 
-            # Bind the per-session OperatorActivity before register_listeners
-            # so detections that gate on operator presence (LLMDetection) can
-            # wire up their watch loop against the right signal from the
-            # start. Cheap detections (URL/Element/Content) ignore this.
-            on.bind(operator_activity=session.operator_activity)
+            # Bind the per-handoff session before register_listeners so
+            # detections that want session context (LLMDetection reads
+            # operator_activity for watch-loop gating and reason for the
+            # prompt) can wire up against it. Cheap detections
+            # (URL/Element/Content) ignore the binding.
+            on.bind(session=session)
 
             listener_cleanups.append(
                 on.register_listeners(page, on_completion_detected)

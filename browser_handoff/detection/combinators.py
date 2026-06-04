@@ -10,7 +10,7 @@ from .base import BaseDetection, DetectionResult
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
-    from ..server.operator_activity import OperatorActivity
+    from ..server.session import HandoffSession
 
 
 _AND_HEADER = "Matched conditions:\n"
@@ -48,10 +48,10 @@ class AllDetection(BaseDetection):
     detection_type: str = field(default="all", init=False)
     conditions: list[BaseDetection] = field(default_factory=list)
 
-    def bind(self, *, operator_activity: "OperatorActivity | None" = None) -> None:
+    def bind(self, *, session: "HandoffSession | None" = None) -> None:
         """Forward to each child so nested LLMDetections still get gated."""
         for condition in self.conditions:
-            condition.bind(operator_activity=operator_activity)
+            condition.bind(session=session)
 
     def register_listeners(
         self,
@@ -127,10 +127,10 @@ class AnyDetection(BaseDetection):
     detection_type: str = field(default="any", init=False)
     conditions: list[BaseDetection] = field(default_factory=list)
 
-    def bind(self, *, operator_activity: "OperatorActivity | None" = None) -> None:
+    def bind(self, *, session: "HandoffSession | None" = None) -> None:
         """Forward to each child so nested LLMDetections still get gated."""
         for condition in self.conditions:
-            condition.bind(operator_activity=operator_activity)
+            condition.bind(session=session)
 
     def register_listeners(
         self,
@@ -193,10 +193,10 @@ class NotDetection(BaseDetection):
     detection_type: str = field(default="not", init=False)
     condition: BaseDetection | None = None
 
-    def bind(self, *, operator_activity: "OperatorActivity | None" = None) -> None:
+    def bind(self, *, session: "HandoffSession | None" = None) -> None:
         """Forward to the wrapped child so a nested LLMDetection still gets gated."""
         if self.condition is not None:
-            self.condition.bind(operator_activity=operator_activity)
+            self.condition.bind(session=session)
 
     def register_listeners(
         self,

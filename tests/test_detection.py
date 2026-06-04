@@ -1,6 +1,7 @@
 """Tests for detection types."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from browser_handoff.detection import Detection
@@ -10,6 +11,20 @@ from browser_handoff.detection.element import ElementDetection
 from browser_handoff.detection.llm import LLMDetection
 from browser_handoff.detection.url import UrlDetection
 from browser_handoff.server.operator_activity import OperatorActivity
+
+
+def _fake_session(operator_activity: OperatorActivity | None = None, reason: str = "") -> SimpleNamespace:
+    """Minimal session-like stub for bind() tests.
+
+    BaseDetection.bind() takes a HandoffSession, but constructing a real one
+    means dummies for session_id / page / context / cdp / etc. Detections
+    only read `.operator_activity` and `.reason`, so SimpleNamespace duck-
+    types cleanly and keeps the tests focused.
+    """
+    return SimpleNamespace(
+        operator_activity=operator_activity if operator_activity is not None else OperatorActivity(),
+        reason=reason,
+    )
 
 
 class TestDetectionFactory:
@@ -714,7 +729,7 @@ class TestLLMOperatorGatedWatchLoop:
         det = LLMDetection(condition="x", idle_seconds=0.15, max_interval=0.0)
         det._poll_interval = 0.02
         activity = OperatorActivity()
-        det.bind(operator_activity=activity)
+        det.bind(session=_fake_session(operator_activity=activity))
         calls: list = []
 
         async def cb(d):
@@ -735,7 +750,7 @@ class TestLLMOperatorGatedWatchLoop:
         det = LLMDetection(condition="x", idle_seconds=0.15, max_interval=0.0)
         det._poll_interval = 0.02
         activity = OperatorActivity()
-        det.bind(operator_activity=activity)
+        det.bind(session=_fake_session(operator_activity=activity))
         calls: list = []
 
         async def cb(d):
@@ -768,7 +783,7 @@ class TestLLMOperatorGatedWatchLoop:
         det = LLMDetection(condition="x", idle_seconds=0.15)
         det._poll_interval = 0.02
         activity = OperatorActivity()
-        det.bind(operator_activity=activity)
+        det.bind(session=_fake_session(operator_activity=activity))
 
         async def cb(_d):
             pass
@@ -796,9 +811,9 @@ class _RecordingDetection(LLMDetection):
         super().__init__(condition="x")
         self.bound_to: list = []
 
-    def bind(self, *, operator_activity=None):
-        self.bound_to.append(operator_activity)
-        super().bind(operator_activity=operator_activity)
+    def bind(self, *, session=None):
+        self.bound_to.append(session)
+        super().bind(session=session)
 
 
 class TestCombinatorBindPropagation:
@@ -807,29 +822,29 @@ class TestCombinatorBindPropagation:
     def test_all_propagates_to_each_child(self):
         a, b = _RecordingDetection(), _RecordingDetection()
         all_det = AllDetection(conditions=[a, b])
-        activity = OperatorActivity()
-        all_det.bind(operator_activity=activity)
-        assert a.bound_to == [activity]
-        assert b.bound_to == [activity]
+        session = _fake_session()
+        all_det.bind(session=session)
+        assert a.bound_to == [session]
+        assert b.bound_to == [session]
 
     def test_any_propagates_to_each_child(self):
         a, b = _RecordingDetection(), _RecordingDetection()
         any_det = AnyDetection(conditions=[a, b])
-        activity = OperatorActivity()
-        any_det.bind(operator_activity=activity)
-        assert a.bound_to == [activity]
-        assert b.bound_to == [activity]
+        session = _fake_session()
+        any_det.bind(session=session)
+        assert a.bound_to == [session]
+        assert b.bound_to == [session]
 
     def test_not_propagates_to_wrapped(self):
         inner = _RecordingDetection()
         not_det = NotDetection(condition=inner)
-        activity = OperatorActivity()
-        not_det.bind(operator_activity=activity)
-        assert inner.bound_to == [activity]
+        session = _fake_session()
+        not_det.bind(session=session)
+        assert inner.bound_to == [session]
 
     def test_not_with_no_condition_is_safe(self):
         # NotDetection allows condition=None; bind() must not blow up.
-        NotDetection(condition=None).bind(operator_activity=OperatorActivity())
+        NotDetection(condition=None).bind(session=_fake_session())
 
 
 # ---- Element detection: poll-based watch loop (no expose_function) -------
