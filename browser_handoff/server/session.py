@@ -7,6 +7,8 @@ import secrets
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .operator_activity import OperatorActivity
+
 if TYPE_CHECKING:
     from fastapi import WebSocket
     from playwright.async_api import BrowserContext, CDPSession, Page
@@ -56,6 +58,11 @@ class HandoffSession:
     websockets: list["WebSocket"] = field(default_factory=list)
     completed: bool = False
     completion_reason: str | None = None
+    # Source of truth for "has the operator touched this handoff yet, and
+    # when did they last interact?" — read by detections that opt into
+    # operator-driven gating via BaseDetection.bind(). The streaming server
+    # bumps this on each routed mouse/keyboard/paste/navigate event.
+    operator_activity: OperatorActivity = field(default_factory=OperatorActivity)
 
     def mark_accessed(self) -> None:
         """Mark the session as accessed by a user."""

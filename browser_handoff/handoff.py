@@ -360,7 +360,7 @@ class Handoff:
             except Exception as e:
                 logger.info(f"Could not get viewport: {e}, using default: {viewport_size}")
 
-            await server.register_session(
+            session = await server.register_session(
                 session_id=session_id,
                 page=page,
                 context=context,
@@ -368,6 +368,12 @@ class Handoff:
                 scenario_name=name,
                 viewport_size=viewport_size,
             )
+
+            # Bind the per-session OperatorActivity before register_listeners
+            # so detections that gate on operator presence (LLMDetection) can
+            # wire up their watch loop against the right signal from the
+            # start. Cheap detections (URL/Element/Content) ignore this.
+            on.bind(operator_activity=session.operator_activity)
 
             listener_cleanups.append(
                 on.register_listeners(page, on_completion_detected)

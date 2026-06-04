@@ -97,7 +97,7 @@ class Detection:
         model: str = "anthropic/claude-sonnet-4-5",
         condition: str = "",
         api_key: str | None = None,
-        idle_seconds: float = 2.0,
+        idle_seconds: float = 3.0,
         max_interval: float = 30.0,
     ) -> "LLMDetection":
         """Create an LLM-based detection.
