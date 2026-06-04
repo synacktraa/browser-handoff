@@ -1,0 +1,197 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#   "browser-use",
+#   "browser-handoff[llm] @ git+https://github.com/synacktraa/browser-handoff.git",
+# ]
+# ///
+"""
+Example: a browser-use shopping agent that asks a human for login + payment.
+
+browser-use drives a shopping flow on automationexercise.com (a test storefront
+built for automation — no anti-bot wall, no real charge). browser-handoff is
+exposed to the agent as a custom tool — when the agent decides it can't do
+something (login wall, signup form, card entry), it calls `request_human_help`
+with a natural-language `done_when` description of the resume condition.
+browser-handoff streams the page to a human and waits until an LLMDetection on
+that condition matches before handing control back.
+
+Why a tool rather than outside-in detection: the agent already knows when it's
+stuck. Letting it raise its hand is more reliable than us trying to guess every
+possible blocker from the URL/DOM.
+
+Architecture — one Chrome shared over CDP:
+  * Playwright launches a real, visible Chrome with a fixed remote-debugging
+    port and keeps the Page objects — browser-handoff needs a Playwright Page
+    to screencast and forward the human's input.
+  * browser-use connects to the SAME Chrome over CDP and drives the agent loop.
+  * The `request_human_help` tool resolves the current Playwright page on each
+    invocation and awaits handoff.wait_for_completion(...).
+
+Prereqs:
+  * Google Chrome installed (Playwright launches it via channel="chrome").
+  * ANTHROPIC_API_KEY in the environment — used both by browser-use's planner
+    (ChatAnthropic) and by browser-handoff's LLMDetection.
+
+Environment Variables (optional):
+  DISCORD_WEBHOOK_URL  Discord webhook for the handoff ping. If unset,
+                       browser-handoff prints a rich console panel instead.
+
+Run:
+  uv run examples/browser_use_shopping_handoff/local.py
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+
+# NOTE: browser-use's public API moves fast. If an import or method below
+# fails, these are the lines most likely to need a version tweak:
+#   1. `from browser_use import Agent, ActionResult, BrowserSession, ChatAnthropic, Tools`
+#   2. `await browser_session.get_current_page_url()`
+#   3. `Agent(..., browser_session=...)`  (older builds use `browser=...`)
+from browser_use import ActionResult, Agent, BrowserSession, ChatAnthropic, Tools
+from playwright.async_api import Browser, Page, async_playwright
+
+from browser_handoff import Handoff, ServerConfig
+from browser_handoff.detection import Detection
+from browser_handoff.notifiers import DiscordNotifier, Notifier
+
+# Quiet the frame/mouse/screencast chatter so the demo output stays readable.
+logging.basicConfig(level=logging.WARNING)
+
+CDP_PORT = 9222
+STREAMING_PORT = 8080
+
+TASK = """\
+Buy any t-shirt on https://automationexercise.com and reach the order
+confirmation. Let human handle any step that requires intervention — login, signup, card entry, etc.\
+"""
+
+
+def _resolve_current_page(browser: Browser) -> Page | None:
+    """Pick the Playwright page the agent is currently acting on.
+
+    browser-use doesn't hand us a Page (it speaks CDP), so we walk Playwright's
+    own view of the shared Chrome and return the most recent non-blank tab.
+    For this flow the agent operates in a single tab, so that's reliably the
+    one the agent just acted on.
+    """
+    pages: list[Page] = [
+        p for ctx in browser.contexts for p in ctx.pages if not p.is_closed()
+    ]
+    non_blank = [p for p in pages if p.url and p.url != "about:blank"]
+    return (non_blank or pages or [None])[0]
+
+
+def _build_tools(handoff: Handoff, browser: Browser) -> Tools:
+    """Register `request_human_help` against the shared handoff + browser."""
+    tools = Tools()
+
+    @tools.action(
+        "Hand off control to a human when you cannot proceed on your own — "
+        "login walls, signup forms, identity verification, card / payment "
+        "entry, anything that requires private credentials. "
+        ""
+        "Arguments:\n"
+        "  reason: a short human-facing message shown in the stream viewer "
+        "explaining what the human needs to do.\n"
+        "  done_when: a natural-language description of the SINGLE "
+        "observable invariant that proves the human is finished. The tool "
+        "polls a vision model against this condition and returns the moment "
+        "it holds.\n"
+        ""
+        "Writing a good `done_when`:\n"
+        "  * Describe ONE observable state — not a compound condition.\n"
+        "  * Good: 'the user appears to be logged in (a logged-in indicator "
+        "is visible in the navbar)'; 'the order confirmation page with "
+        "Order Placed! is visible'.\n"
+        "  * Bad: 'logged in AND the address review page is showing'. "
+        "Compound conditions fail when the site routes the human through "
+        "intermediate pages (e.g. an account-created confirmation between "
+        "signup and the next step); the model correctly answers 'no' on "
+        "each and the handoff eventually times out.\n"
+        "  * After the tool returns you control navigation again, so the "
+        "`done_when` only needs to capture the moment the human's work is "
+        "over — not the page you want to resume on."
+    )
+    async def request_human_help(reason: str, done_when: str) -> ActionResult:
+        page = _resolve_current_page(browser)
+        if page is None:
+            return ActionResult(
+                extracted_content="No active browser page available to hand off."
+            )
+
+        print(f"\n-> Handoff requested: {reason}\n   done_when: {done_when}\n")
+        result = await handoff.wait_for_completion(
+            page,
+            on=Detection.llm(condition=done_when),
+            reason=reason,
+            name="shopping-handoff",
+        )
+        if result.timed_out:
+            return ActionResult(
+                extracted_content=(
+                    "Human did not finish the step in time. Try a different "
+                    "approach, or call request_human_help again with a clearer "
+                    "`done_when` description."
+                )
+            )
+        return ActionResult(
+            extracted_content=(
+                f"Human completed the step in {result.duration:.1f}s. "
+                f"Current URL: {page.url}. You may continue the task."
+            )
+        )
+
+    return tools
+
+
+async def main() -> None:
+    # Discord if configured; otherwise browser-handoff falls back to its
+    # built-in ConsoleNotifier (rich panel with the stream URL).
+    notifiers: list[Notifier] = []
+    if webhook := os.getenv("DISCORD_WEBHOOK_URL"):
+        notifiers.append(
+            DiscordNotifier(webhook_url=webhook, username="Shopping Agent")
+        )
+
+    handoff = Handoff(
+        server=ServerConfig(host="0.0.0.0", port=STREAMING_PORT),
+        notifiers=notifiers,
+    )
+
+    async with async_playwright() as pw:
+        # One real, visible Chrome that BOTH frameworks share over CDP.
+        # `launch()` alone gives us a Browser whose `.contexts` only sees
+        # contexts Playwright itself created — pages browser-use opens over
+        # its own CDP connection are invisible. Re-connecting via
+        # `connect_over_cdp` to the same Chrome returns a Browser handle that
+        # enumerates every target in the process, which is what the
+        # request_human_help tool needs to resolve the current Page.
+        launched = await pw.chromium.launch(
+            headless=False,
+            channel="chrome",
+            args=[f"--remote-debugging-port={CDP_PORT}"],
+        )
+        try:
+            browser = await pw.chromium.connect_over_cdp(
+                f"http://127.0.0.1:{CDP_PORT}"
+            )
+            tools = _build_tools(handoff, browser)
+            browser_session = BrowserSession(cdp_url=f"http://127.0.0.1:{CDP_PORT}")
+            agent = Agent(
+                task=TASK,
+                llm=ChatAnthropic(model="claude-sonnet-4-5"),
+                browser_session=browser_session,
+                tools=tools,
+            )
+            await agent.run(max_steps=40)
+        finally:
+            await launched.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

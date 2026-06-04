@@ -148,6 +148,7 @@ The stream URL carries a high-entropy capability token (`…/?t=<token>`): whoev
 ## Examples
 
 - [`Claude OAuth login handoff`](examples/claude_oauth_login_handoff/) — a working Claude OAuth flow that pairs `browser-handoff` with [`ccauth`](https://github.com/synacktraa/ccauth). `local.py` runs the flow on your machine; `in_daytona.py` runs the exact same `local.py` inside a Daytona sandbox so the human can log in from anywhere via the sandbox's preview URL.
+- [`browser-use assisted shopping`](examples/browser_use_assisted_shopping/) — a [`browser-use`](https://github.com/browser-use/browser-use) agent buys a t-shirt on automationexercise.com. `browser-handoff` is exposed to the agent as a custom tool; the agent decides on its own when to call it (the login wall and the card form), and a human takes over for those steps while the agent drives the rest.
 
 ## License
 
