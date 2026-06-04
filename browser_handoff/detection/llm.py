@@ -18,14 +18,32 @@ if TYPE_CHECKING:
     from ..server.operator_activity import OperatorActivity
 
 # System prompt for LLM detection
-SYSTEM_PROMPT = """You are analyzing a browser screenshot to determine if a condition is met.
+SYSTEM_PROMPT = """You are analyzing a browser session to determine whether a \
+completion condition is met.
+
+You receive a screenshot of the current page along with its URL and title. \
+Use all three signals together — the URL and title often disambiguate \
+look-alike states the screenshot alone cannot (e.g. a half-filled signup \
+form vs. a successful signup landing page).
+
+Bias against false positives:
+  - If a form is still being filled (focus inside an input, partial values, \
+    visible validation messages, required fields blank), answer "no".
+  - If the page is still loading, transitioning, or showing a spinner, \
+    answer "no".
+  - If you are uncertain, answer "no".
+
+Only answer "yes" when the page clearly satisfies the condition.
+
 Respond with only "yes" or "no"."""
 
-USER_PROMPT_TEMPLATE = """Based on this screenshot, is the following condition true?
+USER_PROMPT_TEMPLATE = """Page URL: {url}
+Page title: {title}
 
 Condition: {condition}
 
-Answer only "yes" or "no"."""
+Based on the screenshot above together with the URL and title, is the \
+condition true? Answer only "yes" or "no"."""
 
 def _activity_setup_js(var: str) -> str:
     """JS injected once per document: passive listeners that stamp a hidden
@@ -344,6 +362,22 @@ class LLMDetection(BaseDetection):
             screenshot = await page.screenshot(type="jpeg", quality=80)
             base64_image = base64.b64encode(screenshot).decode("utf-8")
 
+            # URL + title disambiguate look-alike screenshots (e.g. partial
+            # form fill vs. successful submission landing page). Captured
+            # defensively — both can throw on closed pages or during
+            # navigation, and a missing string is strictly better than
+            # aborting the whole check.
+            url = ""
+            title = ""
+            try:
+                url = page.url or ""
+            except Exception:
+                pass
+            try:
+                title = await page.title()
+            except Exception:
+                pass
+
             # Call LLM
             kwargs: dict[str, Any] = {
                 "model": self.model,
@@ -361,7 +395,9 @@ class LLMDetection(BaseDetection):
                             {
                                 "type": "text",
                                 "text": USER_PROMPT_TEMPLATE.format(
-                                    condition=self.condition
+                                    url=url or "(unavailable)",
+                                    title=title or "(unavailable)",
+                                    condition=self.condition,
                                 ),
                             },
                         ],
