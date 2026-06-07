@@ -31,7 +31,7 @@ async def main() -> None:
     handoff = Handoff()  # reusable: holds server + notifier config, nothing page-specific
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=False)
+        browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
         await page.goto("https://the-internet.herokuapp.com/login")
 
