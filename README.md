@@ -16,7 +16,7 @@ LLM-based detection (optional): `pip install browser-handoff[llm]`
 
 Opens [the-internet.herokuapp.com/login](https://the-internet.herokuapp.com/login) — a public testing site that displays its own credentials on the page (`tomsmith` / `SuperSecretPassword!`). The handoff fires as soon as the page loads, prints a stream URL for you to open, and resumes once you sign in successfully.
 
-https://github.com/user-attachments/assets/d45b9f42-1a3c-4553-9b7a-a00872b0f112
+[![Demo — login handoff](./.github/assets/heroku-app-login-handoff-thumbnail.png)](https://github.com/user-attachments/assets/493b2710-6b32-4593-b152-5f655b0c945e)
 
 ```python
 import asyncio
@@ -31,7 +31,7 @@ async def main() -> None:
     handoff = Handoff()  # reusable: holds server + notifier config, nothing page-specific
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=False)
+        browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
         await page.goto("https://the-internet.herokuapp.com/login")
 

@@ -172,7 +172,7 @@ async def main() -> None:
         # enumerates every target in the process, which is what the
         # request_human_help tool needs to resolve the current Page.
         launched = await pw.chromium.launch(
-            headless=False,
+            headless=True,
             channel="chrome",
             args=[f"--remote-debugging-port={CDP_PORT}"],
         )
