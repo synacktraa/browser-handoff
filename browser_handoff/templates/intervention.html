@@ -78,11 +78,26 @@
         pointer-events: none;
       }
 
+      /* Wraps the session-header + browser-window so they share one
+         computed width — the width of the stream-container. The wrapper
+         derives its width from the page's aspect ratio and the available
+         box (viewport minus side gutters, viewport minus vertical chrome).
+         min(...) picks whichever bound clamps first. The chrome budget
+         covers body padding (56) + session-header (~46) + its margin (14)
+         + browser-window borders (2) + toolbar (52) ≈ 170px. */
+      .window-stack {
+        width: min(
+          calc(100vw - 40px),
+          calc((100vh - 170px) * {{ viewport_width }} / {{ viewport_height }})
+        );
+        display: flex;
+        flex-direction: column;
+      }
+
       .session-header {
         position: relative;
         z-index: 50;
-        width: {{ viewport_width }}px;
-        max-width: calc(100vw - 40px);
+        width: 100%;
         display: flex;
         align-items: center;
         gap: 12px;
@@ -265,8 +280,7 @@
       }
 
       .browser-window {
-        width: {{ viewport_width }}px;
-        max-width: calc(100vw - 40px);
+        width: 100%;
         background: var(--glass);
         backdrop-filter: blur(28px) saturate(170%);
         -webkit-backdrop-filter: blur(28px) saturate(170%);
@@ -430,10 +444,8 @@
 
       #stream-container {
         position: relative;
-        width: {{ viewport_width }}px;
-        height: {{ viewport_height }}px;
-        max-width: 100%;
-        max-height: calc(100vh - 200px);
+        width: 100%;
+        aspect-ratio: {{ viewport_width }} / {{ viewport_height }};
         background: #000;
         overflow: hidden;
       }
@@ -740,6 +752,7 @@
     </style>
   </head>
   <body>
+    <div class="window-stack">
     <div class="session-header">
       <span class="brand">
         <span class="brand-mark"></span>
@@ -855,6 +868,7 @@
           <div class="completion-message">You may close this window</div>
         </div>
       </div>
+    </div>
     </div>
 
     <script>
