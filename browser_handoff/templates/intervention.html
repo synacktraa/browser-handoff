@@ -686,68 +686,101 @@
         from { opacity: 0; }
         to   { opacity: 1; }
       }
-      .completion-check {
-        width: 72px; height: 72px;
-        border-radius: 50%;
-        background: rgba(255, 106, 19, 0.12);
-        border: 1.5px solid var(--orange);
+      /* Receipt-style completion card: header row (small check glyph +
+         COMPLETED label + timestamp), body (the reason as prose), footer
+         (close-window hint). No big centered disc — the card itself is the
+         payoff, matching the rest of the viewer's glass-panel language. */
+      .completion-card {
+        width: 480px;
+        max-width: calc(100% - 80px);
+        background: var(--glass-strong);
+        backdrop-filter: blur(28px) saturate(170%);
+        -webkit-backdrop-filter: blur(28px) saturate(170%);
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow:
+          0 30px 70px -20px rgba(0, 0, 0, 0.7),
+          0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+        animation: cardIn 0.42s cubic-bezier(0.2, 0.7, 0.2, 1);
+      }
+      @keyframes cardIn {
+        from { opacity: 0; transform: translateY(6px) scale(0.985); }
+        to   { opacity: 1; transform: translateY(0) scale(1); }
+      }
+
+      .completion-card-header {
         display: flex;
         align-items: center;
-        justify-content: center;
-        margin-bottom: 22px;
-        animation: scaleIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-        box-shadow: 0 0 40px rgba(255, 106, 19, 0.3);
-      }
-      .completion-check svg { width: 30px; height: 30px; color: var(--orange); }
-      @keyframes scaleIn {
-        from { transform: scale(0); }
-        to   { transform: scale(1); }
-      }
-      .completion-title {
-        font-size: 14px;
-        font-weight: 600;
-        color: var(--text);
-        margin-bottom: 10px;
-        text-transform: uppercase;
-        letter-spacing: 2px;
+        gap: 10px;
+        padding: 13px 18px;
+        border-bottom: 1px solid var(--border);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0));
         font-family: var(--font-mono);
       }
-      .completion-reason {
+      /* Echoes the session-header brand-mark style (small bordered square
+         with orange tint) so the completion card feels like family. */
+      .completion-card-header .check-glyph {
+        width: 18px;
+        height: 18px;
+        border: 1.5px solid var(--orange);
+        background: rgba(255, 106, 19, 0.14);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+      .completion-card-header .check-glyph svg {
+        width: 11px;
+        height: 11px;
+        color: var(--orange);
+      }
+      .completion-card-header .label {
+        font-size: 11px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--text);
+        font-weight: 600;
+      }
+      .completion-card-header .timestamp {
+        margin-left: auto;
+        font-size: 11px;
+        color: var(--text-mute);
+        font-feature-settings: 'tnum';
+        letter-spacing: 0.04em;
+      }
+
+      .completion-card-body {
+        padding: 16px 18px;
         font-size: 13.5px;
-        color: #d4d4d8;
-        max-width: 460px;
-        width: 80%;
-        /* Left-aligned reads naturally for AND combinator lists and
-           multi-line reasons. The block itself stays centered horizontally
-           by the parent flex; short single-line reasons still look fine. */
-        text-align: left;
+        color: var(--text-dim);
         line-height: 1.6;
-        margin-bottom: 24px;
-        white-space: pre-line; /* honor server-side \n if present */
+        white-space: pre-line;
         word-break: break-word;
-        /* Long reasons (e.g. an AND of several long URLs) scroll inside
-           the overlay instead of pushing the layout. */
-        max-height: 220px;
+        max-height: 240px;
         overflow-y: auto;
-        padding-right: 6px;
         scrollbar-width: thin;
         scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
       }
-      .completion-reason::-webkit-scrollbar { width: 6px; }
-      .completion-reason::-webkit-scrollbar-track { background: transparent; }
-      .completion-reason::-webkit-scrollbar-thumb {
+      .completion-card-body::-webkit-scrollbar { width: 6px; }
+      .completion-card-body::-webkit-scrollbar-track { background: transparent; }
+      .completion-card-body::-webkit-scrollbar-thumb {
         background: rgba(255, 255, 255, 0.18);
         border-radius: 3px;
       }
-      .completion-reason::-webkit-scrollbar-thumb:hover {
+      .completion-card-body::-webkit-scrollbar-thumb:hover {
         background: rgba(255, 255, 255, 0.28);
       }
-      .completion-message {
-        font-size: 11px;
-        color: #9ca0aa;
-        text-transform: uppercase;
-        letter-spacing: 1.4px;
+
+      .completion-card-footer {
+        padding: 11px 18px;
+        border-top: 1px solid var(--border);
+        background: rgba(0, 0, 0, 0.18);
         font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--text-mute);
       }
     </style>
   </head>
@@ -858,14 +891,19 @@
         </div>
 
         <div class="completion-overlay" id="completion-overlay">
-          <div class="completion-check">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="20 6 9 17 4 12"/>
-            </svg>
+          <div class="completion-card">
+            <div class="completion-card-header">
+              <span class="check-glyph">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="20 6 9 17 4 12"/>
+                </svg>
+              </span>
+              <span class="label">Completed</span>
+              <span class="timestamp" id="completion-timestamp"></span>
+            </div>
+            <div class="completion-card-body" id="completion-reason-text"></div>
+            <div class="completion-card-footer">You may close this window</div>
           </div>
-          <div class="completion-title">Task Completed</div>
-          <div class="completion-reason" id="completion-reason-text"></div>
-          <div class="completion-message">You may close this window</div>
         </div>
       </div>
     </div>
@@ -883,6 +921,7 @@
       const helpOverlay = document.getElementById('help-overlay');
       const completionOverlay = document.getElementById('completion-overlay');
       const completionReasonText = document.getElementById('completion-reason-text');
+      const completionTimestamp = document.getElementById('completion-timestamp');
       const toastStack = document.getElementById('toast-stack');
       const reloadBtn = document.getElementById('reload-btn');
       const helpBtn = document.getElementById('help-btn');
@@ -1076,6 +1115,9 @@
 
       function showCompletionOverlay(reason) {
         completionReasonText.textContent = reason || '';
+        completionTimestamp.textContent = new Date().toLocaleTimeString([], {
+          hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+        });
         completionOverlay.classList.add('show');
         isCompleted = true;
         // Pill is meaningless after completion — hide it. The overlay is the
