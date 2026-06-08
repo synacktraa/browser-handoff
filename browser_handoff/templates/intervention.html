@@ -849,7 +849,7 @@
         </div>
       </div>
 
-      <div id="stream-container" class="has-focus" tabindex="0">
+      <div id="stream-container" tabindex="0">
         <img id="stream" alt="Browser Stream" draggable="false" />
 
         <div class="reconnect-indicator">
@@ -1296,13 +1296,26 @@
         return (k === 'v' || k === 'c' || k === 'x') ? k : null;
       }
 
-      document.onkeydown = async (e) => {
-        // While the operator's interacting with the URL bar, hand the keys
-        // to the browser so arrow keys / Home / End / Ctrl+C of the URL
-        // text work natively.
-        if (document.activeElement === urlInput) return;
+      // The four Ctrl/Meta combos we forward to the remote page: A (select
+      // all), C (copy), V (paste), X (cut). Every other Ctrl/Meta combo
+      // passes through to the local browser so Ctrl+W, Ctrl+T, Ctrl+R,
+      // F11, etc. behave normally.
+      function isForwardedShortcut(e) {
+        if (!(e.ctrlKey || e.metaKey)) return false;
+        const code = e.code || '';
+        if (['KeyA', 'KeyC', 'KeyV', 'KeyX'].includes(code)) return true;
+        const k = (e.key || '').toLowerCase();
+        return ['a', 'c', 'v', 'x'].includes(k);
+      }
 
-        // `?` toggles the help overlay; Esc closes it.
+      document.onkeydown = async (e) => {
+        // Stream not focused -> every key belongs to the local browser.
+        // Operator interacting with URL bar, a toolbar button, the help
+        // overlay, anything else outside the stream -> we do nothing.
+        if (document.activeElement !== streamContainer) return;
+
+        // Viewer-specific shortcuts (only when stream has focus).
+        // `?` toggles the help overlay; Esc closes it / the reason dropdown.
         if (e.key === '?' || (e.shiftKey && e.key === '/')) {
           e.preventDefault();
           helpOverlay.classList.toggle('show');
@@ -1319,10 +1332,12 @@
           }
         }
 
-        // Every keystroke is meant for the page, never for this viewer's
-        // chrome. Without preventDefault, ctrl+A selects toolbar text,
-        // ctrl+R reloads the viewer, ctrl+F opens local find, etc.
-        // Browser-reserved shortcuts (ctrl+T/W/N, F11, F12) are unaffected.
+        // Ctrl/Meta combo that isn't one of the four forwarded ones ->
+        // belongs to the local browser (Ctrl+W close tab, Ctrl+R reload,
+        // Ctrl+F find, etc.). Plain keys (no modifier) fall through to
+        // the forward path below so typing into form fields still works.
+        if ((e.ctrlKey || e.metaKey) && !isForwardedShortcut(e)) return;
+
         e.preventDefault();
 
         const clip = isClipboardShortcut(e);
@@ -1353,13 +1368,25 @@
       };
 
       document.onkeyup = (e) => {
-        if (document.activeElement === urlInput) return;
+        if (document.activeElement !== streamContainer) return;
+        if ((e.ctrlKey || e.metaKey) && !isForwardedShortcut(e)) return;
         e.preventDefault();
         if (isClipboardShortcut(e)) return;
         send({type: 'keyboard', action: 'keyup', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
       };
 
       stream.oncontextmenu = (e) => e.preventDefault();
+
+      // The orange focus ring is the operator's signal that the stream
+      // owns typing. Track real DOM focus so it can't mislead them — if
+      // the ring is on, keys forward; if it's off, keys go to the local
+      // tab. Auto-focus on load so the common path (open viewer, start
+      // typing) works without an explicit click.
+      streamContainer.addEventListener('focus', () =>
+        streamContainer.classList.add('has-focus'));
+      streamContainer.addEventListener('blur', () =>
+        streamContainer.classList.remove('has-focus'));
+      streamContainer.focus();
 
       // Latency ping/pong: client measures RTT against its own clock.
       setInterval(() => {
