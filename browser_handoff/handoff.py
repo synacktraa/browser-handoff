@@ -491,20 +491,33 @@ class Handoff:
 
         Replaces a magic asyncio.sleep — works regardless of how slow the
         machine is to bind, and returns the moment the port is ready.
+
+        Each connect attempt has its own short timeout. Without it, a
+        single attempt that stalls mid-handshake (uvicorn between bind and
+        accept; WSL2 loopback quirks; firewall holding the SYN) would hang
+        forever — the outer deadline is only checked between iterations
+        and never fires.
         """
         # 0.0.0.0 / :: are bind addresses, not connect addresses.
         connect_host = "127.0.0.1" if host in ("0.0.0.0", "") else (
             "::1" if host == "::" else host
         )
+        # Tight per-attempt cap so a stuck connect doesn't starve the loop.
+        # interval is the retry pause AFTER a failure; per_attempt is the
+        # ceiling on a single try.
+        per_attempt = min(1.0, max(interval * 4, 0.2))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                _, writer = await asyncio.open_connection(connect_host, port)
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(connect_host, port),
+                    timeout=per_attempt,
+                )
                 writer.close()
                 with suppress(Exception):
                     await writer.wait_closed()
                 return
-            except OSError:
+            except (OSError, asyncio.TimeoutError):
                 await asyncio.sleep(interval)
         logger.warning(
             "Streaming server did not accept connections on %s:%d within %.1fs",
