@@ -29,7 +29,6 @@ Architecture — one Chrome shared over CDP:
     invocation and awaits handoff.wait_for_completion(...).
 
 Prereqs:
-  * Google Chrome installed (Playwright launches it via channel="chrome").
   * ANTHROPIC_API_KEY in the environment — used both by browser-use's planner
     (ChatAnthropic) and by browser-handoff's LLMDetection.
 
@@ -93,29 +92,43 @@ def _build_tools(handoff: Handoff, browser: Browser) -> Tools:
     @tools.action(
         "Hand off control to a human when you cannot proceed on your own — "
         "login walls, signup forms, identity verification, card / payment "
-        "entry, anything that requires private credentials. "
-        ""
+        "entry, anything that requires private credentials.\n"
+        "\n"
         "Arguments:\n"
         "  reason: a short human-facing message shown in the stream viewer "
         "explaining what the human needs to do.\n"
-        "  done_when: a natural-language description of the SINGLE "
-        "observable invariant that proves the human is finished. The tool "
-        "polls a vision model against this condition and returns the moment "
-        "it holds.\n"
-        ""
-        "Writing a good `done_when`:\n"
-        "  * Describe ONE observable state — not a compound condition.\n"
-        "  * Good: 'the user appears to be logged in (a logged-in indicator "
-        "is visible in the navbar)'; 'the order confirmation page with "
-        "Order Placed! is visible'.\n"
-        "  * Bad: 'logged in AND the address review page is showing'. "
-        "Compound conditions fail when the site routes the human through "
-        "intermediate pages (e.g. an account-created confirmation between "
-        "signup and the next step); the model correctly answers 'no' on "
-        "each and the handoff eventually times out.\n"
-        "  * After the tool returns you control navigation again, so the "
-        "`done_when` only needs to capture the moment the human's work is "
-        "over — not the page you want to resume on."
+        "  done_when: a natural-language description of ONE observable signal "
+        "that proves the human did the action you needed. A vision model "
+        "polls the page against this signal and the tool returns the moment "
+        "it sees it.\n"
+        "\n"
+        "STRICT RULES for `done_when` — violating these makes the tool time out:\n"
+        "\n"
+        "  1. ONE signal, never multiple. NO `and`, `&`, commas joining "
+        "conditions, `then`, or `followed by`. NOT 'X and Y'. NOT 'X "
+        "showing Y'. NOT 'X is visible and Y is gone'. A single thing the "
+        "model can confirm from a single screenshot.\n"
+        "\n"
+        "  2. DO NOT assume what page the human will leave you on. You will "
+        "see whatever page they land on after the tool returns — describe "
+        "the page state then, not now. The `done_when` should only capture "
+        "the moment the human's work is over, NOT the next step in your "
+        "plan.\n"
+        "\n"
+        "  3. Describe what is VISIBLE on the page, not what has happened "
+        "behind the scenes. 'Logout link is visible' is observable. 'User "
+        "is logged in' depends on the model inferring a hidden state and "
+        "is less reliable.\n"
+        "\n"
+        "Good examples:\n"
+        "  * 'a Logout link or username is visible somewhere on the page'\n"
+        "  * 'an Order Placed or Thank You confirmation message is visible'\n"
+        "  * 'the card-entry form is no longer visible'\n"
+        "\n"
+        "Bad examples (will time out):\n"
+        "  * 'logged in AND back at checkout AND modal dismissed'  → compound\n"
+        "  * 'logged in and the next step is visible'              → assumes destination\n"
+        "  * 'the user has finished signup and is on the cart page' → compound + assumes\n"
     )
     async def request_human_help(reason: str, done_when: str) -> ActionResult:
         page = _resolve_current_page(browser)
@@ -171,10 +184,17 @@ async def main() -> None:
         # `connect_over_cdp` to the same Chrome returns a Browser handle that
         # enumerates every target in the process, which is what the
         # request_human_help tool needs to resolve the current Page.
+        # --window-size sets the rendered page dimensions for headless
+        # Chrome; browser-handoff reads window.innerWidth/innerHeight off
+        # the page so the captured stream comes through at the same ratio.
+        # 1600x900 (16:9) reads as a rectangular shopping site rather than
+        # the square-ish 1280x800 default.
         launched = await pw.chromium.launch(
             headless=True,
-            channel="chrome",
-            args=[f"--remote-debugging-port={CDP_PORT}"],
+            args=[
+                f"--remote-debugging-port={CDP_PORT}",
+                "--window-size=1600,900",
+            ],
         )
         try:
             browser = await pw.chromium.connect_over_cdp(
