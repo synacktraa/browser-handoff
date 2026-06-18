@@ -3,8 +3,8 @@ name = "browser-handoff"
 version = "0.3.13"
 description = "Pause browser automation, hand the page to a human, resume when they're done."
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
     { name = "Harsh Verma", email = "synacktra.work@gmail.com" }
 ]
@@ -16,7 +16,7 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Framework :: AsyncIO",
     "Programming Language :: Python :: 3",
@@ -34,6 +34,7 @@ dependencies = [
     "jinja2>=3.1",
     "pyyaml>=6.0",
     "rich>=13",
+    "requests>=2.34.1",
 ]
 
 [project.optional-dependencies]

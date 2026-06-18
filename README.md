@@ -152,4 +152,4 @@ The stream URL carries a high-entropy capability token (`…/?t=<token>`): whoev
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
