@@ -32,6 +32,118 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
 
+# JS run inside the handed-off Page to read the page's position and size on
+# the substrate's display. The substrate streams the whole desktop (window
+# chrome + display background); these six numbers let the proxy template crop
+# the iframe down to just the page area.
+#
+# Note: window.screenY is the top of the *window*, not the page. Chrome
+# (tabs + address bar) lives in `outerHeight - innerHeight`, so the actual
+# page top on the display is `screenY + (outer - inner)`. Same logic for X
+# in case the window has symmetric left/right borders.
+_CROP_METRICS_JS = """() => ({
+    screen_w: window.screen.width,
+    screen_h: window.screen.height,
+    page_x:   window.screenX + Math.max(0, (window.outerWidth  - window.innerWidth ) / 2),
+    page_y:   window.screenY + Math.max(0, (window.outerHeight - window.innerHeight)),
+    page_w:   window.innerWidth,
+    page_h:   window.innerHeight,
+})"""
+
+
+async def _maximize_substrate_window(page: "Page") -> None:
+    """Maximize the substrate browser window via CDP.
+
+    Load-bearing for the crop math: when the window sits asymmetrically on
+    the substrate display, CSS sub-pixel rounding on the iframe boundary
+    produces 5-15px leakage strips that depend on which side the window is
+    near (verified end-to-end against a real substrate). Maximizing forces
+    screenX/Y to 0 and innerW to screen_w, which makes horizontal overflow
+    exactly zero — the rendering then has nothing to round against on those
+    sides, and the only overflow is the top chrome strip, which the existing
+    math handles cleanly.
+
+    Wrapped in try/except so a substrate that ignores
+    Browser.setWindowBounds (headless mode, custom builds) doesn't break
+    the handoff — we just get degraded crop quality, not failure.
+    """
+    try:
+        cdp = await page.context.new_cdp_session(page)
+    except Exception as e:
+        logger.info("could not open CDP session for maximize: %s", e)
+        return
+    try:
+        wt = await cdp.send("Browser.getWindowForTarget")
+        window_id = wt["windowId"]
+        # Toggle through 'normal' first to force re-layout if the window is
+        # already reported as maximized but bounds don't quite match the
+        # display (observed on some Chromium builds — the second call to
+        # 'maximized' is a no-op without this).
+        await cdp.send("Browser.setWindowBounds", {
+            "windowId": window_id,
+            "bounds": {"windowState": "normal"},
+        })
+        await asyncio.sleep(0.2)
+        await cdp.send("Browser.setWindowBounds", {
+            "windowId": window_id,
+            "bounds": {"windowState": "maximized"},
+        })
+        # Let the substrate re-layout and the remote stream catch up to the
+        # new dimensions before we measure.
+        await asyncio.sleep(0.5)
+    except Exception as e:
+        logger.info("substrate window maximize failed: %s", e)
+
+
+async def _capture_crop_metrics(
+    page: "Page",
+    *,
+    attempts: int = 3,
+    backoff: float = 0.1,
+) -> dict[str, int] | None:
+    """Query the page for its rect on the substrate's display.
+
+    Maximizes the substrate browser window first (see
+    `_maximize_substrate_window` — load-bearing for clean crop math), then
+    reads the page rect via window.screen + window.screenX/Y +
+    (outerH - innerH) chrome offset.
+
+    Returns six ints when the page reports honest, non-degenerate values.
+    Returns None when:
+      - the evaluate raises (page detached, frame gone)
+      - the page is mid-load and reports zero dims, even after retries
+      - the substrate is headless and mocks screen dims to zero
+
+    Retries with `backoff` between attempts so transient zeros (page just
+    starting to navigate) get a chance to settle before we give up. When we
+    do return None, the proxy template falls back to a non-cropped iframe —
+    visually less polished but functionally fine.
+    """
+    await _maximize_substrate_window(page)
+
+    for attempt in range(attempts):
+        try:
+            metrics = await page.evaluate(_CROP_METRICS_JS)
+        except Exception as e:
+            logger.info("crop metrics evaluate raised: %s", e)
+            return None
+        if metrics and metrics.get("screen_w") and metrics.get("page_w"):
+            return {
+                "screen_w": int(metrics["screen_w"]),
+                "screen_h": int(metrics["screen_h"]),
+                "page_x":   int(metrics["page_x"]),
+                "page_y":   int(metrics["page_y"]),
+                "page_w":   int(metrics["page_w"]),
+                "page_h":   int(metrics["page_h"]),
+            }
+        if attempt < attempts - 1:
+            await asyncio.sleep(backoff)
+    logger.info(
+        "crop metrics degenerate after %d attempts; falling back to no crop",
+        attempts,
+    )
+    return None
+
 
 @dataclass
 class HandoffResult:
@@ -200,6 +312,7 @@ class Handoff:
         *,
         scenarios: list[Scenario] | None = None,
         timeout: float = 30.0,
+        stream_url: str | None = None,
     ) -> "HandoffResult":
         """Wait until handoff completes, or no handoff is needed.
 
@@ -223,6 +336,11 @@ class Handoff:
                 Does NOT bound the human-completion phase — that uses
                 self.server.session_timeout (default 600s, set on
                 ServerConfig).
+            stream_url: Optional substrate-served viewer URL. When set, the
+                matched scenario's handoff runs in passthrough mode:
+                browser-handoff skips its own CDP screencast and the operator
+                gets a wrapper page that iframes this URL. Forwarded as-is
+                to wait_for_completion on trigger match.
 
         Returns:
             HandoffResult describing what happened. Never raises on
@@ -288,6 +406,7 @@ class Handoff:
                 matched_scenario.complete,
                 reason=matched_result.reason,
                 name=matched_scenario.name,
+                stream_url=stream_url,
             )
         finally:
             for cleanup in cleanups:
@@ -301,6 +420,7 @@ class Handoff:
         *,
         reason: str = "Human intervention required",
         name: str = "handoff",
+        stream_url: str | None = None,
     ) -> "HandoffResult":
         """Stream the page to a human *now* and wait until `on` matches.
 
@@ -322,6 +442,12 @@ class Handoff:
             reason: Human-facing explanation shown in the notification and the
                 operator UI. Defaults to a generic message.
             name: Label recorded on the result (HandoffResult.scenario_name).
+            stream_url: Optional substrate viewer URL. When set, this handoff
+                runs in passthrough mode: browser-handoff skips its own CDP
+                screencast and the operator gets a wrapper page that iframes
+                this URL. browser-handoff still owns detection, notification,
+                and lifecycle. The wrapper page crops the iframe to just the
+                page content via a one-shot JS query at handoff start.
 
         Returns:
             HandoffResult with was_blocked=True. Check timed_out for whether
@@ -360,6 +486,13 @@ class Handoff:
             except Exception as e:
                 logger.info(f"Could not get viewport: {e}, using default: {viewport_size}")
 
+            # Capture page-rect-on-display metrics for the proxy template's
+            # iframe crop. Only matters in passthrough mode; in normal mode
+            # we'd just be doing work for no reason.
+            crop_metrics: dict[str, int] | None = None
+            if stream_url is not None:
+                crop_metrics = await _capture_crop_metrics(page)
+
             session = await server.register_session(
                 session_id=session_id,
                 page=page,
@@ -367,6 +500,8 @@ class Handoff:
                 reason=reason,
                 scenario_name=name,
                 viewport_size=viewport_size,
+                stream_url=stream_url,
+                crop_metrics=crop_metrics,
             )
 
             # Bind the per-handoff session before register_listeners so
@@ -380,16 +515,16 @@ class Handoff:
                 on.register_listeners(page, on_completion_detected)
             )
 
-            stream_url = server.get_stream_url(session_id)
+            operator_url = server.get_operator_url(session_id)
 
             logger.info("=" * 70)
             logger.info("HANDOFF: Human intervention required")
             logger.info("Reason: %s", reason)
             logger.info("Scenario: %s", name)
-            logger.info("Stream URL: %s", stream_url)
+            logger.info("Operator URL: %s", operator_url)
             logger.info("=" * 70)
 
-            await self._send_notifications(reason, stream_url)
+            await self._send_notifications(reason, operator_url)
 
             # Already complete? (e.g. page raced past completion before we
             # finished setting up listeners.)
@@ -524,7 +659,7 @@ class Handoff:
             connect_host, port, timeout,
         )
 
-    async def _send_notifications(self, reason: str, stream_url: str) -> None:
+    async def _send_notifications(self, reason: str, operator_url: str) -> None:
         # No explicit notifiers → fall back to a rich console panel so the
         # operator still gets a clearly-formatted stream URL. When the
         # caller configures any notifier(s) we stay out of the way — they
@@ -541,7 +676,7 @@ class Handoff:
                 "Human intervention is required to complete a browser automation task."
             ),
             TextItem(f"Reason: {reason}"),
-            LinkItem(prefix="Stream URL: ", url=stream_url),
+            LinkItem(prefix="Stream URL: ", url=operator_url),
             TextItem("Please open the stream URL to assist with the task."),
         ]
 

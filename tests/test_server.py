@@ -221,12 +221,24 @@ class TestAccessToken:
         session = self._register(server, expires_at=time.time() - 1)  # already past
         assert server._resolve_token(session.access_token) is None
 
-    def test_stream_url_carries_token_not_session_id(self):
+    def test_operator_url_carries_token_not_session_id(self):
         server = StreamingServer()
         session = self._register(server, expires_at=time.time() + 60)
-        url = server.get_stream_url(session.session_id)
+        url = server.get_operator_url(session.session_id)
         assert f"?t={session.access_token}" in url
         assert "?session=" not in url  # the id is no longer the URL gate
+
+    def test_get_stream_url_is_deprecated_alias(self):
+        import warnings
+
+        server = StreamingServer()
+        session = self._register(server, expires_at=time.time() + 60)
+        canonical = server.get_operator_url(session.session_id)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            legacy = server.get_stream_url(session.session_id)
+        assert legacy == canonical
+        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
 
 
 class TestSessionTimeoutDeprecation:

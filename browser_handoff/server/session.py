@@ -63,6 +63,27 @@ class HandoffSession:
     # operator-driven gating via BaseDetection.bind(). The streaming server
     # bumps this on each routed mouse/keyboard/paste/navigate event.
     operator_activity: OperatorActivity = field(default_factory=OperatorActivity)
+    # Passthrough mode: when set, browser-handoff skips its own CDP screencast
+    # and instead embeds the substrate's own viewer URL inside a thin wrapper
+    # template. browser-handoff keeps the detection + notification + lifecycle
+    # responsibilities; the substrate handles frames and operator input via
+    # whatever transport it ships (WebRTC, noVNC, etc.).
+    stream_url: str | None = None
+    # Page rect on the substrate's display, captured once at handoff start via
+    # window.screen + window.screenX/Y + (outerH - innerH) chrome offset. The
+    # proxy template's CSS uses these six numbers to crop the iframe to just
+    # the page content. None when not in passthrough mode or when the JS
+    # evaluate returned degenerate values (e.g. headless mocks).
+    crop_metrics: dict[str, int] | None = None
+
+    @property
+    def is_passthrough(self) -> bool:
+        """True iff this session delegates streaming to an external viewer.
+
+        Derived from `stream_url`; there is no separate mode field so the
+        two can't disagree.
+        """
+        return self.stream_url is not None
 
     def mark_accessed(self) -> None:
         """Mark the session as accessed by a user."""

@@ -507,6 +507,8 @@ class StreamingServer:
         reason: str,
         scenario_name: str | None = None,
         viewport_size: dict[str, int] | None = None,
+        stream_url: str | None = None,
+        crop_metrics: dict[str, int] | None = None,
     ) -> HandoffSession:
         """Register a new Page for streaming.
 
@@ -517,6 +519,12 @@ class StreamingServer:
             reason: Reason for handoff (shown to user).
             scenario_name: Label of the matched scenario (breadcrumb header).
             viewport_size: Optional viewport dimensions.
+            stream_url: Optional substrate viewer URL. When set, the session
+                runs in passthrough mode: the screencast pump is skipped and
+                the operator gets a wrapper page that iframes this URL.
+            crop_metrics: Page-rect-on-display metrics for the iframe crop.
+                Six ints (screen_w/h, page_x/y, page_w/h) captured via
+                page.evaluate at handoff start. Only meaningful with stream_url.
 
         Returns:
             The created HandoffSession.
@@ -532,6 +540,8 @@ class StreamingServer:
             reason=reason,
             scenario_name=scenario_name,
             viewport_size=viewport_size or DEFAULT_VIEWPORT.copy(),
+            stream_url=stream_url,
+            crop_metrics=crop_metrics,
         )
         # The token can't outlive the handoff itself, which is bounded by
         # session_timeout — so a leaked link is dead once the handoff ends.
@@ -539,27 +549,39 @@ class StreamingServer:
         self.sessions[session_id] = session
         self._token_to_session[session.access_token] = session_id
 
-        await self._suppress_context_menu(page)
-        await self._inject_native_input_shim(page)
+        # Page-modifying helpers (context-menu suppression, native input shim)
+        # exist to make the operator's stream view behave like a real browser
+        # for input. In passthrough mode the operator interacts via the
+        # substrate's own viewer — touching the page from here would be a
+        # no-op at best and a behavior change at worst. Skip.
+        if not session.is_passthrough:
+            await self._suppress_context_menu(page)
+            await self._inject_native_input_shim(page)
 
         # Seed the URL with whatever Playwright has now, then track every
         # subsequent main-frame navigation so the viewer's URL bar matches
         # the page. Subframe navigations are ignored — operators care about
-        # the document URL, not third-party iframes.
+        # the document URL, not third-party iframes. Both modes need this —
+        # the proxy template also renders a URL bar.
         with suppress(Exception):
             session.current_url = page.url
         self._attach_url_tracker(session)
 
-        # Take initial screenshot as first frame so the page paints
-        # immediately when a client connects, before screencast warms up.
-        with suppress(Exception):
-            screenshot_bytes = await page.screenshot(
-                type="jpeg", quality=self.config.jpeg_quality
-            )
-            await self._publish_frame(session, screenshot_bytes)
+        # The initial screenshot + screencast pump only exist to feed the
+        # streaming WS. In passthrough mode there's no streaming WS to feed
+        # — frames flow operator <-> substrate directly via whatever
+        # transport the substrate's viewer uses.
+        if not session.is_passthrough:
+            # Take initial screenshot as first frame so the page paints
+            # immediately when a client connects, before screencast warms up.
+            with suppress(Exception):
+                screenshot_bytes = await page.screenshot(
+                    type="jpeg", quality=self.config.jpeg_quality
+                )
+                await self._publish_frame(session, screenshot_bytes)
 
-        # Start capture immediately
-        session.capture_task = asyncio.create_task(self._capture_frames(session))
+            # Start capture immediately
+            session.capture_task = asyncio.create_task(self._capture_frames(session))
 
         return session
 
@@ -727,7 +749,15 @@ class StreamingServer:
         return task
 
     async def _capture_frames(self, session: HandoffSession) -> None:
-        """Capture frames from CDP screencast and publish via Condition."""
+        """Capture frames from CDP screencast and publish via Condition.
+
+        Defensive early return for passthrough sessions: register_session
+        already skips scheduling this task in that mode, but if a caller
+        invokes _capture_frames directly we must not start a screencast on
+        a session whose viewer is the substrate's (not ours).
+        """
+        if session.is_passthrough:
+            return
         cdp = session.cdp
 
         def on_frame(params: dict[str, Any]) -> None:
@@ -1020,21 +1050,36 @@ class StreamingServer:
             viewport_height=session.viewport_size["height"],
         )
 
-    def get_stream_url(self, session_id: str) -> str:
-        """Get the public stream URL for a session.
+    def get_operator_url(self, session_id: str) -> str:
+        """Get the public operator URL for a session.
 
         The URL carries the session's capability token (not the session id),
-        which is the secret an operator needs to view and control the page.
+        which is the secret an operator needs to open the wrapper page.
+        The Handoff sends this URL to the operator via notifiers; the
+        operator's browser loads it and gets the intervention or proxy
+        template depending on session mode.
 
         Args:
             session_id: The session ID.
 
         Returns:
-            The full URL to access the stream.
+            The full URL the operator opens.
         """
         base_url = self.config.get_base_url()
         token = self.sessions[session_id].access_token
         return f"{base_url}/?t={token}"
+
+    def get_stream_url(self, session_id: str) -> str:
+        """Deprecated alias for :meth:`get_operator_url`. Removed in v0.6."""
+        import warnings
+
+        warnings.warn(
+            "get_stream_url() is deprecated; use get_operator_url() instead. "
+            "Will be removed in v0.6.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_operator_url(session_id)
 
     async def start(self) -> None:
         """Start the server."""
