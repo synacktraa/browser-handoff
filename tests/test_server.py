@@ -377,10 +377,12 @@ class TestTemplateSelection:
         )
         html = server._get_html_client("test", "please sign in")
         assert "please sign in" in html
-        # Proxy-only markers: the substrate iframe and the expired card,
-        # neither of which exist in intervention.html.
+        # Proxy-only markers: the substrate iframe and the fallback
+        # screenshot used when the bh session ends without completion
+        # (substrate's WebRTC stream would otherwise keep running in the
+        # iframe). Neither exists in intervention.html.
         assert "substrate-iframe" in html
-        assert "expired-overlay" in html
+        assert "fallback-screenshot" in html
         # Crop metrics threaded into the CSS via Jinja.
         assert "1920" in html and "993" in html
 
@@ -444,6 +446,26 @@ class TestPassthroughNotifications:
         await server.notify_task_expired(session.session_id)
         # The good WS still got the event despite the broken one raising.
         assert delivered == [{"type": "task_expired"}]
+
+    async def test_notify_task_cancelled_sends_distinct_event(self):
+        # The server still sends a structurally distinct task_cancelled
+        # event so callers / future client variants can act on it; the
+        # current operator wrapper collapses it into the same "Session
+        # ended" card as a raw connection drop because the cause isn't
+        # actionable for an operator.
+        server = StreamingServer()
+        session = _bare_session(stream_url="https://substrate/viewer")
+        server.sessions[session.session_id] = session
+
+        sent: list[dict] = []
+
+        class FakeWS:
+            async def send_json(self, payload):
+                sent.append(payload)
+
+        session.websockets.append(FakeWS())
+        await server.notify_task_cancelled(session.session_id)
+        assert sent == [{"type": "task_cancelled"}]
 
 
 class TestPassthroughActivityWatcher:

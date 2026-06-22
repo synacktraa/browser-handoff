@@ -545,6 +545,19 @@ class Handoff:
                     "Handoff session_timeout: human did not finish "
                     "within %.0fs", self.server.session_timeout,
                 )
+            except asyncio.CancelledError:
+                # Caller (e.g. browser-use's per-step timeout, ctrl-c)
+                # cancelled the await. Surface a task_cancelled event so
+                # the operator's wrapper distinguishes "the agent gave up"
+                # from "you ran out of time" (task_expired) — both end the
+                # session but for different reasons, and the operator
+                # debugging the situation needs accurate framing. Without
+                # the notify the passthrough iframe would stay interactive
+                # against a substrate bh no longer owns. Re-raise so the
+                # caller's cancellation semantics are preserved.
+                with suppress(Exception):
+                    await server.notify_task_cancelled(session_id)
+                raise
 
             await server.stop_screencast(session_id)
 

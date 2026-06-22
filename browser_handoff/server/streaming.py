@@ -1242,20 +1242,68 @@ class StreamingServer:
                 with suppress(Exception):
                     await ws.send_json(message)
 
-    async def notify_task_expired(self, session_id: str) -> None:
-        """Notify frontend that the session timed out without completion.
+    async def _capture_session_end_screenshot(
+        self, session: HandoffSession
+    ) -> str | None:
+        """Snapshot the page as a base64 JPEG data URL for session-end events.
 
-        Streaming mode's UI doesn't render this distinctly today (the WS just
-        closes), but the proxy template flips to a red "session expired" card
-        on receipt so the operator knows the handoff is over before they walk
-        away from a stale tab.
+        Only meaningful for passthrough sessions — streaming mode already
+        shows its own last frame when the screencast stops. Returns None
+        on any failure (page detached, headless mocks, etc.) so callers
+        can include the field conditionally.
         """
-        if session_id in self.sessions:
-            session = self.sessions[session_id]
-            message = {"type": "task_expired"}
-            for ws in session.websockets:
-                with suppress(Exception):
-                    await ws.send_json(message)
+        if not session.is_passthrough:
+            return None
+        try:
+            jpeg = await session.page.screenshot(type="jpeg", quality=70)
+            return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
+        except Exception as e:
+            logger.info("session-end screenshot failed: %s", e)
+            return None
+
+    async def _broadcast_session_end(
+        self, session_id: str, event_type: str
+    ) -> None:
+        """Shared shape for task_expired / task_cancelled.
+
+        Captures the screenshot, builds {type, screenshot?}, fans out to
+        every connected WS, suppresses send errors so one disconnected
+        viewer doesn't abort the broadcast.
+        """
+        if session_id not in self.sessions:
+            return
+        session = self.sessions[session_id]
+        message: dict[str, Any] = {"type": event_type}
+        screenshot = await self._capture_session_end_screenshot(session)
+        if screenshot:
+            message["screenshot"] = screenshot
+        for ws in session.websockets:
+            with suppress(Exception):
+                await ws.send_json(message)
+
+    async def notify_task_expired(self, session_id: str) -> None:
+        """Notify frontend that the session hit session_timeout.
+
+        Distinct from cancellation: this fires when the operator simply
+        didn't finish within the configured budget. The proxy template
+        renders a "Session expired" card and swaps the iframe out for the
+        captured screenshot (passthrough's WebRTC stream survives bh's
+        teardown — the screenshot is the bh-controlled stand-in that does
+        not). Streaming-mode UI ignores this event.
+        """
+        await self._broadcast_session_end(session_id, "task_expired")
+
+    async def notify_task_cancelled(self, session_id: str) -> None:
+        """Notify frontend that the session was cancelled by the caller.
+
+        Fires when wait_for_completion's await gets cancelled —
+        browser-use's per-step timeout, ctrl-c at the script level,
+        an explicit asyncio.Task.cancel(). Distinct from task_expired
+        so the operator sees "the agent gave up on this step" instead
+        of "you ran out of time" — accurate framing matters when the
+        operator is debugging why they got booted.
+        """
+        await self._broadcast_session_end(session_id, "task_cancelled")
 
     async def stop_screencast(self, session_id: str) -> None:
         """Stop the screencast for a session (e.g., before sensitive data appears).

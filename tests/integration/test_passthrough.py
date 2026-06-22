@@ -121,7 +121,7 @@ async def test_passthrough_serves_proxy_template(
         html = server._get_html_client(session.session_id, session.reason)
         # Proxy-only markers; would not appear in intervention.html.
         assert "substrate-iframe" in html
-        assert "expired-overlay" in html
+        assert "fallback-screenshot" in html
         assert "proxy template test" in html
     finally:
         await page.goto(f"{base_url}/dashboard")
@@ -267,7 +267,13 @@ async def test_notify_task_expired_event_shape(
 
         session.websockets.append(FakeWS())
         await server.notify_task_expired(session.session_id)
-        assert sent == [{"type": "task_expired"}]
+        assert len(sent) == 1
+        assert sent[0]["type"] == "task_expired"
+        # The server captures a screenshot for passthrough sessions and
+        # embeds it as a base64 data URL so the wrapper can swap the
+        # iframe out for the last-known page state. Page exists in this
+        # test (real Playwright session), so the field is present.
+        assert sent[0].get("screenshot", "").startswith("data:image/jpeg;base64,")
     finally:
         # The completion detection never fires; cancel the task to unwind.
         h_task.cancel()
