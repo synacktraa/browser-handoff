@@ -63,6 +63,13 @@ class HandoffSession:
     # operator-driven gating via BaseDetection.bind(). The streaming server
     # bumps this on each routed mouse/keyboard/paste/navigate event.
     operator_activity: OperatorActivity = field(default_factory=OperatorActivity)
+    # In passthrough mode the operator's input never crosses the bh process
+    # (the substrate's viewer delivers it directly to the page via CDP),
+    # so we install a stealth in-page observer to keep activity gating
+    # working. The watcher's lifecycle is owned by the StreamingServer:
+    # install on register_session(passthrough), shutdown on unregister.
+    # Typed as Any here to avoid the import cycle with streaming.py.
+    passthrough_activity_watcher: Any = None
     # Passthrough mode: when set, browser-handoff skips its own CDP screencast
     # and instead embeds the substrate's own viewer URL inside a thin wrapper
     # template. browser-handoff keeps the detection + notification + lifecycle

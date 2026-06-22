@@ -548,7 +548,9 @@ class Handoff:
 
             await server.stop_screencast(session_id)
 
-            if not timed_out and completion_reason:
+            if timed_out:
+                await server.notify_task_expired(session_id)
+            elif completion_reason:
                 await server.notify_task_completed(session_id, completion_reason)
 
             return HandoffResult(

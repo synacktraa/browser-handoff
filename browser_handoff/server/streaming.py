@@ -6,10 +6,11 @@ import asyncio
 import base64
 import json
 import logging
+import secrets
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
@@ -281,6 +282,132 @@ _NATIVE_INPUT_SHIM_JS = """
 """
 
 
+class _PassthroughActivityWatcher:
+    """Stealth activity tracker for passthrough-mode sessions.
+
+    In passthrough mode bh doesn't see the operator's raw input — events flow
+    operator → substrate viewer → CDP Input.dispatch → page, bypassing bh's
+    Python process entirely. To still gate LLMDetection on operator activity,
+    we observe the events at the page side, after the substrate has delivered
+    them. The injection has to be invisible to anti-bot scripts running on
+    the page; this watcher uses the same primitives as detection/element.py:
+
+      - A non-enumerable, randomly-named window property holds a Date.now()
+        stamp. Object.keys / for-in / JSON.stringify skip it; targeted probes
+        (`'name' in window`) can't find it without knowing the random suffix.
+      - A MutationObserver + capture/passive input listeners update the stamp
+        on any relevant page activity (DOM changes from form fills/clicks,
+        plus raw mousedown/keydown/wheel/scroll/touchstart for input that
+        doesn't immediately mutate DOM).
+      - Python polls the stamp value via `page.evaluate(() => window[var])`;
+        when it advances, `session.operator_activity.bump()` is called.
+
+    Nothing of substance is added to the page's runtime: no CDP binding, no
+    function on window, no listener that calls preventDefault. The only
+    observable artifact is a single non-enumerable integer with a random
+    name, which is the minimum possible JS-side footprint.
+
+    Re-injection on framenavigated mirrors element.py's _PageWatcher — the
+    setup script is idempotent (returns if the property is already present)
+    so a fresh document gets a fresh observer/listeners on the same name.
+    """
+
+    def __init__(
+        self,
+        session: HandoffSession,
+        loop: asyncio.AbstractEventLoop,
+        poll_interval: float = 0.25,
+    ) -> None:
+        self._session = session
+        self._loop = loop
+        self._poll_interval = poll_interval
+        self._var = f"__bh_{secrets.token_hex(8)}"
+        self._stop = asyncio.Event()
+        self._poll_task: asyncio.Task[None] | None = None
+        self._last_seen: int = 0
+        self._on_navigate: Callable[..., None] | None = None
+        self._installed = False
+
+    def _setup_js(self) -> str:
+        return (
+            "(() => {"
+            f"if (window.{self._var} !== undefined) return;"
+            f"Object.defineProperty(window, '{self._var}', "
+            "{value: 0, writable: true, enumerable: false, configurable: true});"
+            f"const mark = () => {{ window.{self._var} = Date.now(); }};"
+            # MutationObserver catches operator actions that mutate the DOM —
+            # form input changes, click handlers that toggle UI, modal opens.
+            "try { new MutationObserver(mark).observe(document, "
+            "{childList:true, subtree:true, attributes:true, characterData:true}); }"
+            "catch (e) {}"
+            # Input event listeners catch interactions that don't directly
+            # mutate the DOM (scrolling, mousedown before JS responds, etc.).
+            # capture:true so we see them first; passive:true is a hard
+            # promise to the browser we won't call preventDefault, which
+            # makes us functionally indistinguishable from non-existent for
+            # the page's own handlers.
+            "const opts = {capture: true, passive: true};"
+            "for (const e of ['mousedown','keydown','wheel','touchstart','scroll']) {"
+            "  window.addEventListener(e, mark, opts);"
+            "}"
+            "})();"
+        )
+
+    async def install(self) -> None:
+        if self._installed:
+            return
+        page = self._session.page
+        # framenavigated re-injects the stealth setup on the new document.
+        # The handler closes over self so a single install() is enough; the
+        # re-inject path keeps running across navigations until shutdown().
+        def _handler(*_: Any) -> None:
+            if not self._stop.is_set():
+                self._loop.create_task(self._reinject())
+        self._on_navigate = _handler
+        page.on("framenavigated", _handler)
+        with suppress(Exception):
+            await page.evaluate(self._setup_js())
+        self._poll_task = self._loop.create_task(self._poll())
+        self._installed = True
+
+    async def _reinject(self) -> None:
+        with suppress(Exception):
+            await self._session.page.evaluate(self._setup_js())
+
+    async def _poll(self) -> None:
+        # `() => window[var]` rather than a property access expression so a
+        # missing var (e.g. mid-navigation, before re-inject lands) evaluates
+        # to undefined and falls back to 0 cleanly. We compare strict-greater
+        # so a Date.now() rollover doesn't fire on a stale read.
+        read_js = f"() => window.{self._var} || 0"
+        while not self._stop.is_set():
+            try:
+                ms = await self._session.page.evaluate(read_js)
+            except Exception:
+                ms = self._last_seen
+            if ms and ms > self._last_seen:
+                self._last_seen = ms
+                self._session.operator_activity.bump()
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self._poll_interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def shutdown(self) -> None:
+        if not self._installed:
+            return
+        self._stop.set()
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._poll_task
+        if self._on_navigate is not None:
+            with suppress(Exception):
+                self._session.page.remove_listener("framenavigated", self._on_navigate)
+            self._on_navigate = None
+        self._installed = False
+
+
 class StreamingServer:
     """Server that manages streaming sessions for human intervention.
 
@@ -359,7 +486,15 @@ class StreamingServer:
 
         @app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket, t: str | None = None):
-            """WebSocket endpoint: binary frames out, JSON control in.
+            """WebSocket endpoint.
+
+            Two protocols on the same URL, picked by session mode:
+              - streaming sessions: binary frames out, JSON control in
+                (mouse/keyboard/paste/copy_request/ping…)
+              - passthrough sessions: text-only — server sends
+                ready/url_changed/completed/expired events; client sends
+                reload + iframe_focus events. No frames either direction;
+                the substrate's viewer owns the video channel.
 
             `t` is the capability token; an unknown or expired one is closed.
             """
@@ -371,6 +506,15 @@ class StreamingServer:
                 return
 
             session_state.websockets.append(websocket)
+
+            if session_state.is_passthrough:
+                try:
+                    await self._handle_passthrough_websocket(websocket, session_state)
+                finally:
+                    if websocket in session_state.websockets:
+                        session_state.websockets.remove(websocket)
+                return
+
             cdp = session_state.cdp
             page = session_state.page
 
@@ -571,7 +715,17 @@ class StreamingServer:
         # streaming WS. In passthrough mode there's no streaming WS to feed
         # — frames flow operator <-> substrate directly via whatever
         # transport the substrate's viewer uses.
-        if not session.is_passthrough:
+        if session.is_passthrough:
+            # In passthrough, install the stealth activity watcher so
+            # LLMDetection's gating still sees operator interaction even
+            # though the input never crosses bh's process. See
+            # _PassthroughActivityWatcher for the full design rationale.
+            session.passthrough_activity_watcher = _PassthroughActivityWatcher(
+                session, asyncio.get_running_loop()
+            )
+            with suppress(Exception):
+                await session.passthrough_activity_watcher.install()
+        else:
             # Take initial screenshot as first frame so the page paints
             # immediately when a client connects, before screencast warms up.
             with suppress(Exception):
@@ -618,6 +772,60 @@ class StreamingServer:
         """
         with suppress(Exception):
             await websocket.send_json(payload)
+
+    async def _handle_passthrough_websocket(
+        self, websocket: WebSocket, session: HandoffSession
+    ) -> None:
+        """Status-only WS protocol for passthrough sessions.
+
+        No binary frames either direction. Server pushes ready /
+        url_changed / completed / expired lifecycle events; client sends
+        reload requests and iframe_focus pings. The substrate's own
+        viewer owns the video + input channels — this WS is purely the
+        wrapper-page's lifeline back to the Handoff.
+        """
+        # Acknowledge so the wrapper page can flip its connection-state
+        # pill from "Connecting" to "Live".
+        with suppress(Exception):
+            await websocket.send_json({"type": "ready"})
+
+        # Seed the URL bar — same behavior as streaming mode, just no
+        # frame seeding (no frames to seed).
+        if session.current_url is not None:
+            with suppress(Exception):
+                await websocket.send_json(
+                    {"type": "url_changed", "url": session.current_url}
+                )
+
+        page = session.page
+        try:
+            with suppress(WebSocketDisconnect):
+                while True:
+                    data = await websocket.receive_text()
+                    try:
+                        message = json.loads(data)
+                    except Exception:
+                        continue
+                    msg_type = message.get("type")
+
+                    if msg_type == "reload":
+                        # Operator clicked reload in the wrapper toolbar.
+                        # Trigger page.reload() via Playwright; the resulting
+                        # framenavigated will push url_changed back to all
+                        # WSes via _attach_url_tracker. No need to bump
+                        # operator_activity here — the navigation will
+                        # mutate the document and the in-page activity
+                        # watcher catches that automatically.
+                        try:
+                            await page.reload()
+                        except Exception as e:
+                            logger.info("passthrough reload failed: %s", e)
+                    # Other types: ignored. Streaming-mode messages
+                    # (mouse/keyboard/paste/etc.) don't apply here — the
+                    # substrate owns input — and silently dropping them is
+                    # the right behavior if a client sends one by mistake.
+        except Exception as e:
+            logger.error(f"passthrough WebSocket error: {e}")
 
     @staticmethod
     async def _suppress_context_menu(page: "Page") -> None:
@@ -677,6 +885,13 @@ class StreamingServer:
 
         if session.capture_task and not session.capture_task.done():
             session.capture_task.cancel()
+        # Tear down the passthrough activity watcher (if installed); pulls
+        # down its poll task, removes the framenavigated listener, and leaves
+        # the page free of any further re-injection on navigation.
+        if session.passthrough_activity_watcher is not None:
+            with suppress(Exception):
+                await session.passthrough_activity_watcher.shutdown()
+            session.passthrough_activity_watcher = None
         # Cancel any in-flight ack/publish tasks (copy first — done callbacks
         # mutate the set as they finish).
         for task in list(session.background_tasks):
@@ -1027,6 +1242,21 @@ class StreamingServer:
                 with suppress(Exception):
                     await ws.send_json(message)
 
+    async def notify_task_expired(self, session_id: str) -> None:
+        """Notify frontend that the session timed out without completion.
+
+        Streaming mode's UI doesn't render this distinctly today (the WS just
+        closes), but the proxy template flips to a red "session expired" card
+        on receipt so the operator knows the handoff is over before they walk
+        away from a stale tab.
+        """
+        if session_id in self.sessions:
+            session = self.sessions[session_id]
+            message = {"type": "task_expired"}
+            for ws in session.websockets:
+                with suppress(Exception):
+                    await ws.send_json(message)
+
     async def stop_screencast(self, session_id: str) -> None:
         """Stop the screencast for a session (e.g., before sensitive data appears).
 
@@ -1039,8 +1269,27 @@ class StreamingServer:
                 session.capture_task.cancel()
 
     def _get_html_client(self, session_id: str, reason: str) -> str:
-        """Generate HTML client for streaming using Jinja template."""
+        """Render the operator-facing HTML for a session.
+
+        Picks the template based on session mode:
+          - passthrough → proxy_intervention.html (wraps the substrate's own
+            viewer URL in a thin chrome + reason banner, no own streaming)
+          - streaming   → intervention.html (the screencast-driven viewer)
+        Same render call shape; proxy template additionally gets stream_url
+        and crop_metrics so its iframe can be positioned/cropped correctly.
+        """
         session = self.sessions[session_id]
+        if session.is_passthrough:
+            template = jinja_env.get_template("proxy_intervention.html")
+            return template.render(
+                access_token=session.access_token,
+                reason=reason,
+                scenario_name=session.scenario_name,
+                viewport_width=session.viewport_size["width"],
+                viewport_height=session.viewport_size["height"],
+                stream_url=session.stream_url,
+                crop_metrics=session.crop_metrics,
+            )
         template = jinja_env.get_template("intervention.html")
         return template.render(
             access_token=session.access_token,
