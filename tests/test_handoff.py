@@ -587,3 +587,116 @@ class TestDeprecations:
         deprecations = [w for w in record if issubclass(w.category, DeprecationWarning)]
         assert len(deprecations) == 1, [str(w.message) for w in deprecations]
         assert "from_file" in str(deprecations[0].message)
+
+
+class TestCaptureCropMetrics:
+    """`_capture_crop_metrics` reads page.evaluate(_CROP_METRICS_JS) with
+    retry on degenerate values; falls back to None when retries exhaust.
+    """
+
+    async def test_returns_metrics_on_first_valid_evaluate(self):
+        from browser_handoff.handoff import _capture_crop_metrics
+
+        valid = {
+            "screen_w": 1920, "screen_h": 1080,
+            "page_x": 0, "page_y": 87,
+            "page_w": 1920, "page_h": 993,
+        }
+
+        class FakePage:
+            def __init__(self):
+                self.calls = 0
+
+            async def evaluate(self, expr):
+                self.calls += 1
+                return valid
+
+        page = FakePage()
+        result = await _capture_crop_metrics(page)
+        assert result == valid
+        assert page.calls == 1  # no retry needed on a valid first read
+
+    async def test_returns_none_on_persistent_degenerate(self):
+        from browser_handoff.handoff import _capture_crop_metrics
+
+        zero = {
+            "screen_w": 0, "screen_h": 0,
+            "page_x": 0, "page_y": 0,
+            "page_w": 0, "page_h": 0,
+        }
+
+        class FakePage:
+            def __init__(self):
+                self.calls = 0
+
+            async def evaluate(self, expr):
+                self.calls += 1
+                return zero
+
+        page = FakePage()
+        result = await _capture_crop_metrics(page, attempts=3, backoff=0.0)
+        assert result is None
+        # Three attempts then fallback — verifies the retry loop runs.
+        assert page.calls == 3
+
+    async def test_returns_metrics_after_transient_degenerate(self):
+        from browser_handoff.handoff import _capture_crop_metrics
+
+        valid = {
+            "screen_w": 1920, "screen_h": 1080,
+            "page_x": 0, "page_y": 87,
+            "page_w": 1920, "page_h": 993,
+        }
+        zero = {**valid, "screen_w": 0, "page_w": 0}
+
+        class FakePage:
+            def __init__(self):
+                self.calls = 0
+
+            async def evaluate(self, expr):
+                self.calls += 1
+                return zero if self.calls < 2 else valid
+
+        page = FakePage()
+        result = await _capture_crop_metrics(page, attempts=3, backoff=0.0)
+        # Retry catches the transient zero and returns the next good read.
+        assert result == valid
+        assert page.calls == 2
+
+    async def test_returns_none_when_evaluate_raises(self):
+        from browser_handoff.handoff import _capture_crop_metrics
+
+        class FakePage:
+            async def evaluate(self, expr):
+                raise RuntimeError("page detached")
+
+        result = await _capture_crop_metrics(FakePage())
+        # An evaluate raising once is fatal — no retry on raise (the page
+        # is probably gone).
+        assert result is None
+
+
+class TestStreamUrlForwarding:
+    """`stream_url` is plumbed through both Handoff.wait_for_completion and
+    Handoff.run; run() is a pass-through that forwards to wait_for_completion
+    on trigger match (cropping logic lives only in wait_for_completion).
+    """
+
+    def test_wait_for_completion_accepts_stream_url(self):
+        # Signature-level check — confirms the kwarg exists and is keyword-
+        # only. Doing a real call needs a Playwright page; the integration
+        # test covers that.
+        import inspect
+
+        sig = inspect.signature(Handoff.wait_for_completion)
+        assert "stream_url" in sig.parameters
+        assert sig.parameters["stream_url"].kind == inspect.Parameter.KEYWORD_ONLY
+        assert sig.parameters["stream_url"].default is None
+
+    def test_run_accepts_stream_url(self):
+        import inspect
+
+        sig = inspect.signature(Handoff.run)
+        assert "stream_url" in sig.parameters
+        assert sig.parameters["stream_url"].kind == inspect.Parameter.KEYWORD_ONLY
+        assert sig.parameters["stream_url"].default is None
