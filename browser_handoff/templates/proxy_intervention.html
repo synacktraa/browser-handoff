@@ -377,8 +377,8 @@
       /* Categorical connection pill — passthrough has no per-frame latency
          to report (the substrate's viewer owns frame timing), so this just
          flips between "Connecting" (status WS not open yet) and "Live"
-         (status WS open and the wrapper is ready). Loses connectivity →
-         goes back to "Connecting" until the WS reconnects. */
+         (status WS open and the wrapper is ready). Any drop after that
+         goes straight to the ended-overlay card; the pill is hidden then. */
       .connection-pill {
         display: inline-flex;
         align-items: center;
@@ -404,11 +404,6 @@
       .connection-pill.connecting .conn-dot {
         background: var(--amber);
         box-shadow: 0 0 6px rgba(255, 149, 0, 0.7);
-        animation: pulse-dot 1.2s ease-in-out infinite;
-      }
-      .connection-pill.disconnected .conn-dot {
-        background: var(--red);
-        box-shadow: 0 0 8px rgba(255, 59, 48, 0.85);
         animation: pulse-dot 1.2s ease-in-out infinite;
       }
       @keyframes pulse-dot {
@@ -563,81 +558,6 @@
          not just covered, but pulled out of the layer so click/key events
          that would somehow leak past the screenshot still hit nothing. */
       #stage.session-ended #substrate-iframe { visibility: hidden; }
-
-      /* Reconnect indicator — used ONLY when the operator's WS drops
-         without a prior task_expired / task_cancelled (transient network
-         loss, machine sleep, tunnel blip). The bh session is presumed
-         alive on the server; we try to reconnect the WS and block iframe
-         input while we do. If reconnect succeeds we resume normally. If
-         reconnect attempts exhaust we flip to the ended-overlay card —
-         same terminal UX as any other session-died cause. */
-      .reconnect-indicator {
-        position: absolute;
-        inset: 0;
-        z-index: 6;
-        pointer-events: auto;
-        display: none;
-      }
-      #stage.reconnecting .reconnect-indicator { display: block; }
-      .reconnect-indicator::before {
-        content: '';
-        position: absolute;
-        inset: 0;
-        background: rgba(8, 8, 10, 0.22);
-      }
-      .reconnect-indicator::after {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        height: 2px;
-        width: 30%;
-        background: linear-gradient(
-          90deg,
-          transparent,
-          var(--orange) 30%,
-          var(--orange-soft) 50%,
-          var(--orange) 70%,
-          transparent
-        );
-        box-shadow: 0 0 10px rgba(255, 106, 19, 0.6);
-        animation: reconnect-sweep 1.4s ease-in-out infinite;
-      }
-      @keyframes reconnect-sweep {
-        0%   { left: -32%; }
-        100% { left: 100%; }
-      }
-      .reconnect-pill {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        padding: 8px 14px;
-        background: var(--glass-strong);
-        backdrop-filter: blur(14px);
-        border: 1px solid var(--border-strong);
-        border-radius: 999px;
-        font-family: var(--font-mono);
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 1.6px;
-        color: var(--text);
-        display: inline-flex;
-        align-items: center;
-        gap: 9px;
-      }
-      .reconnect-pill::before {
-        content: '';
-        width: 7px; height: 7px;
-        border-radius: 50%;
-        background: var(--orange);
-        box-shadow: 0 0 10px rgba(255, 106, 19, 0.8);
-        animation: pulse-orange 1s ease-in-out infinite;
-      }
-      @keyframes pulse-orange {
-        0%, 100% { opacity: 1; }
-        50%      { opacity: 0.4; }
-      }
 
       /* Shared end-of-session overlay shape: completion / expired /
          ended all use the same dimmed backdrop + receipt-style card,
@@ -919,10 +839,6 @@
         </div>
 
         <img class="fallback-screenshot" id="fallback-screenshot" alt="Last page state before session ended" />
-
-        <div class="reconnect-indicator">
-          <div class="reconnect-pill" id="reconnect-pill">Reconnecting</div>
-        </div>
       </div>
     </div>
     </div>
@@ -943,7 +859,6 @@
       const endedOverlay = document.getElementById('ended-overlay');
       const endedTimestamp = document.getElementById('ended-timestamp');
       const fallbackScreenshot = document.getElementById('fallback-screenshot');
-      const reconnectPill = document.getElementById('reconnect-pill');
       const reloadBtn = document.getElementById('reload-btn');
       const helpBtn = document.getElementById('help-btn');
       const headerReasonEl = document.getElementById('header-reason');
@@ -998,30 +913,25 @@
       // Status WebSocket — lightweight protocol, no frames, no input. The
       // server sends lifecycle events (ready, url_changed, task_completed,
       // task_expired, task_cancelled) and accepts reload requests for the
-      // operator-toolbar reload button. Reconnect on transient close is
-      // attempted client-side (scheduleReconnect below); bh-driven session
-      // ends arrive as explicit messages first, so we don't auto-reconnect
-      // those. If reconnect exhausts we surface the ended-overlay card —
-      // operator sees the same terminal UX regardless of cause.
+      // operator-toolbar reload button. No auto-reconnect: any close that
+      // isn't preceded by a bh-driven end event goes straight to the
+      // ended-overlay card. Same model as streaming-mode intervention.html
+      // — symmetric across modes so the operator sees one terminal UX.
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const WS_URL = `${wsProtocol}//${window.location.host}/ws?t=${ACCESS_TOKEN}`;
       let ws = null;
 
       let isTerminal = false;  // completed / expired / ended — stop reacting to WS events
-      let reconnectTimer = null;
-      let reconnectAttempts = 0;
-      const RECONNECT_MAX_ATTEMPTS = 15;  // ~30s at 2s intervals
-      const RECONNECT_INTERVAL_MS = 2000;
 
       function setConnectionState(state) {
+        // Only two real states left: 'connecting' (pre-open) and 'live'
+        // (post-open). Any unrecoverable drop hides the pill via
+        // markTerminal — no 'disconnected' intermediate.
         if (isTerminal) return;
-        connectionPill.classList.remove('connecting', 'disconnected');
+        connectionPill.classList.remove('connecting');
         if (state === 'connecting') {
           connectionPill.classList.add('connecting');
           connectionLabel.textContent = 'Connecting';
-        } else if (state === 'disconnected') {
-          connectionPill.classList.add('disconnected');
-          connectionLabel.textContent = 'Offline';
         } else {
           connectionLabel.textContent = 'Live';
         }
@@ -1062,8 +972,9 @@
         markTerminal();
       }
       function showEndedOverlay(screenshot) {
-        // Idempotent: reconnect-exhaustion may race with a task_cancelled
-        // message that finally landed, or vice versa.
+        // Idempotent: ws.onclose may fire right after a task_cancelled
+        // message landed (or vice versa), and we don't want to bump the
+        // timestamp or stack overlays.
         if (isTerminal) return;
         if (screenshot) fallbackScreenshot.src = screenshot;
         endedTimestamp.textContent = nowTimeText();
@@ -1074,93 +985,50 @@
 
       function markTerminal() {
         isTerminal = true;
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
-          reconnectTimer = null;
-        }
-        stage.classList.remove('reconnecting');
         connectionPill.style.display = 'none';
       }
 
-      function wireWsHandlers(socket) {
-        socket.onopen = () => {
-          // A reconnect that landed during a transient drop: lift the
-          // reconnecting overlay and resume normal operation. Initial
-          // open also goes through here.
-          if (isTerminal) return;
-          stage.classList.remove('reconnecting');
-          reconnectAttempts = 0;
-          setConnectionState('live');
-        };
-
-        socket.onmessage = (event) => {
-          // Passthrough mode is text-only — no binary frames flow here.
-          if (typeof event.data !== 'string') return;
-          let message;
-          try { message = JSON.parse(event.data); } catch { return; }
-          if (message.type === 'ready') {
-            setConnectionState('live');
-          } else if (message.type === 'url_changed') {
-            setUrl(message.url);
-          } else if (message.type === 'task_completed') {
-            showCompletionOverlay(message.reason);
-          } else if (message.type === 'task_expired') {
-            showExpiredOverlay(message.screenshot);
-          } else if (message.type === 'task_cancelled') {
-            // Server still distinguishes cancellation from a connection
-            // drop, but the operator sees one "Session ended" card either
-            // way — the cause isn't actionable for them.
-            showEndedOverlay(message.screenshot);
-          }
-        };
-
-        socket.onerror = () => {
-          // Ignored — the close handler is what actually triggers
-          // reconnect / session-lost states.
-        };
-
-        socket.onclose = () => {
-          if (isTerminal) return;
-          // bh hasn't signalled task_expired or task_cancelled, so this
-          // is presumably a client-side disconnect (machine sleep,
-          // transient network, tunnel blip). The bh session might still
-          // be alive on the server — try to reconnect. While reconnecting,
-          // block iframe input (the substrate viewer might still be
-          // accepting input on its own channel, but driving it without
-          // bh's session is unsafe — exactly the bug we're avoiding).
-          scheduleReconnect();
-        };
-      }
-
-      function scheduleReconnect() {
-        if (isTerminal) return;
-        stage.classList.add('reconnecting');
-        setConnectionState('disconnected');
-        reconnectPill.textContent = 'Reconnecting';
-        if (reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
-          // Give up. We've tried for ~30s; if bh hasn't returned by now
-          // the session is effectively over from the operator's view.
-          // Same terminal card as any other session-died cause — no
-          // screenshot because we never got task_expired/task_cancelled
-          // with one attached.
-          showEndedOverlay();
-          return;
-        }
-        reconnectAttempts += 1;
-        reconnectTimer = setTimeout(() => {
-          if (isTerminal) return;
-          try {
-            ws = new WebSocket(WS_URL);
-            wireWsHandlers(ws);
-          } catch {
-            scheduleReconnect();
-          }
-        }, RECONNECT_INTERVAL_MS);
-      }
-
-      // Initial connection.
       ws = new WebSocket(WS_URL);
-      wireWsHandlers(ws);
+
+      ws.onopen = () => {
+        if (isTerminal) return;
+        setConnectionState('live');
+      };
+
+      ws.onmessage = (event) => {
+        // Passthrough mode is text-only — no binary frames flow here.
+        if (typeof event.data !== 'string') return;
+        let message;
+        try { message = JSON.parse(event.data); } catch { return; }
+        if (message.type === 'ready') {
+          setConnectionState('live');
+        } else if (message.type === 'url_changed') {
+          setUrl(message.url);
+        } else if (message.type === 'task_completed') {
+          showCompletionOverlay(message.reason);
+        } else if (message.type === 'task_expired') {
+          showExpiredOverlay(message.screenshot);
+        } else if (message.type === 'task_cancelled') {
+          // Server still distinguishes cancellation from a connection
+          // drop, but the operator sees one "Session ended" card either
+          // way — the cause isn't actionable for them.
+          showEndedOverlay(message.screenshot);
+        }
+      };
+
+      ws.onerror = () => {
+        if (isTerminal) return;
+        showEndedOverlay();
+      };
+
+      ws.onclose = () => {
+        if (isTerminal) return;
+        // No bh-driven end event arrived before the close, so the server
+        // is gone (process died, network dropped, crash). Match streaming
+        // mode: surface the terminal card immediately rather than sitting
+        // on a misleading "Reconnecting" sweep that never reconnects.
+        showEndedOverlay();
+      };
 
       function send(data) {
         if (ws.readyState === WebSocket.OPEN) {
