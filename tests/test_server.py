@@ -500,17 +500,26 @@ class TestPassthroughActivityWatcher:
         assert w._var.startswith("__bh_")
         assert len(w._var) > len("__bh_")  # has a random suffix
 
-    async def test_setup_js_attaches_mutation_observer_and_input_listeners(self):
+    async def test_setup_js_attaches_only_input_listeners(self):
+        # Capture+passive input listeners — same stealth pattern as
+        # detection/element.py and detection/llm.py, minus the
+        # MutationObserver: page-driven DOM mutations (carousels, ads,
+        # analytics, re-renders) would otherwise constantly unblock
+        # LLMDetection without the operator ever touching the page.
         w = await self._watcher()
         js = w._setup_js()
-        assert "MutationObserver" in js
-        # Capture+passive input listeners — same stealth pattern as
-        # detection/element.py and detection/llm.py.
+        assert "MutationObserver" not in js
         assert "addEventListener" in js
         assert "capture: true" in js
         assert "passive: true" in js
-        # Events that signal real activity (excludes mousemove on purpose).
-        for ev in ("mousedown", "keydown", "wheel", "touchstart", "scroll"):
+        # Events that signal real operator activity (mousemove deliberately
+        # excluded — substrate viewers forward hover and we'd unblock on
+        # passive presence). input/paste cover substrate-relayed clipboard
+        # pastes that arrive as a value-change without a key event.
+        for ev in (
+            "mousedown", "keydown", "wheel", "touchstart", "scroll",
+            "input", "paste",
+        ):
             assert ev in js
 
     async def test_shutdown_before_install_is_noop(self):

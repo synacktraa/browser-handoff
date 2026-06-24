@@ -295,10 +295,14 @@ class _PassthroughActivityWatcher:
       - A non-enumerable, randomly-named window property holds a Date.now()
         stamp. Object.keys / for-in / JSON.stringify skip it; targeted probes
         (`'name' in window`) can't find it without knowing the random suffix.
-      - A MutationObserver + capture/passive input listeners update the stamp
-        on any relevant page activity (DOM changes from form fills/clicks,
-        plus raw mousedown/keydown/wheel/scroll/touchstart for input that
-        doesn't immediately mutate DOM).
+      - Capture/passive listeners on operator-input events (mousedown,
+        keydown, wheel, scroll, touchstart, input, paste) update the stamp.
+        We deliberately do NOT watch DOM mutations here — on real sites
+        (carousels, ads, lazy images, analytics, animated CSS classes) the
+        page mutates constantly without the operator ever touching it,
+        which would unblock LLMDetection's gate and burn vision calls. The
+        only signal that matters is operator input; the substrate always
+        delivers it as a real DOM event for our listeners to catch.
       - Python polls the stamp value via `page.evaluate(() => window[var])`;
         when it advances, `session.operator_activity.bump()` is called.
 
@@ -309,7 +313,7 @@ class _PassthroughActivityWatcher:
 
     Re-injection on framenavigated mirrors element.py's _PageWatcher — the
     setup script is idempotent (returns if the property is already present)
-    so a fresh document gets a fresh observer/listeners on the same name.
+    so a fresh document gets a fresh listener set on the same name.
     """
 
     def __init__(
@@ -335,19 +339,15 @@ class _PassthroughActivityWatcher:
             f"Object.defineProperty(window, '{self._var}', "
             "{value: 0, writable: true, enumerable: false, configurable: true});"
             f"const mark = () => {{ window.{self._var} = Date.now(); }};"
-            # MutationObserver catches operator actions that mutate the DOM —
-            # form input changes, click handlers that toggle UI, modal opens.
-            "try { new MutationObserver(mark).observe(document, "
-            "{childList:true, subtree:true, attributes:true, characterData:true}); }"
-            "catch (e) {}"
-            # Input event listeners catch interactions that don't directly
-            # mutate the DOM (scrolling, mousedown before JS responds, etc.).
-            # capture:true so we see them first; passive:true is a hard
-            # promise to the browser we won't call preventDefault, which
-            # makes us functionally indistinguishable from non-existent for
-            # the page's own handlers.
+            # capture:true so we see the event before the page's own handlers
+            # get a chance to stopPropagation; passive:true is a hard promise
+            # to the browser we won't call preventDefault, which makes us
+            # functionally indistinguishable from non-existent for the page's
+            # own handlers. The set covers pointer/key/scroll input plus
+            # input/paste so substrate-relayed clipboard pastes (which may
+            # arrive as a value-change without a key event) also register.
             "const opts = {capture: true, passive: true};"
-            "for (const e of ['mousedown','keydown','wheel','touchstart','scroll']) {"
+            "for (const e of ['mousedown','keydown','wheel','touchstart','scroll','input','paste']) {"
             "  window.addEventListener(e, mark, opts);"
             "}"
             "})();"
@@ -546,12 +546,20 @@ class StreamingServer:
                             # Bumping operator_activity on each routed event
                             # is what lets detections (LLMDetection today)
                             # gate work on operator presence + idleness
-                            # instead of page activity. Skipped for ping,
-                            # copy_request, cut_request — passive reads, not
-                            # real interaction.
+                            # instead of page activity. Skipped for:
+                            #   - ping, copy_request, cut_request — passive
+                            #     reads, not real interaction
+                            #   - mousemove — hover is presence, not action;
+                            #     bumping every 16ms while the cursor sits
+                            #     in the viewer kept last_activity perpetually
+                            #     fresh and fired the LLM safety-net every
+                            #     max_interval (~30s) without the operator
+                            #     actually doing anything. Matches the
+                            #     passthrough watcher's listener set.
                             if msg_type == "mouse":
                                 await self._handle_mouse(cdp, message)
-                                session_state.operator_activity.bump()
+                                if message.get("action") != "mousemove":
+                                    session_state.operator_activity.bump()
                             elif msg_type == "keyboard":
                                 await self._handle_keyboard(cdp, message)
                                 session_state.operator_activity.bump()
