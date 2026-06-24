@@ -85,8 +85,20 @@ def _resolve_current_page(browser: Browser) -> Page | None:
     return (non_blank or pages or [None])[0]
 
 
-def _build_tools(handoff: Handoff, browser: Browser) -> Tools:
-    """Register `request_human_help` against the shared handoff + browser."""
+def _build_tools(
+    handoff: Handoff,
+    browser: Browser,
+    agent_ref: dict[str, "Agent | None"],
+) -> Tools:
+    """Register `request_human_help` against the shared handoff + browser.
+
+    `agent_ref` is a mutable holder for the browser-use Agent. Tools are
+    built before the Agent exists (the Agent constructor wants `tools=`),
+    so we accept a dict the caller populates after Agent(...) returns.
+    Used to pause/resume the agent loop around the handoff wait — keeps
+    browser-use's step_timeout from racing the human and stops the agent
+    from racing the operator's input inside the same page.
+    """
     tools = Tools()
 
     @tools.action(
@@ -138,12 +150,24 @@ def _build_tools(handoff: Handoff, browser: Browser) -> Tools:
             )
 
         print(f"\n-> Handoff requested: {reason}\n   done_when: {done_when}\n")
-        result = await handoff.wait_for_completion(
-            page,
-            on=Detection.llm(condition=done_when),
-            reason=reason,
-            name="shopping-handoff",
-        )
+        # Pause the agent loop while the human works. Otherwise browser-use's
+        # step_timeout countdown races the human's session_timeout — whoever
+        # is shorter wins, and the agent will cancel its own tool call mid-
+        # handoff if step_timeout fires first. try/finally so a timeout or
+        # error in the handoff still resumes the agent.
+        agent = agent_ref["agent"]
+        if agent is not None:
+            agent.pause()
+        try:
+            result = await handoff.wait_for_completion(
+                page,
+                on=Detection.llm(condition=done_when),
+                reason=reason,
+                name="shopping-handoff",
+            )
+        finally:
+            if agent is not None:
+                agent.resume()
         if result.timed_out:
             return ActionResult(
                 extracted_content=(
@@ -200,7 +224,10 @@ async def main() -> None:
             browser = await pw.chromium.connect_over_cdp(
                 f"http://127.0.0.1:{CDP_PORT}"
             )
-            tools = _build_tools(handoff, browser)
+            # Holder for the agent — populated after Agent(...) returns so the
+            # tool closure can reach it without a real circular dependency.
+            agent_ref: dict[str, Agent | None] = {"agent": None}
+            tools = _build_tools(handoff, browser, agent_ref)
             browser_session = BrowserSession(cdp_url=f"http://127.0.0.1:{CDP_PORT}")
             agent = Agent(
                 task=TASK,
@@ -208,6 +235,7 @@ async def main() -> None:
                 browser_session=browser_session,
                 tools=tools,
             )
+            agent_ref["agent"] = agent
             await agent.run(max_steps=40)
         finally:
             await launched.close()
