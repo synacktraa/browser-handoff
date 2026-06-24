@@ -74,6 +74,66 @@ await handoff.wait_for_completion(
 )
 ```
 
+## Passthrough mode (cloud substrates)
+
+When the page lives in a cloud browser substrate (Kernel, Browserbase, Steel, Cua, …) and `browser-handoff` runs on your machine, every CDP frame would have to travel from the substrate's datacenter to your machine and then back out to the operator — a double WAN hop that's observably unusable in practice.
+
+Most substrates already ship their own first-class viewer. Passthrough mode delegates streaming to that viewer while `browser-handoff` keeps the detection, notification, and lifecycle responsibilities it's uniquely positioned to handle.
+
+Same Heroku login flow as the 30-second example above, this time running on a [Kernel](https://onkernel.com) cloud browser:
+
+```python
+import asyncio
+
+from kernel import AsyncKernel
+from playwright.async_api import async_playwright
+
+from browser_handoff import Handoff, Scenario
+from browser_handoff.detection import Detection
+
+
+async def main() -> None:
+    handoff = Handoff()
+    kernel = AsyncKernel()
+    kernel_browser = await kernel.browsers.create()
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.connect_over_cdp(kernel_browser.cdp_ws_url)
+        # Kernel browsers boot with one context + one page already attached.
+        page = (browser.contexts[0] or await browser.new_context()).pages[0]
+        await page.goto("https://the-internet.herokuapp.com/login")
+
+        result = await handoff.run(
+            page,
+            scenarios=[
+                Scenario(
+                    name="Heroku App Login",
+                    trigger=Detection.url(path_contains=["/login"]),
+                    complete=Detection.url(path_contains=["/secure"]),
+                ),
+            ],
+            timeout=10,
+            stream_url=kernel_browser.browser_live_view_url,  # ← passthrough
+        )
+        if result.was_blocked and not result.timed_out:
+            print(f"Human completed: {result.scenario_name} in {result.duration:.1f}s")
+        print(f"Now at: {page.url}")
+
+    await kernel.browsers.delete_by_id(kernel_browser.session_id)
+
+
+asyncio.run(main())
+```
+
+What changes when `stream_url` is set:
+
+- No local CDP screencast pump — the substrate's viewer owns frames.
+- The operator opens a `browser-handoff` served wrapper URL that iframes the substrate's viewer, cropped to just the page content.
+- Window maximization at handoff start gives the crop math a clean, deterministic rect.
+- A stealth in-page observer (non-enumerable window stamp + capture/passive listeners on deliberate input — `mousedown` / `keydown` / `wheel` / `scroll` / `touchstart` / `input` / `paste`) feeds operator-activity ticks to LLMDetection's gating, with no detectable JS surface beyond a single non-enumerable random-named integer.
+
+`stream_url` works on both entry points — `handoff.wait_for_completion(stream_url=...)` and `handoff.run(stream_url=...)`. Everything else (detection contracts, notifiers, completion semantics) is identical to streaming mode.
+
 ## Scope: what this is *not*
 
 `browser-handoff` is for flows gated by **credentials or session state** — login pages, 2FA prompts, OAuth consent screens, payment forms, identity verification, T&C acceptance.
@@ -148,7 +208,7 @@ The stream URL carries a high-entropy capability token (`…/?t=<token>`): whoev
 ## Examples
 
 - [`Claude OAuth login handoff`](examples/claude_oauth_login_handoff/) — a working Claude OAuth flow that pairs `browser-handoff` with [`ccauth`](https://github.com/synacktraa/ccauth). `local.py` runs the flow on your machine; `in_daytona.py` runs the exact same `local.py` inside a Daytona sandbox so the human can log in from anywhere via the sandbox's preview URL.
-- [`browser-use assisted shopping`](examples/browser_use_assisted_shopping/) — a [`browser-use`](https://github.com/browser-use/browser-use) agent buys a t-shirt on automationexercise.com. `browser-handoff` is exposed to the agent as a custom tool; the agent decides on its own when to call it (the login wall and the card form), and a human takes over for those steps while the agent drives the rest.
+- [`browser-use assisted shopping`](examples/browser_use_assisted_shopping/) — a [`browser-use`](https://github.com/browser-use/browser-use) agent buys a t-shirt on automationexercise.com. `browser-handoff` is exposed to the agent as a custom tool; the agent decides on its own when to call it (the login wall and the card form), and a human takes over for those steps while the agent drives the rest. `local.py` runs against a local Chromium; `using_kernel.py` runs the same flow against a [Kernel](https://onkernel.com) cloud browser in passthrough mode — the operator's wrapper iframes Kernel's WebRTC live view directly, no double-hop streaming.
 
 ## License
 

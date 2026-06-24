@@ -6,10 +6,11 @@ import asyncio
 import base64
 import json
 import logging
+import secrets
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
@@ -281,6 +282,132 @@ _NATIVE_INPUT_SHIM_JS = """
 """
 
 
+class _PassthroughActivityWatcher:
+    """Stealth activity tracker for passthrough-mode sessions.
+
+    In passthrough mode bh doesn't see the operator's raw input — events flow
+    operator → substrate viewer → CDP Input.dispatch → page, bypassing bh's
+    Python process entirely. To still gate LLMDetection on operator activity,
+    we observe the events at the page side, after the substrate has delivered
+    them. The injection has to be invisible to anti-bot scripts running on
+    the page; this watcher uses the same primitives as detection/element.py:
+
+      - A non-enumerable, randomly-named window property holds a Date.now()
+        stamp. Object.keys / for-in / JSON.stringify skip it; targeted probes
+        (`'name' in window`) can't find it without knowing the random suffix.
+      - Capture/passive listeners on operator-input events (mousedown,
+        keydown, wheel, scroll, touchstart, input, paste) update the stamp.
+        We deliberately do NOT watch DOM mutations here — on real sites
+        (carousels, ads, lazy images, analytics, animated CSS classes) the
+        page mutates constantly without the operator ever touching it,
+        which would unblock LLMDetection's gate and burn vision calls. The
+        only signal that matters is operator input; the substrate always
+        delivers it as a real DOM event for our listeners to catch.
+      - Python polls the stamp value via `page.evaluate(() => window[var])`;
+        when it advances, `session.operator_activity.bump()` is called.
+
+    Nothing of substance is added to the page's runtime: no CDP binding, no
+    function on window, no listener that calls preventDefault. The only
+    observable artifact is a single non-enumerable integer with a random
+    name, which is the minimum possible JS-side footprint.
+
+    Re-injection on framenavigated mirrors element.py's _PageWatcher — the
+    setup script is idempotent (returns if the property is already present)
+    so a fresh document gets a fresh listener set on the same name.
+    """
+
+    def __init__(
+        self,
+        session: HandoffSession,
+        loop: asyncio.AbstractEventLoop,
+        poll_interval: float = 0.25,
+    ) -> None:
+        self._session = session
+        self._loop = loop
+        self._poll_interval = poll_interval
+        self._var = f"__bh_{secrets.token_hex(8)}"
+        self._stop = asyncio.Event()
+        self._poll_task: asyncio.Task[None] | None = None
+        self._last_seen: int = 0
+        self._on_navigate: Callable[..., None] | None = None
+        self._installed = False
+
+    def _setup_js(self) -> str:
+        return (
+            "(() => {"
+            f"if (window.{self._var} !== undefined) return;"
+            f"Object.defineProperty(window, '{self._var}', "
+            "{value: 0, writable: true, enumerable: false, configurable: true});"
+            f"const mark = () => {{ window.{self._var} = Date.now(); }};"
+            # capture:true so we see the event before the page's own handlers
+            # get a chance to stopPropagation; passive:true is a hard promise
+            # to the browser we won't call preventDefault, which makes us
+            # functionally indistinguishable from non-existent for the page's
+            # own handlers. The set covers pointer/key/scroll input plus
+            # input/paste so substrate-relayed clipboard pastes (which may
+            # arrive as a value-change without a key event) also register.
+            "const opts = {capture: true, passive: true};"
+            "for (const e of ['mousedown','keydown','wheel','touchstart','scroll','input','paste']) {"
+            "  window.addEventListener(e, mark, opts);"
+            "}"
+            "})();"
+        )
+
+    async def install(self) -> None:
+        if self._installed:
+            return
+        page = self._session.page
+        # framenavigated re-injects the stealth setup on the new document.
+        # The handler closes over self so a single install() is enough; the
+        # re-inject path keeps running across navigations until shutdown().
+        def _handler(*_: Any) -> None:
+            if not self._stop.is_set():
+                self._loop.create_task(self._reinject())
+        self._on_navigate = _handler
+        page.on("framenavigated", _handler)
+        with suppress(Exception):
+            await page.evaluate(self._setup_js())
+        self._poll_task = self._loop.create_task(self._poll())
+        self._installed = True
+
+    async def _reinject(self) -> None:
+        with suppress(Exception):
+            await self._session.page.evaluate(self._setup_js())
+
+    async def _poll(self) -> None:
+        # `() => window[var]` rather than a property access expression so a
+        # missing var (e.g. mid-navigation, before re-inject lands) evaluates
+        # to undefined and falls back to 0 cleanly. We compare strict-greater
+        # so a Date.now() rollover doesn't fire on a stale read.
+        read_js = f"() => window.{self._var} || 0"
+        while not self._stop.is_set():
+            try:
+                ms = await self._session.page.evaluate(read_js)
+            except Exception:
+                ms = self._last_seen
+            if ms and ms > self._last_seen:
+                self._last_seen = ms
+                self._session.operator_activity.bump()
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self._poll_interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def shutdown(self) -> None:
+        if not self._installed:
+            return
+        self._stop.set()
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._poll_task
+        if self._on_navigate is not None:
+            with suppress(Exception):
+                self._session.page.remove_listener("framenavigated", self._on_navigate)
+            self._on_navigate = None
+        self._installed = False
+
+
 class StreamingServer:
     """Server that manages streaming sessions for human intervention.
 
@@ -359,7 +486,15 @@ class StreamingServer:
 
         @app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket, t: str | None = None):
-            """WebSocket endpoint: binary frames out, JSON control in.
+            """WebSocket endpoint.
+
+            Two protocols on the same URL, picked by session mode:
+              - streaming sessions: binary frames out, JSON control in
+                (mouse/keyboard/paste/copy_request/ping…)
+              - passthrough sessions: text-only — server sends
+                ready/url_changed/completed/expired events; client sends
+                reload + iframe_focus events. No frames either direction;
+                the substrate's viewer owns the video channel.
 
             `t` is the capability token; an unknown or expired one is closed.
             """
@@ -371,6 +506,15 @@ class StreamingServer:
                 return
 
             session_state.websockets.append(websocket)
+
+            if session_state.is_passthrough:
+                try:
+                    await self._handle_passthrough_websocket(websocket, session_state)
+                finally:
+                    if websocket in session_state.websockets:
+                        session_state.websockets.remove(websocket)
+                return
+
             cdp = session_state.cdp
             page = session_state.page
 
@@ -402,12 +546,20 @@ class StreamingServer:
                             # Bumping operator_activity on each routed event
                             # is what lets detections (LLMDetection today)
                             # gate work on operator presence + idleness
-                            # instead of page activity. Skipped for ping,
-                            # copy_request, cut_request — passive reads, not
-                            # real interaction.
+                            # instead of page activity. Skipped for:
+                            #   - ping, copy_request, cut_request — passive
+                            #     reads, not real interaction
+                            #   - mousemove — hover is presence, not action;
+                            #     bumping every 16ms while the cursor sits
+                            #     in the viewer kept last_activity perpetually
+                            #     fresh and fired the LLM safety-net every
+                            #     max_interval (~30s) without the operator
+                            #     actually doing anything. Matches the
+                            #     passthrough watcher's listener set.
                             if msg_type == "mouse":
                                 await self._handle_mouse(cdp, message)
-                                session_state.operator_activity.bump()
+                                if message.get("action") != "mousemove":
+                                    session_state.operator_activity.bump()
                             elif msg_type == "keyboard":
                                 await self._handle_keyboard(cdp, message)
                                 session_state.operator_activity.bump()
@@ -507,6 +659,8 @@ class StreamingServer:
         reason: str,
         scenario_name: str | None = None,
         viewport_size: dict[str, int] | None = None,
+        stream_url: str | None = None,
+        crop_metrics: dict[str, int] | None = None,
     ) -> HandoffSession:
         """Register a new Page for streaming.
 
@@ -517,6 +671,12 @@ class StreamingServer:
             reason: Reason for handoff (shown to user).
             scenario_name: Label of the matched scenario (breadcrumb header).
             viewport_size: Optional viewport dimensions.
+            stream_url: Optional substrate viewer URL. When set, the session
+                runs in passthrough mode: the screencast pump is skipped and
+                the operator gets a wrapper page that iframes this URL.
+            crop_metrics: Page-rect-on-display metrics for the iframe crop.
+                Six ints (screen_w/h, page_x/y, page_w/h) captured via
+                page.evaluate at handoff start. Only meaningful with stream_url.
 
         Returns:
             The created HandoffSession.
@@ -532,6 +692,8 @@ class StreamingServer:
             reason=reason,
             scenario_name=scenario_name,
             viewport_size=viewport_size or DEFAULT_VIEWPORT.copy(),
+            stream_url=stream_url,
+            crop_metrics=crop_metrics,
         )
         # The token can't outlive the handoff itself, which is bounded by
         # session_timeout — so a leaked link is dead once the handoff ends.
@@ -539,27 +701,49 @@ class StreamingServer:
         self.sessions[session_id] = session
         self._token_to_session[session.access_token] = session_id
 
-        await self._suppress_context_menu(page)
-        await self._inject_native_input_shim(page)
+        # Page-modifying helpers (context-menu suppression, native input shim)
+        # exist to make the operator's stream view behave like a real browser
+        # for input. In passthrough mode the operator interacts via the
+        # substrate's own viewer — touching the page from here would be a
+        # no-op at best and a behavior change at worst. Skip.
+        if not session.is_passthrough:
+            await self._suppress_context_menu(page)
+            await self._inject_native_input_shim(page)
 
         # Seed the URL with whatever Playwright has now, then track every
         # subsequent main-frame navigation so the viewer's URL bar matches
         # the page. Subframe navigations are ignored — operators care about
-        # the document URL, not third-party iframes.
+        # the document URL, not third-party iframes. Both modes need this —
+        # the proxy template also renders a URL bar.
         with suppress(Exception):
             session.current_url = page.url
         self._attach_url_tracker(session)
 
-        # Take initial screenshot as first frame so the page paints
-        # immediately when a client connects, before screencast warms up.
-        with suppress(Exception):
-            screenshot_bytes = await page.screenshot(
-                type="jpeg", quality=self.config.jpeg_quality
+        # The initial screenshot + screencast pump only exist to feed the
+        # streaming WS. In passthrough mode there's no streaming WS to feed
+        # — frames flow operator <-> substrate directly via whatever
+        # transport the substrate's viewer uses.
+        if session.is_passthrough:
+            # In passthrough, install the stealth activity watcher so
+            # LLMDetection's gating still sees operator interaction even
+            # though the input never crosses bh's process. See
+            # _PassthroughActivityWatcher for the full design rationale.
+            session.passthrough_activity_watcher = _PassthroughActivityWatcher(
+                session, asyncio.get_running_loop()
             )
-            await self._publish_frame(session, screenshot_bytes)
+            with suppress(Exception):
+                await session.passthrough_activity_watcher.install()
+        else:
+            # Take initial screenshot as first frame so the page paints
+            # immediately when a client connects, before screencast warms up.
+            with suppress(Exception):
+                screenshot_bytes = await page.screenshot(
+                    type="jpeg", quality=self.config.jpeg_quality
+                )
+                await self._publish_frame(session, screenshot_bytes)
 
-        # Start capture immediately
-        session.capture_task = asyncio.create_task(self._capture_frames(session))
+            # Start capture immediately
+            session.capture_task = asyncio.create_task(self._capture_frames(session))
 
         return session
 
@@ -596,6 +780,60 @@ class StreamingServer:
         """
         with suppress(Exception):
             await websocket.send_json(payload)
+
+    async def _handle_passthrough_websocket(
+        self, websocket: WebSocket, session: HandoffSession
+    ) -> None:
+        """Status-only WS protocol for passthrough sessions.
+
+        No binary frames either direction. Server pushes ready /
+        url_changed / completed / expired lifecycle events; client sends
+        reload requests and iframe_focus pings. The substrate's own
+        viewer owns the video + input channels — this WS is purely the
+        wrapper-page's lifeline back to the Handoff.
+        """
+        # Acknowledge so the wrapper page can flip its connection-state
+        # pill from "Connecting" to "Live".
+        with suppress(Exception):
+            await websocket.send_json({"type": "ready"})
+
+        # Seed the URL bar — same behavior as streaming mode, just no
+        # frame seeding (no frames to seed).
+        if session.current_url is not None:
+            with suppress(Exception):
+                await websocket.send_json(
+                    {"type": "url_changed", "url": session.current_url}
+                )
+
+        page = session.page
+        try:
+            with suppress(WebSocketDisconnect):
+                while True:
+                    data = await websocket.receive_text()
+                    try:
+                        message = json.loads(data)
+                    except Exception:
+                        continue
+                    msg_type = message.get("type")
+
+                    if msg_type == "reload":
+                        # Operator clicked reload in the wrapper toolbar.
+                        # Trigger page.reload() via Playwright; the resulting
+                        # framenavigated will push url_changed back to all
+                        # WSes via _attach_url_tracker. No need to bump
+                        # operator_activity here — the navigation will
+                        # mutate the document and the in-page activity
+                        # watcher catches that automatically.
+                        try:
+                            await page.reload()
+                        except Exception as e:
+                            logger.info("passthrough reload failed: %s", e)
+                    # Other types: ignored. Streaming-mode messages
+                    # (mouse/keyboard/paste/etc.) don't apply here — the
+                    # substrate owns input — and silently dropping them is
+                    # the right behavior if a client sends one by mistake.
+        except Exception as e:
+            logger.error(f"passthrough WebSocket error: {e}")
 
     @staticmethod
     async def _suppress_context_menu(page: "Page") -> None:
@@ -655,6 +893,13 @@ class StreamingServer:
 
         if session.capture_task and not session.capture_task.done():
             session.capture_task.cancel()
+        # Tear down the passthrough activity watcher (if installed); pulls
+        # down its poll task, removes the framenavigated listener, and leaves
+        # the page free of any further re-injection on navigation.
+        if session.passthrough_activity_watcher is not None:
+            with suppress(Exception):
+                await session.passthrough_activity_watcher.shutdown()
+            session.passthrough_activity_watcher = None
         # Cancel any in-flight ack/publish tasks (copy first — done callbacks
         # mutate the set as they finish).
         for task in list(session.background_tasks):
@@ -727,7 +972,15 @@ class StreamingServer:
         return task
 
     async def _capture_frames(self, session: HandoffSession) -> None:
-        """Capture frames from CDP screencast and publish via Condition."""
+        """Capture frames from CDP screencast and publish via Condition.
+
+        Defensive early return for passthrough sessions: register_session
+        already skips scheduling this task in that mode, but if a caller
+        invokes _capture_frames directly we must not start a screencast on
+        a session whose viewer is the substrate's (not ours).
+        """
+        if session.is_passthrough:
+            return
         cdp = session.cdp
 
         def on_frame(params: dict[str, Any]) -> None:
@@ -997,6 +1250,69 @@ class StreamingServer:
                 with suppress(Exception):
                     await ws.send_json(message)
 
+    async def _capture_session_end_screenshot(
+        self, session: HandoffSession
+    ) -> str | None:
+        """Snapshot the page as a base64 JPEG data URL for session-end events.
+
+        Only meaningful for passthrough sessions — streaming mode already
+        shows its own last frame when the screencast stops. Returns None
+        on any failure (page detached, headless mocks, etc.) so callers
+        can include the field conditionally.
+        """
+        if not session.is_passthrough:
+            return None
+        try:
+            jpeg = await session.page.screenshot(type="jpeg", quality=70)
+            return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
+        except Exception as e:
+            logger.info("session-end screenshot failed: %s", e)
+            return None
+
+    async def _broadcast_session_end(
+        self, session_id: str, event_type: str
+    ) -> None:
+        """Shared shape for task_expired / task_cancelled.
+
+        Captures the screenshot, builds {type, screenshot?}, fans out to
+        every connected WS, suppresses send errors so one disconnected
+        viewer doesn't abort the broadcast.
+        """
+        if session_id not in self.sessions:
+            return
+        session = self.sessions[session_id]
+        message: dict[str, Any] = {"type": event_type}
+        screenshot = await self._capture_session_end_screenshot(session)
+        if screenshot:
+            message["screenshot"] = screenshot
+        for ws in session.websockets:
+            with suppress(Exception):
+                await ws.send_json(message)
+
+    async def notify_task_expired(self, session_id: str) -> None:
+        """Notify frontend that the session hit session_timeout.
+
+        Distinct from cancellation: this fires when the operator simply
+        didn't finish within the configured budget. The proxy template
+        renders a "Session expired" card and swaps the iframe out for the
+        captured screenshot (passthrough's WebRTC stream survives bh's
+        teardown — the screenshot is the bh-controlled stand-in that does
+        not). Streaming-mode UI ignores this event.
+        """
+        await self._broadcast_session_end(session_id, "task_expired")
+
+    async def notify_task_cancelled(self, session_id: str) -> None:
+        """Notify frontend that the session was cancelled by the caller.
+
+        Fires when wait_for_completion's await gets cancelled —
+        browser-use's per-step timeout, ctrl-c at the script level,
+        an explicit asyncio.Task.cancel(). Distinct from task_expired
+        so the operator sees "the agent gave up on this step" instead
+        of "you ran out of time" — accurate framing matters when the
+        operator is debugging why they got booted.
+        """
+        await self._broadcast_session_end(session_id, "task_cancelled")
+
     async def stop_screencast(self, session_id: str) -> None:
         """Stop the screencast for a session (e.g., before sensitive data appears).
 
@@ -1009,8 +1325,27 @@ class StreamingServer:
                 session.capture_task.cancel()
 
     def _get_html_client(self, session_id: str, reason: str) -> str:
-        """Generate HTML client for streaming using Jinja template."""
+        """Render the operator-facing HTML for a session.
+
+        Picks the template based on session mode:
+          - passthrough → proxy_intervention.html (wraps the substrate's own
+            viewer URL in a thin chrome + reason banner, no own streaming)
+          - streaming   → intervention.html (the screencast-driven viewer)
+        Same render call shape; proxy template additionally gets stream_url
+        and crop_metrics so its iframe can be positioned/cropped correctly.
+        """
         session = self.sessions[session_id]
+        if session.is_passthrough:
+            template = jinja_env.get_template("proxy_intervention.html")
+            return template.render(
+                access_token=session.access_token,
+                reason=reason,
+                scenario_name=session.scenario_name,
+                viewport_width=session.viewport_size["width"],
+                viewport_height=session.viewport_size["height"],
+                stream_url=session.stream_url,
+                crop_metrics=session.crop_metrics,
+            )
         template = jinja_env.get_template("intervention.html")
         return template.render(
             access_token=session.access_token,
@@ -1020,21 +1355,36 @@ class StreamingServer:
             viewport_height=session.viewport_size["height"],
         )
 
-    def get_stream_url(self, session_id: str) -> str:
-        """Get the public stream URL for a session.
+    def get_operator_url(self, session_id: str) -> str:
+        """Get the public operator URL for a session.
 
         The URL carries the session's capability token (not the session id),
-        which is the secret an operator needs to view and control the page.
+        which is the secret an operator needs to open the wrapper page.
+        The Handoff sends this URL to the operator via notifiers; the
+        operator's browser loads it and gets the intervention or proxy
+        template depending on session mode.
 
         Args:
             session_id: The session ID.
 
         Returns:
-            The full URL to access the stream.
+            The full URL the operator opens.
         """
         base_url = self.config.get_base_url()
         token = self.sessions[session_id].access_token
         return f"{base_url}/?t={token}"
+
+    def get_stream_url(self, session_id: str) -> str:
+        """Deprecated alias for :meth:`get_operator_url`. Removed in v0.6."""
+        import warnings
+
+        warnings.warn(
+            "get_stream_url() is deprecated; use get_operator_url() instead. "
+            "Will be removed in v0.6.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_operator_url(session_id)
 
     async def start(self) -> None:
         """Start the server."""

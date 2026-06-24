@@ -12,18 +12,21 @@ from browser_handoff.server.session import HandoffSession
 from browser_handoff.server.streaming import StreamingServer
 
 
-def _bare_session() -> HandoffSession:
+def _bare_session(**overrides) -> HandoffSession:
     """A HandoffSession with placeholder page/context/cdp.
 
     _spawn_tracked only touches session.background_tasks, so the browser
-    objects can be inert stand-ins."""
-    return HandoffSession(
+    objects can be inert stand-ins. Pass overrides to set additional
+    fields (e.g. stream_url for passthrough-mode tests)."""
+    fields = dict(
         session_id="test",
         page=object(),
         context=object(),
         cdp=object(),
         reason="test",
     )
+    fields.update(overrides)
+    return HandoffSession(**fields)
 
 
 class TestServerConfig:
@@ -221,12 +224,24 @@ class TestAccessToken:
         session = self._register(server, expires_at=time.time() - 1)  # already past
         assert server._resolve_token(session.access_token) is None
 
-    def test_stream_url_carries_token_not_session_id(self):
+    def test_operator_url_carries_token_not_session_id(self):
         server = StreamingServer()
         session = self._register(server, expires_at=time.time() + 60)
-        url = server.get_stream_url(session.session_id)
+        url = server.get_operator_url(session.session_id)
         assert f"?t={session.access_token}" in url
         assert "?session=" not in url  # the id is no longer the URL gate
+
+    def test_get_stream_url_is_deprecated_alias(self):
+        import warnings
+
+        server = StreamingServer()
+        session = self._register(server, expires_at=time.time() + 60)
+        canonical = server.get_operator_url(session.session_id)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            legacy = server.get_stream_url(session.session_id)
+        assert legacy == canonical
+        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
 
 
 class TestSessionTimeoutDeprecation:
@@ -273,3 +288,243 @@ class TestSessionTimeoutDeprecation:
         with pytest.warns(DeprecationWarning, match="session_timeout"):
             config = ServerConfig.from_dict({"completion_timeout": 200.0})
         assert config.session_timeout == 200.0
+
+
+class TestPassthroughSession:
+    """HandoffSession.is_passthrough is derived from stream_url.
+
+    Single source of truth so the two can't disagree. Passthrough state
+    flips solely on whether a substrate-served stream URL was provided.
+    """
+
+    def test_is_passthrough_false_when_stream_url_absent(self):
+        session = _bare_session()
+        assert session.stream_url is None
+        assert session.is_passthrough is False
+
+    def test_is_passthrough_true_when_stream_url_set(self):
+        session = _bare_session(stream_url="https://substrate.example/viewer?t=abc")
+        assert session.is_passthrough is True
+
+    def test_crop_metrics_optional(self):
+        session = _bare_session(stream_url="https://substrate/viewer")
+        assert session.crop_metrics is None
+
+    def test_crop_metrics_carried_when_provided(self):
+        metrics = {
+            "screen_w": 1920, "screen_h": 1080,
+            "page_x": 0, "page_y": 87,
+            "page_w": 1920, "page_h": 993,
+        }
+        session = _bare_session(
+            stream_url="https://substrate/viewer",
+            crop_metrics=metrics,
+        )
+        assert session.crop_metrics == metrics
+
+
+class TestCaptureFramesPassthroughGuard:
+    """The CDP screencast pump must early-return on passthrough sessions.
+
+    Belt-and-suspenders: register_session skips scheduling the task in the
+    first place when stream_url is set, but a stray caller invoking
+    _capture_frames directly on a passthrough session must not start a
+    screencast on a page whose viewer is the substrate's (not ours).
+    """
+
+    async def test_capture_frames_returns_immediately_for_passthrough(self):
+        server = StreamingServer()
+        session = _bare_session(stream_url="https://substrate/viewer")
+
+        # If the guard works, the coroutine completes without touching
+        # session.cdp at all (the placeholder cdp=object() would raise on
+        # any attribute access). Wrap in asyncio.wait_for so a missing
+        # guard hangs the test instead of looping forever.
+        await asyncio.wait_for(server._capture_frames(session), timeout=1.0)
+
+
+class TestTemplateSelection:
+    """`_get_html_client` picks the right template based on session mode."""
+
+    def _register(self, server: StreamingServer, **overrides):
+        session = _bare_session(**overrides)
+        session.expires_at = time.time() + 60
+        server.sessions[session.session_id] = session
+        server._token_to_session[session.access_token] = session.session_id
+        return session
+
+    def test_streaming_session_renders_intervention_template(self):
+        server = StreamingServer()
+        self._register(server)
+        html = server._get_html_client("test", "please log in")
+        # intervention.html ships the streaming-mode features that the
+        # proxy template intentionally omits.
+        assert "Browser Handoff" in html
+        assert "please log in" in html
+        assert "stream-container" in html  # streaming-only element id
+
+    def test_passthrough_session_renders_proxy_template(self):
+        server = StreamingServer()
+        crop = {
+            "screen_w": 1920, "screen_h": 1080,
+            "page_x": 0, "page_y": 87,
+            "page_w": 1920, "page_h": 993,
+        }
+        self._register(
+            server,
+            stream_url="https://substrate.example/viewer?t=xyz",
+            crop_metrics=crop,
+        )
+        html = server._get_html_client("test", "please sign in")
+        assert "please sign in" in html
+        # Proxy-only markers: the substrate iframe and the fallback
+        # screenshot used when the bh session ends without completion
+        # (substrate's WebRTC stream would otherwise keep running in the
+        # iframe). Neither exists in intervention.html.
+        assert "substrate-iframe" in html
+        assert "fallback-screenshot" in html
+        # Crop metrics threaded into the CSS via Jinja.
+        assert "1920" in html and "993" in html
+
+    def test_passthrough_template_falls_back_without_crop_metrics(self):
+        # Degenerate crop (e.g. headless mocks returned zero dims) must
+        # still render a usable wrapper — just without the iframe crop.
+        server = StreamingServer()
+        self._register(
+            server,
+            stream_url="https://substrate.example/viewer",
+            crop_metrics=None,
+        )
+        html = server._get_html_client("test", "intervene please")
+        assert "substrate-iframe" in html
+        # No crop math should appear when metrics are None.
+        assert "calc(-100% *" not in html
+
+
+class TestPassthroughNotifications:
+    """Status WS event shape for passthrough lifecycle events."""
+
+    async def test_notify_task_expired_sends_event_to_all_websockets(self):
+        server = StreamingServer()
+        session = _bare_session(stream_url="https://substrate/viewer")
+        server.sessions[session.session_id] = session
+
+        sent: list[dict] = []
+
+        class FakeWS:
+            async def send_json(self, payload):
+                sent.append(payload)
+
+        session.websockets.extend([FakeWS(), FakeWS()])
+        await server.notify_task_expired(session.session_id)
+
+        assert sent == [{"type": "task_expired"}, {"type": "task_expired"}]
+
+    async def test_notify_task_expired_unknown_session_is_noop(self):
+        # Race: the session unregistered between detect-timeout and notify.
+        # Must not raise.
+        server = StreamingServer()
+        await server.notify_task_expired("nope")  # silent
+
+    async def test_notify_task_expired_survives_send_failure(self):
+        # A disconnected WS must not abort the broadcast to the others.
+        server = StreamingServer()
+        session = _bare_session(stream_url="https://substrate/viewer")
+        server.sessions[session.session_id] = session
+
+        delivered: list[dict] = []
+
+        class BrokenWS:
+            async def send_json(self, payload):
+                raise RuntimeError("disconnected")
+
+        class GoodWS:
+            async def send_json(self, payload):
+                delivered.append(payload)
+
+        session.websockets.extend([BrokenWS(), GoodWS()])
+        await server.notify_task_expired(session.session_id)
+        # The good WS still got the event despite the broken one raising.
+        assert delivered == [{"type": "task_expired"}]
+
+    async def test_notify_task_cancelled_sends_distinct_event(self):
+        # The server still sends a structurally distinct task_cancelled
+        # event so callers / future client variants can act on it; the
+        # current operator wrapper collapses it into the same "Session
+        # ended" card as a raw connection drop because the cause isn't
+        # actionable for an operator.
+        server = StreamingServer()
+        session = _bare_session(stream_url="https://substrate/viewer")
+        server.sessions[session.session_id] = session
+
+        sent: list[dict] = []
+
+        class FakeWS:
+            async def send_json(self, payload):
+                sent.append(payload)
+
+        session.websockets.append(FakeWS())
+        await server.notify_task_cancelled(session.session_id)
+        assert sent == [{"type": "task_cancelled"}]
+
+
+class TestPassthroughActivityWatcher:
+    """The stealth in-page activity watcher's lifecycle invariants.
+
+    Functional behavior (DOM-mutation/input event observation) needs a real
+    page and is covered by integration tests; these check the install/
+    shutdown state machine and the JS shape.
+    """
+
+    async def _watcher(self):
+        from browser_handoff.server.streaming import _PassthroughActivityWatcher
+
+        # Watcher only touches the page during install/shutdown; the bare
+        # session's page=object() is fine for the state-machine tests below.
+        # Async helper so asyncio.get_running_loop() resolves the loop
+        # pytest-asyncio set up for the test (no deprecation warning, no
+        # falling back to get_event_loop()).
+        session = _bare_session(stream_url="https://substrate/viewer")
+        return _PassthroughActivityWatcher(session, asyncio.get_running_loop())
+
+    async def test_setup_js_uses_non_enumerable_property(self):
+        # The whole stealth claim hinges on this: site JS that walks
+        # window must not see our stamp. Verify the injected JS uses
+        # Object.defineProperty with enumerable:false.
+        w = await self._watcher()
+        js = w._setup_js()
+        assert "Object.defineProperty(window," in js
+        assert "enumerable: false" in js
+        # And random, per-watcher name (no fixed bh_* string that detection
+        # scripts could probe by name).
+        assert w._var.startswith("__bh_")
+        assert len(w._var) > len("__bh_")  # has a random suffix
+
+    async def test_setup_js_attaches_only_input_listeners(self):
+        # Capture+passive input listeners — same stealth pattern as
+        # detection/element.py and detection/llm.py, minus the
+        # MutationObserver: page-driven DOM mutations (carousels, ads,
+        # analytics, re-renders) would otherwise constantly unblock
+        # LLMDetection without the operator ever touching the page.
+        w = await self._watcher()
+        js = w._setup_js()
+        assert "MutationObserver" not in js
+        assert "addEventListener" in js
+        assert "capture: true" in js
+        assert "passive: true" in js
+        # Events that signal real operator activity (mousemove deliberately
+        # excluded — substrate viewers forward hover and we'd unblock on
+        # passive presence). input/paste cover substrate-relayed clipboard
+        # pastes that arrive as a value-change without a key event.
+        for ev in (
+            "mousedown", "keydown", "wheel", "touchstart", "scroll",
+            "input", "paste",
+        ):
+            assert ev in js
+
+    async def test_shutdown_before_install_is_noop(self):
+        w = await self._watcher()
+        # Never installed; shutdown must not raise or touch the page.
+        await w.shutdown()
+        assert w._installed is False
+        assert w._poll_task is None

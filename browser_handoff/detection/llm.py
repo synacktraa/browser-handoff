@@ -149,6 +149,23 @@ class LLMDetection(BaseDetection):
         default=None, init=False, repr=False
     )
 
+    def __post_init__(self) -> None:
+        """Verify litellm is importable at construction time.
+
+        Doing the check here — not lazily in `check()` — means a missing
+        [llm] extra fails the moment the agent code wires up an
+        LLMDetection, not minutes (or hours) into a long-running flow
+        when the first vision check finally fires. The import itself is
+        cheap; the module is cached in sys.modules so check() reuses it.
+        """
+        try:
+            import litellm  # noqa: F401  (import for side-effect verification)
+        except ImportError as e:
+            raise ImportError(
+                "LLMDetection requires the 'litellm' package. "
+                "Install with: pip install browser-handoff[llm]"
+            ) from e
+
     @staticmethod
     def _should_check(
         now: float,
@@ -364,17 +381,9 @@ class LLMDetection(BaseDetection):
 
     async def check(self, page: "Page") -> DetectionResult:
         """Check condition using LLM vision."""
-        try:
-            # Import litellm only when needed
-            try:
-                from litellm import acompletion
-            except ImportError:
-                return DetectionResult(
-                    matched=False,
-                    detection_type=self.detection_type,
-                    reason="LLM detection requires 'litellm' package. Install with: pip install browser-handoff[llm]",
-                )
+        from litellm import acompletion
 
+        try:
             # Take screenshot
             screenshot = await page.screenshot(type="jpeg", quality=80)
             base64_image = base64.b64encode(screenshot).decode("utf-8")

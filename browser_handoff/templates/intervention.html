@@ -426,13 +426,7 @@
         box-shadow: 0 0 6px rgba(255, 149, 0, 0.7);
         animation: pulse-dot 1.2s ease-in-out infinite;
       }
-      .latency-pill.disconnected .lat-dot {
-        background: var(--red);
-        box-shadow: 0 0 8px rgba(255, 59, 48, 0.85);
-        animation: pulse-dot 1.2s ease-in-out infinite;
-      }
-      .latency-pill.connecting,
-      .latency-pill.disconnected {
+      .latency-pill.connecting {
         color: var(--text-dim);
         text-transform: uppercase;
         letter-spacing: 1.2px;
@@ -780,6 +774,114 @@
         text-transform: uppercase;
         color: var(--text-mute);
       }
+
+      /* Expired / ended overlays — same shape as the completion card,
+         different glyph + accent color. Expired (red) means session_timeout
+         fired; ended (gray) is the catchall for any other non-success exit:
+         caller cancellation, abrupt process death, lost WS without a prior
+         end event. The operator doesn't need the cause split out — "this is
+         over and you can close the tab" is the only actionable framing. */
+      .expired-overlay,
+      .ended-overlay {
+        position: absolute;
+        inset: 0;
+        background: rgba(14, 14, 18, 0.82);
+        backdrop-filter: blur(18px) saturate(140%);
+        -webkit-backdrop-filter: blur(18px) saturate(140%);
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        z-index: 20;
+        animation: fadeIn 0.3s ease-in-out;
+      }
+      .expired-overlay.show,
+      .ended-overlay.show { display: flex; }
+
+      .expired-card,
+      .ended-card {
+        width: 480px;
+        max-width: calc(100% - 80px);
+        background: var(--glass-strong);
+        backdrop-filter: blur(28px) saturate(170%);
+        -webkit-backdrop-filter: blur(28px) saturate(170%);
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        overflow: hidden;
+        box-shadow:
+          0 30px 70px -20px rgba(0, 0, 0, 0.7),
+          0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+        animation: cardIn 0.42s cubic-bezier(0.2, 0.7, 0.2, 1);
+      }
+      .expired-card-header,
+      .ended-card-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 13px 18px;
+        border-bottom: 1px solid var(--border);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0));
+        font-family: var(--font-mono);
+      }
+      .expired-card-header .glyph,
+      .ended-card-header .glyph {
+        width: 18px;
+        height: 18px;
+        border-width: 1.5px;
+        border-style: solid;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+      .expired-card-header .glyph {
+        border-color: var(--red);
+        background: rgba(255, 59, 48, 0.14);
+      }
+      .expired-card-header .glyph svg {
+        width: 11px; height: 11px; color: var(--red);
+      }
+      .ended-card-header .glyph {
+        border-color: var(--text-mute);
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .ended-card-header .glyph svg {
+        width: 11px; height: 11px; color: var(--text-dim);
+      }
+      .expired-card-header .label,
+      .ended-card-header .label {
+        font-size: 11px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--text);
+        font-weight: 600;
+      }
+      .expired-card-header .timestamp,
+      .ended-card-header .timestamp {
+        margin-left: auto;
+        font-size: 11px;
+        color: var(--text-mute);
+        font-feature-settings: 'tnum';
+        letter-spacing: 0.04em;
+      }
+      .expired-card-body,
+      .ended-card-body {
+        padding: 16px 18px;
+        font-size: 13.5px;
+        color: var(--text-dim);
+        line-height: 1.6;
+      }
+      .expired-card-footer,
+      .ended-card-footer {
+        padding: 11px 18px;
+        border-top: 1px solid var(--border);
+        background: rgba(0, 0, 0, 0.18);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--text-mute);
+      }
     </style>
   </head>
   <body>
@@ -903,6 +1005,44 @@
             <div class="completion-card-footer">You may close this window</div>
           </div>
         </div>
+
+        <div class="expired-overlay" id="expired-overlay">
+          <div class="expired-card">
+            <div class="expired-card-header">
+              <span class="glyph">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"/>
+                  <polyline points="12 6 12 12 16 14"/>
+                </svg>
+              </span>
+              <span class="label">Session expired</span>
+              <span class="timestamp" id="expired-timestamp"></span>
+            </div>
+            <div class="expired-card-body">
+              Your time to complete the handoff ran out.
+            </div>
+            <div class="expired-card-footer">You may close this window</div>
+          </div>
+        </div>
+
+        <div class="ended-overlay" id="ended-overlay">
+          <div class="ended-card">
+            <div class="ended-card-header">
+              <span class="glyph">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="9"/>
+                  <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </span>
+              <span class="label">Session ended</span>
+              <span class="timestamp" id="ended-timestamp"></span>
+            </div>
+            <div class="ended-card-body">
+              The handoff session ended.
+            </div>
+            <div class="ended-card-footer">You may close this window</div>
+          </div>
+        </div>
       </div>
     </div>
     </div>
@@ -920,6 +1060,10 @@
       const completionOverlay = document.getElementById('completion-overlay');
       const completionReasonText = document.getElementById('completion-reason-text');
       const completionTimestamp = document.getElementById('completion-timestamp');
+      const expiredOverlay = document.getElementById('expired-overlay');
+      const expiredTimestamp = document.getElementById('expired-timestamp');
+      const endedOverlay = document.getElementById('ended-overlay');
+      const endedTimestamp = document.getElementById('ended-timestamp');
       const toastStack = document.getElementById('toast-stack');
       const reloadBtn = document.getElementById('reload-btn');
       const helpBtn = document.getElementById('help-btn');
@@ -988,34 +1132,38 @@
       let isCompleted = false;
       let streamConnected = false;
       let lastLatency = null;
+      // Watchdog: timestamp of the most recent pong we received. We ping
+      // every 2s; if too many pings go unanswered the WS is presumed dead
+      // (uvicorn crashed, OS killed the parent process, network cable
+      // yanked — any case where the close frame never arrives so
+      // ws.onclose doesn't fire on its own). Without this, the wrapper
+      // would sit frozen at the last frame with the last good latency
+      // value, no way for the operator to know the session is gone.
+      let lastPongTs = null;
+      const PONG_TIMEOUT_MS = 6000;  // ~3 missed pings → assume dead
 
       function applyLatencyState(state) {
+        // Only two real states for the pill now: 'connecting' (initial
+        // handshake, no frame yet) and 'connected' (RTT values flow into
+        // setLatencyValue). Any unrecoverable disconnect goes straight to
+        // the ended-overlay card via showEndedOverlay — there's no
+        // "Reconnecting" sweep because streaming-mode doesn't actually try.
         if (isCompleted) return;
-        latencyPill.classList.remove('warn', 'bad', 'connecting', 'disconnected');
+        latencyPill.classList.remove('warn', 'bad', 'connecting');
         if (state === 'connecting') {
           latencyPill.classList.add('connecting');
           latencyValue.textContent = 'Connecting';
-          // "Connecting" reads correctly for the initial connect window
-          // (no frame yet). The overlay covers the blank stream so a slow
-          // handshake doesn't look stuck.
           reconnectPill.textContent = 'Connecting';
-        } else if (state === 'disconnected') {
-          latencyPill.classList.add('disconnected');
-          latencyValue.textContent = 'Offline';
-          reconnectPill.textContent = 'Reconnecting';
         } else if (state === 'connected' && lastLatency !== null) {
           setLatencyValue(lastLatency);
         }
-        streamContainer.classList.toggle(
-          'reconnecting', state === 'connecting' || state === 'disconnected'
-        );
+        streamContainer.classList.toggle('reconnecting', state === 'connecting');
       }
 
       function setLatencyValue(ms) {
         lastLatency = ms;
         if (isCompleted) return;
-        if (latencyPill.classList.contains('connecting') ||
-            latencyPill.classList.contains('disconnected')) return;
+        if (latencyPill.classList.contains('connecting')) return;
         latencyValue.textContent = ms + ' ms';
         latencyPill.classList.remove('warn', 'bad');
         if (ms >= 300)      latencyPill.classList.add('bad');
@@ -1063,17 +1211,24 @@
       ws.onopen = () => {
         // Keep the pill in 'connecting' until the first frame actually
         // arrives — a clean ws.onopen with no frames yet still feels stalled.
+        // Seed the watchdog so it doesn't trip while we're waiting for the
+        // first pong; ping cadence is 2s and PONG_TIMEOUT_MS is 6s so the
+        // first pong has plenty of slack on a healthy connection.
+        lastPongTs = Date.now();
       };
 
       ws.onclose = () => {
         if (isCompleted) return;
+        // No clean end event arrived before the close: caller's process
+        // died, network dropped, server crashed. The cause doesn't matter
+        // to the operator — the session is unrecoverable either way.
         streamConnected = false;
-        applyLatencyState('disconnected');
+        showEndedOverlay();
       };
 
       ws.onerror = () => {
         if (isCompleted) return;
-        applyLatencyState('disconnected');
+        showEndedOverlay();
       };
 
       ws.onmessage = (event) => {
@@ -1089,6 +1244,12 @@
         const message = JSON.parse(event.data);
         if (message.type === 'task_completed') {
           showCompletionOverlay(message.reason);
+        } else if (message.type === 'task_expired') {
+          showExpiredOverlay();
+        } else if (message.type === 'task_cancelled') {
+          // Server distinguishes cancelled from a connection drop, but the
+          // operator sees one "session ended" card either way.
+          showEndedOverlay();
         } else if (message.type === 'copy_response') {
           // The page selection round-trips here so we can drop it onto the
           // operator's local clipboard. Silent failure (no permission, no
@@ -1108,20 +1269,48 @@
             const rtt = Date.now() - message.ts;
             if (rtt >= 0) setLatencyValue(rtt);
           }
+          // Refresh the watchdog. As long as pongs are flowing we know
+          // the server is alive even if no other events are firing.
+          lastPongTs = Date.now();
         }
       };
 
-      function showCompletionOverlay(reason) {
-        completionReasonText.textContent = reason || '';
-        completionTimestamp.textContent = new Date().toLocaleTimeString([], {
+      function nowTimeText() {
+        return new Date().toLocaleTimeString([], {
           hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
         });
-        completionOverlay.classList.add('show');
+      }
+
+      function markEnded() {
+        // Shared cleanup for any terminal state. Setting isCompleted gates
+        // every other connection-state path so the WS close that follows
+        // session teardown doesn't flip the latency pill to Offline or
+        // re-show the reconnecting overlay underneath the end-card.
         isCompleted = true;
-        // Pill is meaningless after completion — hide it. The overlay is the
-        // source of truth for end-of-session state.
         latencyPill.style.display = 'none';
         streamContainer.classList.remove('reconnecting');
+      }
+
+      function showCompletionOverlay(reason) {
+        completionReasonText.textContent = reason || '';
+        completionTimestamp.textContent = nowTimeText();
+        completionOverlay.classList.add('show');
+        markEnded();
+      }
+
+      function showExpiredOverlay() {
+        expiredTimestamp.textContent = nowTimeText();
+        expiredOverlay.classList.add('show');
+        markEnded();
+      }
+
+      function showEndedOverlay() {
+        // Idempotent: ws.onclose may fire after task_cancelled / watchdog
+        // already ran, and we don't want to bump the timestamp again.
+        if (isCompleted) return;
+        endedTimestamp.textContent = nowTimeText();
+        endedOverlay.classList.add('show');
+        markEnded();
       }
 
       function send(data) {
@@ -1389,8 +1578,27 @@
       streamContainer.focus();
 
       // Latency ping/pong: client measures RTT against its own clock.
+      // Doubles as the keepalive heartbeat — the pong watchdog below
+      // catches the "server died abruptly without sending a WS close"
+      // case (Ctrl+C from a parent process, uvicorn crash, OS kill,
+      // network cable yanked — anywhere ws.onclose doesn't fire).
       setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN || isCompleted) return;
+        // If we haven't heard a pong in too long, the WS is a zombie:
+        // alive from the browser's perspective but the other end is gone.
+        // Force the disconnected state so the operator stops trusting the
+        // last frame. lastPongTs is seeded at open and refreshed on each
+        // pong, so a value older than PONG_TIMEOUT_MS means the server
+        // has been unresponsive across multiple ping cycles.
+        if (lastPongTs !== null && Date.now() - lastPongTs > PONG_TIMEOUT_MS) {
+          streamConnected = false;
+          showEndedOverlay();
+          // Try to close the zombie so subsequent code paths treat it as
+          // a normal disconnect. Browsers may or may not actually deliver
+          // this on a half-open TCP — best effort.
+          try { ws.close(); } catch (_) {}
+          return;
+        }
         send({type: 'ping', ts: Date.now()});
       }, 2000);
 
