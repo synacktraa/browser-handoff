@@ -6,11 +6,9 @@ import asyncio
 import base64
 import json
 import logging
-import secrets
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
@@ -282,132 +280,6 @@ _NATIVE_INPUT_SHIM_JS = """
 """
 
 
-class _PassthroughActivityWatcher:
-    """Stealth activity tracker for passthrough-mode sessions.
-
-    In passthrough mode bh doesn't see the operator's raw input — events flow
-    operator → substrate viewer → CDP Input.dispatch → page, bypassing bh's
-    Python process entirely. To still gate LLMDetection on operator activity,
-    we observe the events at the page side, after the substrate has delivered
-    them. The injection has to be invisible to anti-bot scripts running on
-    the page; this watcher uses the same primitives as detection/element.py:
-
-      - A non-enumerable, randomly-named window property holds a Date.now()
-        stamp. Object.keys / for-in / JSON.stringify skip it; targeted probes
-        (`'name' in window`) can't find it without knowing the random suffix.
-      - Capture/passive listeners on operator-input events (mousedown,
-        keydown, wheel, scroll, touchstart, input, paste) update the stamp.
-        We deliberately do NOT watch DOM mutations here — on real sites
-        (carousels, ads, lazy images, analytics, animated CSS classes) the
-        page mutates constantly without the operator ever touching it,
-        which would unblock LLMDetection's gate and burn vision calls. The
-        only signal that matters is operator input; the substrate always
-        delivers it as a real DOM event for our listeners to catch.
-      - Python polls the stamp value via `page.evaluate(() => window[var])`;
-        when it advances, `session.operator_activity.bump()` is called.
-
-    Nothing of substance is added to the page's runtime: no CDP binding, no
-    function on window, no listener that calls preventDefault. The only
-    observable artifact is a single non-enumerable integer with a random
-    name, which is the minimum possible JS-side footprint.
-
-    Re-injection on framenavigated mirrors element.py's _PageWatcher — the
-    setup script is idempotent (returns if the property is already present)
-    so a fresh document gets a fresh listener set on the same name.
-    """
-
-    def __init__(
-        self,
-        session: HandoffSession,
-        loop: asyncio.AbstractEventLoop,
-        poll_interval: float = 0.25,
-    ) -> None:
-        self._session = session
-        self._loop = loop
-        self._poll_interval = poll_interval
-        self._var = f"__bh_{secrets.token_hex(8)}"
-        self._stop = asyncio.Event()
-        self._poll_task: asyncio.Task[None] | None = None
-        self._last_seen: int = 0
-        self._on_navigate: Callable[..., None] | None = None
-        self._installed = False
-
-    def _setup_js(self) -> str:
-        return (
-            "(() => {"
-            f"if (window.{self._var} !== undefined) return;"
-            f"Object.defineProperty(window, '{self._var}', "
-            "{value: 0, writable: true, enumerable: false, configurable: true});"
-            f"const mark = () => {{ window.{self._var} = Date.now(); }};"
-            # capture:true so we see the event before the page's own handlers
-            # get a chance to stopPropagation; passive:true is a hard promise
-            # to the browser we won't call preventDefault, which makes us
-            # functionally indistinguishable from non-existent for the page's
-            # own handlers. The set covers pointer/key/scroll input plus
-            # input/paste so substrate-relayed clipboard pastes (which may
-            # arrive as a value-change without a key event) also register.
-            "const opts = {capture: true, passive: true};"
-            "for (const e of ['mousedown','keydown','wheel','touchstart','scroll','input','paste']) {"
-            "  window.addEventListener(e, mark, opts);"
-            "}"
-            "})();"
-        )
-
-    async def install(self) -> None:
-        if self._installed:
-            return
-        page = self._session.page
-        # framenavigated re-injects the stealth setup on the new document.
-        # The handler closes over self so a single install() is enough; the
-        # re-inject path keeps running across navigations until shutdown().
-        def _handler(*_: Any) -> None:
-            if not self._stop.is_set():
-                self._loop.create_task(self._reinject())
-        self._on_navigate = _handler
-        page.on("framenavigated", _handler)
-        with suppress(Exception):
-            await page.evaluate(self._setup_js())
-        self._poll_task = self._loop.create_task(self._poll())
-        self._installed = True
-
-    async def _reinject(self) -> None:
-        with suppress(Exception):
-            await self._session.page.evaluate(self._setup_js())
-
-    async def _poll(self) -> None:
-        # `() => window[var]` rather than a property access expression so a
-        # missing var (e.g. mid-navigation, before re-inject lands) evaluates
-        # to undefined and falls back to 0 cleanly. We compare strict-greater
-        # so a Date.now() rollover doesn't fire on a stale read.
-        read_js = f"() => window.{self._var} || 0"
-        while not self._stop.is_set():
-            try:
-                ms = await self._session.page.evaluate(read_js)
-            except Exception:
-                ms = self._last_seen
-            if ms and ms > self._last_seen:
-                self._last_seen = ms
-                self._session.operator_activity.bump()
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self._poll_interval)
-            except asyncio.TimeoutError:
-                pass
-
-    async def shutdown(self) -> None:
-        if not self._installed:
-            return
-        self._stop.set()
-        if self._poll_task is not None:
-            self._poll_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await self._poll_task
-        if self._on_navigate is not None:
-            with suppress(Exception):
-                self._session.page.remove_listener("framenavigated", self._on_navigate)
-            self._on_navigate = None
-        self._installed = False
-
-
 class StreamingServer:
     """Server that manages streaming sessions for human intervention.
 
@@ -506,6 +378,13 @@ class StreamingServer:
                 return
 
             session_state.websockets.append(websocket)
+            # Single bump covers both signals: the timestamp that
+            # `state` reads from, and the one-shot connect event that
+            # Handoff.wait_for_completion's lazy-install gate awaits.
+            # accept() succeeded → operator's tab is up → presence is the
+            # right framing even before the first explicit `presence`
+            # message lands.
+            session_state.presence.bump()
 
             if session_state.is_passthrough:
                 try:
@@ -543,32 +422,21 @@ class StreamingServer:
                         msg_type = message.get("type")
 
                         try:
-                            # Bumping operator_activity on each routed event
-                            # is what lets detections (LLMDetection today)
-                            # gate work on operator presence + idleness
-                            # instead of page activity. Skipped for:
-                            #   - ping, copy_request, cut_request — passive
-                            #     reads, not real interaction
-                            #   - mousemove — hover is presence, not action;
-                            #     bumping every 16ms while the cursor sits
-                            #     in the viewer kept last_activity perpetually
-                            #     fresh and fired the LLM safety-net every
-                            #     max_interval (~30s) without the operator
-                            #     actually doing anything. Matches the
-                            #     passthrough watcher's listener set.
+                            # Activity tracking moved into LLMDetection's
+                            # unified in-page watcher: the operator's
+                            # input is routed via CDP into the page, fires
+                            # real DOM events, and the watcher's listeners
+                            # catch them — same code path as passthrough
+                            # mode. So this handler is back to being a
+                            # pure event router, no activity bookkeeping.
                             if msg_type == "mouse":
                                 await self._handle_mouse(cdp, message)
-                                if message.get("action") != "mousemove":
-                                    session_state.operator_activity.bump()
                             elif msg_type == "keyboard":
                                 await self._handle_keyboard(cdp, message)
-                                session_state.operator_activity.bump()
                             elif msg_type == "navigate":
                                 await self._handle_navigate(page, message)
-                                session_state.operator_activity.bump()
                             elif msg_type == "paste":
                                 await self._handle_paste(cdp, message)
-                                session_state.operator_activity.bump()
                             elif msg_type == "copy_request":
                                 text = await self._read_selection(page)
                                 with suppress(Exception):
@@ -610,6 +478,15 @@ class StreamingServer:
                                     await websocket.send_json(
                                         {"type": "pong", "ts": message.get("ts")}
                                     )
+                            elif msg_type == "presence":
+                                # Wrapper sends this every ~2s while the tab
+                                # is visible. Bumps presence so its `state`
+                                # stays "present" for the orchestration's
+                                # gate; when the operator closes the tab or
+                                # backgrounds it, the pings stop and the
+                                # state decays to "stale" within
+                                # freshness_threshold.
+                                session_state.presence.bump()
                         except Exception as e:
                             logger.error(f"Error handling {msg_type} event: {e}")
             except Exception as e:
@@ -722,18 +599,10 @@ class StreamingServer:
         # The initial screenshot + screencast pump only exist to feed the
         # streaming WS. In passthrough mode there's no streaming WS to feed
         # — frames flow operator <-> substrate directly via whatever
-        # transport the substrate's viewer uses.
-        if session.is_passthrough:
-            # In passthrough, install the stealth activity watcher so
-            # LLMDetection's gating still sees operator interaction even
-            # though the input never crosses bh's process. See
-            # _PassthroughActivityWatcher for the full design rationale.
-            session.passthrough_activity_watcher = _PassthroughActivityWatcher(
-                session, asyncio.get_running_loop()
-            )
-            with suppress(Exception):
-                await session.passthrough_activity_watcher.install()
-        else:
+        # transport the substrate's viewer uses. Activity tracking lives
+        # entirely inside LLMDetection's unified in-page watcher now, so
+        # the server has no setup to do for it in either mode.
+        if not session.is_passthrough:
             # Take initial screenshot as first frame so the page paints
             # immediately when a client connects, before screencast warms up.
             with suppress(Exception):
@@ -820,14 +689,19 @@ class StreamingServer:
                         # Operator clicked reload in the wrapper toolbar.
                         # Trigger page.reload() via Playwright; the resulting
                         # framenavigated will push url_changed back to all
-                        # WSes via _attach_url_tracker. No need to bump
-                        # operator_activity here — the navigation will
-                        # mutate the document and the in-page activity
-                        # watcher catches that automatically.
+                        # WSes via _attach_url_tracker.
                         try:
                             await page.reload()
                         except Exception as e:
                             logger.info("passthrough reload failed: %s", e)
+                    elif msg_type == "presence":
+                        # Wrapper sends this every ~2s while the tab is
+                        # visible. Bumps presence so its `state` stays
+                        # "present" for the orchestration's gate; when
+                        # the operator closes the tab the pings stop and
+                        # the state decays to "stale" within
+                        # freshness_threshold.
+                        session.presence.bump()
                     # Other types: ignored. Streaming-mode messages
                     # (mouse/keyboard/paste/etc.) don't apply here — the
                     # substrate owns input — and silently dropping them is
@@ -893,13 +767,6 @@ class StreamingServer:
 
         if session.capture_task and not session.capture_task.done():
             session.capture_task.cancel()
-        # Tear down the passthrough activity watcher (if installed); pulls
-        # down its poll task, removes the framenavigated listener, and leaves
-        # the page free of any further re-injection on navigation.
-        if session.passthrough_activity_watcher is not None:
-            with suppress(Exception):
-                await session.passthrough_activity_watcher.shutdown()
-            session.passthrough_activity_watcher = None
         # Cancel any in-flight ack/publish tasks (copy first — done callbacks
         # mutate the set as they finish).
         for task in list(session.background_tasks):
