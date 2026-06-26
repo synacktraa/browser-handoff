@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-
-from .operator_activity import OperatorActivity
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -15,6 +14,80 @@ if TYPE_CHECKING:
 
 # Default viewport size
 DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
+
+
+@dataclass
+class SessionPresence:
+    """Operator presence on a handoff session.
+
+    One primitive answers the two questions Handoff.wait_for_completion
+    needs to gate on:
+
+      * Has any operator opened the wrapper page yet? (`wait_until_connected`)
+      * Are they still there right now, or did they close the tab? (`state`)
+
+    Both signals are produced by the same wrapper-side heartbeat — a
+    `presence` message sent every ~2 seconds while the tab is visible. The
+    WS handler calls `bump()` on each one (and on first accept, implicitly).
+    Coalescing both signals into one primitive means callers don't have to
+    keep two events in sync — the first bump both records the timestamp
+    and flips the one-shot connect event.
+
+    `last_ping_ts` is a time.monotonic() timestamp (not wall-clock) so
+    freshness comparisons are immune to NTP jumps. The internal
+    `_connected` event is non-public on purpose — outside callers go
+    through `wait_until_connected()` so the contract stays "presence
+    primitive owns its own state machine."
+    """
+
+    last_ping_ts: float | None = None
+    # Wrapper sends presence every 2s while visible; 5s gives 2× cadence
+    # plus slack for transport jitter without making the gate sticky.
+    freshness_threshold: float = 5.0
+    _connected: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+
+    def bump(self) -> None:
+        """Record a presence ping and flip the connected gate on first call.
+
+        Idempotent on `_connected` (Event.set is itself idempotent, but
+        making the intent explicit reads cleaner). The first bump in a
+        session's life is the wrapper accepting the WS — that's also the
+        moment Handoff.wait_for_completion is allowed to install the
+        detection's listeners.
+        """
+        self.last_ping_ts = time.monotonic()
+        if not self._connected.is_set():
+            self._connected.set()
+
+    @property
+    def state(self) -> Literal["inactive", "present", "stale"]:
+        """Current presence state for the orchestration gate.
+
+        - "inactive": no wrapper has accepted the WS yet (no bump ever).
+        - "present":  a presence ping arrived within freshness_threshold.
+        - "stale":    wrapper connected once but pings dried up
+                      (operator closed the tab / backgrounded it / lost
+                      network).
+
+        Orchestration treats only "present" as "operator is here right
+        now, run the detection check." The three-state split matches the
+        vocabulary the wrapper UI uses client-side.
+        """
+        if self.last_ping_ts is None:
+            return "inactive"
+        if (time.monotonic() - self.last_ping_ts) <= self.freshness_threshold:
+            return "present"
+        return "stale"
+
+    async def wait_until_connected(self) -> None:
+        """Block until the first wrapper has connected (first `bump()`).
+
+        Returns immediately once any bump has happened. Used by
+        Handoff.wait_for_completion as the lazy-install gate — detection
+        listeners only register after the operator has authenticated via
+        the wrapper token, which closes the substrate-URL leak.
+        """
+        await self._connected.wait()
 
 
 @dataclass
@@ -58,18 +131,14 @@ class HandoffSession:
     websockets: list["WebSocket"] = field(default_factory=list)
     completed: bool = False
     completion_reason: str | None = None
-    # Source of truth for "has the operator touched this handoff yet, and
-    # when did they last interact?" — read by detections that opt into
-    # operator-driven gating via BaseDetection.bind(). The streaming server
-    # bumps this on each routed mouse/keyboard/paste/navigate event.
-    operator_activity: OperatorActivity = field(default_factory=OperatorActivity)
-    # In passthrough mode the operator's input never crosses the bh process
-    # (the substrate's viewer delivers it directly to the page via CDP),
-    # so we install a stealth in-page observer to keep activity gating
-    # working. The watcher's lifecycle is owned by the StreamingServer:
-    # install on register_session(passthrough), shutdown on unregister.
-    # Typed as Any here to avoid the import cycle with streaming.py.
-    passthrough_activity_watcher: Any = None
+    # Single source of truth for "has an operator opened the wrapper page
+    # and are they still there." Bumped by the WS handler on each accept
+    # and each `presence` message from the wrapper. Orchestration awaits
+    # `wait_until_connected()` before installing detection listeners (lazy
+    # install — closes the substrate-URL leak) and reads `state` in the
+    # completion callback so a detection scheduled to fire while the
+    # operator has wandered off doesn't burn the LLM call.
+    presence: SessionPresence = field(default_factory=SessionPresence)
     # Passthrough mode: when set, browser-handoff skips its own CDP screencast
     # and instead embeds the substrate's own viewer URL inside a thin wrapper
     # template. browser-handoff keeps the detection + notification + lifecycle
