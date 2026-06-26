@@ -67,7 +67,7 @@ class UrlDetection(BaseDetection):
 
         return cleanup
 
-    async def check(self, page: "Page") -> DetectionResult:
+    async def check(self, page: "Page", **context: Any) -> DetectionResult:
         """Check if current URL matches conditions."""
         try:
             url = page.url

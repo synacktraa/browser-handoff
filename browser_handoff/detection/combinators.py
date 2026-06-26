@@ -10,8 +10,6 @@ from .base import BaseDetection, DetectionResult
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
-    from ..server.session import HandoffSession
-
 
 _AND_HEADER = "Matched conditions:\n"
 _AND_BULLET = "• "
@@ -48,11 +46,6 @@ class AllDetection(BaseDetection):
     detection_type: str = field(default="all", init=False)
     conditions: list[BaseDetection] = field(default_factory=list)
 
-    def bind(self, *, session: "HandoffSession | None" = None) -> None:
-        """Forward to each child so nested LLMDetections still get gated."""
-        for condition in self.conditions:
-            condition.bind(session=session)
-
     def register_listeners(
         self,
         page: "Page",
@@ -84,11 +77,11 @@ class AllDetection(BaseDetection):
 
         return cleanup_all
 
-    async def check(self, page: "Page") -> DetectionResult:
+    async def check(self, page: "Page", **context: Any) -> DetectionResult:
         """Check if ALL conditions are met."""
         child_reasons: list[str] = []
         for condition in self.conditions:
-            result = await condition.check(page)
+            result = await condition.check(page, **context)
             if not result.matched:
                 return DetectionResult(
                     matched=False,
@@ -137,11 +130,6 @@ class AnyDetection(BaseDetection):
     detection_type: str = field(default="any", init=False)
     conditions: list[BaseDetection] = field(default_factory=list)
 
-    def bind(self, *, session: "HandoffSession | None" = None) -> None:
-        """Forward to each child so nested LLMDetections still get gated."""
-        for condition in self.conditions:
-            condition.bind(session=session)
-
     def register_listeners(
         self,
         page: "Page",
@@ -173,10 +161,10 @@ class AnyDetection(BaseDetection):
 
         return cleanup_all
 
-    async def check(self, page: "Page") -> DetectionResult:
+    async def check(self, page: "Page", **context: Any) -> DetectionResult:
         """Check if ANY condition is met."""
         for condition in self.conditions:
-            result = await condition.check(page)
+            result = await condition.check(page, **context)
             if result.matched:
                 return DetectionResult(
                     matched=True,
@@ -213,11 +201,6 @@ class NotDetection(BaseDetection):
     detection_type: str = field(default="not", init=False)
     condition: BaseDetection | None = None
 
-    def bind(self, *, session: "HandoffSession | None" = None) -> None:
-        """Forward to the wrapped child so a nested LLMDetection still gets gated."""
-        if self.condition is not None:
-            self.condition.bind(session=session)
-
     def register_listeners(
         self,
         page: "Page",
@@ -238,7 +221,7 @@ class NotDetection(BaseDetection):
 
         return self.condition.register_listeners(page, on_child_event)
 
-    async def check(self, page: "Page") -> DetectionResult:
+    async def check(self, page: "Page", **context: Any) -> DetectionResult:
         """Check if condition is NOT met."""
         if self.condition is None:
             return DetectionResult(
@@ -247,7 +230,7 @@ class NotDetection(BaseDetection):
                 reason="No condition to negate",
             )
 
-        result = await self.condition.check(page)
+        result = await self.condition.check(page, **context)
 
         if result.matched:
             return DetectionResult(

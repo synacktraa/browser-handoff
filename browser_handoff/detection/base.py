@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
-    from ..server.session import HandoffSession
-
 
 @dataclass
 class DetectionResult:
@@ -26,31 +24,17 @@ class DetectionResult:
 
 
 class BaseDetection(ABC):
-    """Abstract base class for all detection types."""
+    """Abstract base class for all detection types.
+
+    Detections are session-unaware. They take only `(page, callback)` for
+    `register_listeners` and `(page, **context)` for `check` — orchestration
+    (Handoff.wait_for_completion) owns all session-aware decisions
+    (presence gate, lazy install, etc.). This keeps detections drivable
+    standalone (tests, ad-hoc scripts) and prevents the watcher from being
+    coupled to handoff state.
+    """
 
     detection_type: str = "base"
-
-    def bind(self, *, session: "HandoffSession | None" = None) -> None:
-        """Receive the per-handoff session before register_listeners runs.
-
-        Called by Handoff.wait_for_completion immediately after a session is
-        registered. Default is a no-op — cheap, page-driven detections
-        (URL/Element/Content) don't need anything from the session.
-
-        Subclasses override to read whatever they need: LLMDetection picks
-        up `session.operator_activity` (gate vision calls on operator
-        presence, not page noise) and `session.reason` (the trigger-time
-        explanation the agent gave the human, which is much more
-        informative for the model than the bare `condition` alone — the
-        condition is often the agent's over-specific guess at the resume
-        state, while reason names the actual task). Combinator detections
-        forward bind() to their children so a nested LLMDetection still
-        sees the session.
-
-        Detections used standalone (no Handoff) simply never have bind()
-        called and fall back to their pre-bound behavior.
-        """
-        return
 
     @abstractmethod
     def register_listeners(
@@ -70,11 +54,16 @@ class BaseDetection(ABC):
         pass
 
     @abstractmethod
-    async def check(self, page: "Page") -> DetectionResult:
+    async def check(self, page: "Page", **context: Any) -> DetectionResult:
         """Check if detection condition is met.
 
         Args:
             page: The Playwright page to check.
+            **context: Per-call orchestration context. Most detections
+                ignore this; LLMDetection reads `reason` (the operator-
+                facing explanation the agent gave) to ground its prompt
+                — much more informative than the bare condition alone.
+                Combinators forward kwargs to their children unchanged.
 
         Returns:
             DetectionResult indicating whether condition was matched.
