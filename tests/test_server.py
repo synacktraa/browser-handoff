@@ -468,63 +468,113 @@ class TestPassthroughNotifications:
         assert sent == [{"type": "task_cancelled"}]
 
 
-class TestPassthroughActivityWatcher:
-    """The stealth in-page activity watcher's lifecycle invariants.
+class TestLLMActivitySetupJS:
+    """The stealth in-page activity JS used by LLMDetection's unified watcher.
 
-    Functional behavior (DOM-mutation/input event observation) needs a real
-    page and is covered by integration tests; these check the install/
-    shutdown state machine and the JS shape.
+    The same setup script is the only operator-activity signal in both
+    streaming and passthrough modes after the watcher refactor — owned by
+    LLMDetection, mode-agnostic. These pin the JS shape; functional
+    in-browser behavior is in tests/integration/test_llm_activity.py.
     """
 
-    async def _watcher(self):
-        from browser_handoff.server.streaming import _PassthroughActivityWatcher
+    def test_setup_js_uses_non_enumerable_property(self):
+        # Stealth claim: site JS that walks window must not see the stamp.
+        from browser_handoff.detection.llm import _activity_setup_js
 
-        # Watcher only touches the page during install/shutdown; the bare
-        # session's page=object() is fine for the state-machine tests below.
-        # Async helper so asyncio.get_running_loop() resolves the loop
-        # pytest-asyncio set up for the test (no deprecation warning, no
-        # falling back to get_event_loop()).
-        session = _bare_session(stream_url="https://substrate/viewer")
-        return _PassthroughActivityWatcher(session, asyncio.get_running_loop())
-
-    async def test_setup_js_uses_non_enumerable_property(self):
-        # The whole stealth claim hinges on this: site JS that walks
-        # window must not see our stamp. Verify the injected JS uses
-        # Object.defineProperty with enumerable:false.
-        w = await self._watcher()
-        js = w._setup_js()
+        js = _activity_setup_js("__bh_abc123")
         assert "Object.defineProperty(window," in js
         assert "enumerable: false" in js
-        # And random, per-watcher name (no fixed bh_* string that detection
-        # scripts could probe by name).
-        assert w._var.startswith("__bh_")
-        assert len(w._var) > len("__bh_")  # has a random suffix
 
-    async def test_setup_js_attaches_only_input_listeners(self):
-        # Capture+passive input listeners — same stealth pattern as
-        # detection/element.py and detection/llm.py, minus the
-        # MutationObserver: page-driven DOM mutations (carousels, ads,
-        # analytics, re-renders) would otherwise constantly unblock
-        # LLMDetection without the operator ever touching the page.
-        w = await self._watcher()
-        js = w._setup_js()
+    def test_setup_js_attaches_only_input_listeners(self):
+        # Capture+passive input listeners — same stealth pattern that used
+        # to live in _PassthroughActivityWatcher. No MutationObserver:
+        # page-driven DOM mutations (carousels, ads, analytics, re-renders)
+        # would otherwise constantly unblock LLMDetection without the
+        # operator ever touching the page. No mousemove: hover is presence,
+        # not action.
+        from browser_handoff.detection.llm import _activity_setup_js
+
+        js = _activity_setup_js("__bh_abc123")
         assert "MutationObserver" not in js
         assert "addEventListener" in js
         assert "capture: true" in js
         assert "passive: true" in js
-        # Events that signal real operator activity (mousemove deliberately
-        # excluded — substrate viewers forward hover and we'd unblock on
-        # passive presence). input/paste cover substrate-relayed clipboard
-        # pastes that arrive as a value-change without a key event.
         for ev in (
             "mousedown", "keydown", "wheel", "touchstart", "scroll",
             "input", "paste",
         ):
             assert ev in js
+        assert "mousemove" not in js
 
-    async def test_shutdown_before_install_is_noop(self):
-        w = await self._watcher()
-        # Never installed; shutdown must not raise or touch the page.
-        await w.shutdown()
-        assert w._installed is False
-        assert w._poll_task is None
+
+class TestSessionPresence:
+    """The presence primitive that gates orchestration's callback.
+
+    Owned by HandoffSession, bumped on each `presence` message from the
+    wrapper (and on first accept). Handoff.wait_for_completion awaits
+    `wait_until_connected()` before installing detection listeners and
+    reads `state` before calling detection.check — so a detection
+    scheduled to fire while the operator has wandered off doesn't burn
+    the LLM call.
+    """
+
+    def test_starts_inactive(self):
+        from browser_handoff.server import SessionPresence
+
+        p = SessionPresence()
+        assert p.last_ping_ts is None
+        assert p.state == "inactive"
+        # _connected is internal but worth pinning here — a fresh
+        # presence must NOT be set, otherwise wait_until_connected
+        # would skip the gate.
+        assert p._connected.is_set() is False
+
+    def test_bump_makes_present_and_flips_connected(self):
+        from browser_handoff.server import SessionPresence
+
+        p = SessionPresence(freshness_threshold=1.0)
+        p.bump()
+        assert p.last_ping_ts is not None
+        assert p.state == "present"
+        assert p._connected.is_set() is True
+
+    def test_state_decays_to_stale_past_threshold(self):
+        from browser_handoff.server import SessionPresence
+
+        p = SessionPresence(freshness_threshold=0.05)
+        p.bump()
+        assert p.state == "present"
+        time.sleep(0.1)
+        assert p.state == "stale"
+        # But the connected gate stays open — first-connect is a one-shot,
+        # not a freshness signal. Re-bumping doesn't have to happen for
+        # wait_until_connected to keep returning immediately.
+        assert p._connected.is_set() is True
+
+    async def test_wait_until_connected_blocks_then_returns(self):
+        import asyncio
+        from browser_handoff.server import SessionPresence
+
+        p = SessionPresence()
+        waiter = asyncio.create_task(p.wait_until_connected())
+        await asyncio.sleep(0.02)
+        assert not waiter.done(), "should block until first bump"
+        p.bump()
+        await asyncio.wait_for(waiter, timeout=0.5)
+
+    async def test_wait_until_connected_returns_immediately_after_bump(self):
+        from browser_handoff.server import SessionPresence
+
+        p = SessionPresence()
+        p.bump()
+        await asyncio.wait_for(p.wait_until_connected(), timeout=0.1)
+
+
+class TestHandoffSessionPresenceField:
+    """HandoffSession defaults a SessionPresence so callers don't have to."""
+
+    def test_session_starts_with_default_presence(self):
+        session = _bare_session()
+        assert session.presence.last_ping_ts is None
+        assert session.presence.state == "inactive"
+        assert session.presence._connected.is_set() is False
