@@ -1582,6 +1582,13 @@
       // catches the "server died abruptly without sending a WS close"
       // case (Ctrl+C from a parent process, uvicorn crash, OS kill,
       // network cable yanked — anywhere ws.onclose doesn't fire).
+      //
+      // Same interval doubles as the wrapper-presence ping: a `presence`
+      // message tells the server "operator's tab is still up" so the
+      // session's presence stays "present" for the orchestration gate.
+      // Only sent while the tab is actually visible — a backgrounded
+      // tab is presence-absent and the gate should close so vision
+      // calls don't fire against someone who walked away.
       setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN || isCompleted) return;
         // If we haven't heard a pong in too long, the WS is a zombie:
@@ -1600,6 +1607,9 @@
           return;
         }
         send({type: 'ping', ts: Date.now()});
+        if (document.visibilityState === 'visible') {
+          send({type: 'presence'});
+        }
       }, 2000);
 
       // Boot in 'connecting' until the first frame paints.
