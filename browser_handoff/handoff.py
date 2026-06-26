@@ -145,6 +145,39 @@ async def _capture_crop_metrics(
     return None
 
 
+def _detection_tree_has_llm(detection: BaseDetection) -> bool:
+    """Recursive walk: does this detection (or any nested child) use LLM?
+
+    Handles the three shapes any current detection can have:
+      - leaf detection: isinstance check decides directly.
+      - single-inner combinator (NotDetection): inspect `.condition`.
+      - multi-inner combinator (AllDetection/AnyDetection): inspect
+        `.conditions`.
+
+    Used in two places:
+      - Handoff.run() rejects a scenario whose trigger tree contains an
+        LLMDetection. Trigger-mode LLM is broken (no operator yet, no
+        reason context, MutationObserver-driven page noise) and the
+        explicit reject names the scenario so users notice.
+      - Handoff.wait_for_completion() skips its initial check when `on`
+        is LLM-shaped — vision calls before the wrapper is even loaded
+        are wasted, and the wrapper-presence gate inside the gated
+        callback wouldn't pass anyway.
+    """
+    # Avoid an import cycle: llm module imports from detection.base which
+    # is imported here. Lazy-import is fine; the function is hot-path
+    # adjacent (called once per run/wait, not per check).
+    from .detection.llm import LLMDetection
+
+    if isinstance(detection, LLMDetection):
+        return True
+    if (inner := getattr(detection, "condition", None)) is not None:
+        return _detection_tree_has_llm(inner)
+    if (inners := getattr(detection, "conditions", None)) is not None:
+        return any(_detection_tree_has_llm(c) for c in inners)
+    return False
+
+
 @dataclass
 class HandoffResult:
     """Outcome of a Handoff.run() call.
@@ -354,6 +387,23 @@ class Handoff:
                 "wait_for_completion()."
             )
 
+        # LLMDetection in a trigger tree is a misuse: there's no operator
+        # yet to ground "did they finish", no reason for the prompt, and
+        # the only signal would be page DOM noise — which produces a
+        # vision-call-per-mutation hot loop on real sites. Reject with a
+        # clear message naming the scenario so the user can fix the
+        # scenario, not chase a vague runtime symptom later. Walk the
+        # trigger tree to catch combinator nesting.
+        for scenario in scenarios:
+            if _detection_tree_has_llm(scenario.trigger):
+                raise TypeError(
+                    f"Scenario {scenario.name!r} uses LLMDetection in its "
+                    "trigger (possibly nested inside a combinator). "
+                    "LLMDetection is only valid as a completion check via "
+                    "Handoff.wait_for_completion (or as Scenario.complete). "
+                    "Use URL/Element/Content detections for triggers."
+                )
+
         trigger_event = asyncio.Event()
         matched_scenario: Scenario | None = None
         matched_result: DetectionResult | None = None
@@ -461,11 +511,34 @@ class Handoff:
         completion_event = asyncio.Event()
         completion_reason: str | None = None
 
+        # Captured here so the gated callback below (defined before the
+        # session exists) can read the session through this closure cell
+        # once register_session has returned. Without this hop the
+        # callback would need session passed in explicitly, which forces
+        # a re-bind on every fire.
+        session_ref: dict[str, Any] = {"session": None}
+
         async def on_completion_detected(detection: BaseDetection) -> None:
             nonlocal completion_reason
             if completion_event.is_set():
                 return
-            result = await detection.check(page)
+            session = session_ref["session"]
+            # Wrapper-presence gate: the watcher inside LLMDetection
+            # fires on its own schedule (idle-settle + safety-net), so
+            # by the time it calls back the operator may have closed
+            # the tab. Skipping here saves the LLM call. Other
+            # detections (URL/Element/Content) are cheap, but routing
+            # them through the same gate keeps the orchestration model
+            # consistent — completion shouldn't be reported against a
+            # session with no operator present.
+            if session is not None and session.presence.state != "present":
+                return
+            # `reason` is what LLMDetection needs to ground its prompt;
+            # other detections accept and ignore via **context. The
+            # session.reason is the same string the operator sees in the
+            # wrapper header, so it's the right framing for the model.
+            ctx_reason = session.reason if session is not None else reason
+            result = await detection.check(page, reason=ctx_reason)
             if result.matched:
                 completion_reason = result.reason
                 completion_event.set()
@@ -503,17 +576,7 @@ class Handoff:
                 stream_url=stream_url,
                 crop_metrics=crop_metrics,
             )
-
-            # Bind the per-handoff session before register_listeners so
-            # detections that want session context (LLMDetection reads
-            # operator_activity for watch-loop gating and reason for the
-            # prompt) can wire up against it. Cheap detections
-            # (URL/Element/Content) ignore the binding.
-            on.bind(session=session)
-
-            listener_cleanups.append(
-                on.register_listeners(page, on_completion_detected)
-            )
+            session_ref["session"] = session
 
             operator_url = server.get_operator_url(session_id)
 
@@ -527,14 +590,37 @@ class Handoff:
             await self._send_notifications(reason, operator_url)
 
             # Already complete? (e.g. page raced past completion before we
-            # finished setting up listeners.)
-            initial = await on.check(page)
-            if initial.matched:
-                completion_reason = initial.reason
-                completion_event.set()
+            # finished setting up listeners.) Run as a cheap check for the
+            # non-LLM paths (URL/Element/Content). LLM completion is not
+            # initial-eligible (would burn a vision call before the
+            # wrapper is even loaded), so skip the initial probe when `on`
+            # is LLM-shaped.
+            if not _detection_tree_has_llm(on):
+                initial = await on.check(page, reason=reason)
+                if initial.matched:
+                    completion_reason = initial.reason
+                    completion_event.set()
 
+            # Lazy install: defer detection.register_listeners until an
+            # operator has actually opened the wrapper. Closes the
+            # substrate-URL leak — anyone reaching the substrate viewer
+            # URL directly can no longer drive vision calls, because the
+            # in-page watcher only installs after wrapper auth via
+            # access_token. session_timeout bounds the wait so "operator
+            # never showed up" still terminates the handoff cleanly.
             timed_out = False
             try:
+                if not completion_event.is_set():
+                    await asyncio.wait_for(
+                        session.presence.wait_until_connected(),
+                        timeout=self.server.session_timeout,
+                    )
+
+                if not completion_event.is_set():
+                    listener_cleanups.append(
+                        on.register_listeners(page, on_completion_detected)
+                    )
+
                 await asyncio.wait_for(
                     completion_event.wait(),
                     timeout=self.server.session_timeout,
