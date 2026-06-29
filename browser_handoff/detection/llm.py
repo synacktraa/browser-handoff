@@ -137,8 +137,11 @@ class LLMDetection(BaseDetection):
     max_interval: float = 30.0
 
     # How often the loop polls the JS activity stamp. Cheap (reads a number),
-    # so this is small; not a public knob.
-    _poll_interval: float = field(default=0.5, init=False, repr=False)
+    # so this is small; not a public knob. 0.25s matches the previous
+    # passthrough watcher's cadence — at 0.5s the perceived idle wait
+    # after an input event lagged the configured idle_seconds by an
+    # extra poll period.
+    _poll_interval: float = field(default=0.25, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Verify litellm is importable at construction time.
