@@ -869,8 +869,8 @@
       const connectionPill = document.getElementById('connection-pill');
       const connectionLabel = document.getElementById('connection-label');
 
-      // Show more / Show less for long reasons. Same overflow-detect + dropdown
-      // pattern as the streaming-mode template.
+      // Show more / Show less for long reasons (see intervention.html
+      // for the shared pattern).
       function checkReasonOverflow() {
         const overflows = headerReasonEl.scrollWidth > headerReasonEl.clientWidth + 1;
         reasonWrap.classList.toggle('truncated', overflows);
@@ -910,23 +910,20 @@
         document.fonts.ready.then(checkReasonOverflow);
       }
 
-      // Status WebSocket — lightweight protocol, no frames, no input. The
-      // server sends lifecycle events (ready, url_changed, task_completed,
-      // task_expired, task_cancelled) and accepts reload requests for the
-      // operator-toolbar reload button. No auto-reconnect: any close that
-      // isn't preceded by a bh-driven end event goes straight to the
-      // ended-overlay card. Same model as streaming-mode intervention.html
-      // — symmetric across modes so the operator sees one terminal UX.
+      // Status-only WebSocket: server pushes lifecycle (ready,
+      // url_changed, task_completed, task_expired, task_cancelled);
+      // client sends reload + presence. No auto-reconnect — any close
+      // without a prior bh-driven end event goes straight to the
+      // ended-overlay card (same terminal UX as streaming mode).
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const WS_URL = `${wsProtocol}//${window.location.host}/ws?t=${ACCESS_TOKEN}`;
       let ws = null;
 
-      let isTerminal = false;  // completed / expired / ended — stop reacting to WS events
+      let isTerminal = false;  // completed / expired / ended → stop reacting
 
       function setConnectionState(state) {
-        // Only two real states left: 'connecting' (pre-open) and 'live'
-        // (post-open). Any unrecoverable drop hides the pill via
-        // markTerminal — no 'disconnected' intermediate.
+        // Two states: 'connecting' (pre-open) and 'live' (post-open).
+        // Any unrecoverable drop hides the pill via markTerminal.
         if (isTerminal) return;
         connectionPill.classList.remove('connecting');
         if (state === 'connecting') {
@@ -959,11 +956,10 @@
         markTerminal();
       }
 
-      // bh-driven session end. The substrate's stream keeps running inside
-      // the iframe — independent of bh — so we MUST stop showing it,
-      // otherwise the operator can keep interacting with a page bh no
-      // longer owns. Swap the iframe for the captured screenshot and show
-      // the appropriate card (expired vs ended).
+      // bh-driven session end. The substrate's iframe stream survives
+      // bh teardown — we MUST swap it out so the operator can't keep
+      // interacting with a page bh no longer owns. Stage shows the
+      // captured screenshot + the appropriate end card.
       function showExpiredOverlay(screenshot) {
         if (screenshot) fallbackScreenshot.src = screenshot;
         expiredTimestamp.textContent = nowTimeText();
@@ -972,9 +968,8 @@
         markTerminal();
       }
       function showEndedOverlay(screenshot) {
-        // Idempotent: ws.onclose may fire right after a task_cancelled
-        // message landed (or vice versa), and we don't want to bump the
-        // timestamp or stack overlays.
+        // Idempotent — ws.onclose may fire right after task_cancelled
+        // (or vice versa); don't bump the timestamp or stack overlays.
         if (isTerminal) return;
         if (screenshot) fallbackScreenshot.src = screenshot;
         endedTimestamp.textContent = nowTimeText();
@@ -1009,9 +1004,8 @@
         } else if (message.type === 'task_expired') {
           showExpiredOverlay(message.screenshot);
         } else if (message.type === 'task_cancelled') {
-          // Server still distinguishes cancellation from a connection
-          // drop, but the operator sees one "Session ended" card either
-          // way — the cause isn't actionable for them.
+          // One "Session ended" card whether the server sent cancelled
+          // or the WS just dropped — the cause isn't actionable here.
           showEndedOverlay(message.screenshot);
         }
       };
@@ -1023,10 +1017,9 @@
 
       ws.onclose = () => {
         if (isTerminal) return;
-        // No bh-driven end event arrived before the close, so the server
-        // is gone (process died, network dropped, crash). Match streaming
-        // mode: surface the terminal card immediately rather than sitting
-        // on a misleading "Reconnecting" sweep that never reconnects.
+        // No clean end event landed before close → the server is gone.
+        // Surface the terminal card immediately instead of waiting on
+        // a "Reconnecting" sweep that never reconnects.
         showEndedOverlay();
       };
 
@@ -1036,10 +1029,10 @@
         }
       }
 
-      // Wrapper-presence heartbeat. The server's orchestration uses these
-      // pings to gate detection.check calls behind "is the operator still
-      // here." Only sent while the tab is visible so a backgrounded tab
-      // closes the gate within freshness_threshold (~5s).
+      // 2s presence heartbeat — keeps the server's orchestration gate
+      // "present" while the tab is visible. A backgrounded tab stops
+      // pinging, the gate decays to "stale" within ~5s, and detection
+      // checks pause until the operator's back.
       setInterval(() => {
         if (!ws || ws.readyState !== WebSocket.OPEN || isTerminal) return;
         if (document.visibilityState === 'visible') {
@@ -1050,8 +1043,7 @@
       reloadBtn.onclick = () => {
         if (isTerminal) return;
         reloadBtn.classList.add('spinning');
-        // Drop the spinner after 2s regardless — covers stalled reloads
-        // or slow round-trips through the substrate.
+        // Drop the spinner after 2s regardless — covers stalled reloads.
         setTimeout(() => reloadBtn.classList.remove('spinning'), 2000);
         send({type: 'reload'});
       };
@@ -1061,19 +1053,16 @@
         if (e.target === helpOverlay) helpOverlay.classList.remove('show');
       });
 
-      // Focus-conditional shortcuts. When focus is on the iframe the substrate
-      // owns all key handling (browser passes keys to the cross-origin frame;
-      // we never see them). When focus is anywhere else in the wrapper (the
-      // toolbar, the URL bar, the help overlay, anywhere outside the iframe)
-      // our handlers run for `?` and `Esc` only — substrate-related shortcuts
-      // (Ctrl+V/C/X/A) are not relevant here since the substrate has its own
-      // clipboard model.
+      // Focus-conditional shortcuts. When focus is on the iframe the
+      // substrate owns every key (cross-origin frames don't surface
+      // events to us). Anywhere else in the wrapper, we handle `?` and
+      // `Esc` only — the substrate has its own clipboard model so
+      // Ctrl+V/C/X/A aren't relevant here.
       //
-      // Operator activity tracking is NOT done from this wrapper. Cross-origin
-      // restrictions block us from seeing any event that targets the iframe
-      // (which is most operator input). Instead LLMDetection installs a
-      // stealth in-page observer on the underlying page that sees events
-      // directly, after the substrate has delivered them via CDP Input.dispatch.
+      // Operator activity tracking is NOT done here. Cross-origin
+      // restrictions hide iframe-targeted events from us; LLMDetection
+      // observes those events on the underlying page via its in-page
+      // watcher, after the substrate dispatches them through CDP.
       document.onkeydown = (e) => {
         if (document.activeElement === iframe) return;
 

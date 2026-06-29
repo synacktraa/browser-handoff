@@ -48,21 +48,19 @@ from browser_handoff import Handoff, Scenario, ServerConfig
 from browser_handoff.detection import Detection
 from browser_handoff.notifiers import DiscordNotifier, Notifier
 
-# Silence the library's INFO chatter (mouse events, framenavigated, screencast
-# frames). Rich panels surface every milestone the operator actually needs.
+# Silence library INFO chatter; the Rich panels carry every operator-visible milestone.
 logging.basicConfig(level=logging.WARNING)
 
-# force_terminal=True so ANSI escapes still get emitted when stdout is a pipe
-# (which is exactly what happens inside a Daytona sandbox). The pipe receiver
-# — your local terminal, via `in_daytona.py`'s tail — renders them as colors.
+# force_terminal so ANSI escapes survive being piped — a Daytona sandbox
+# tail forwards them to the local terminal as colors.
 console = Console(force_terminal=True)
 
 STREAMING_PORT = 8080
 
 
 def _mask(value: str, keep: int = 14) -> str:
-    """Show first `keep` chars then an ellipsis — enough to identify a token
-    by prefix without leaking the secret bit."""
+    """Show the first `keep` chars then an ellipsis — enough to identify
+    the token by prefix without leaking the secret."""
     s = str(value)
     if len(s) <= keep:
         return s
@@ -75,8 +73,8 @@ def _format_value(key: str, value: Any) -> str:
         return _mask(value)
     if isinstance(value, list):
         return ", ".join(str(v) for v in value)
-    # Epoch-ms timestamps are far more readable as an ISO datetime — keep
-    # the raw value visible too so it's still copy-pasteable.
+    # Render epoch-ms timestamps as ISO too; keep the raw value visible
+    # so it's still copy-pasteable.
     if (
         isinstance(value, (int, float))
         and not isinstance(value, bool)
@@ -108,9 +106,7 @@ def _credentials_panel(result: dict[str, Any]) -> Panel:
 
 async def run_claude_oauth(public_base: str | None = None) -> dict[str, Any]:
     async def capture_code(authorize_url: str, server: CallbackServer) -> str:
-        # If DISCORD_WEBHOOK_URL is set, use it; otherwise leave the list
-        # empty and browser-handoff will fall back to its built-in
-        # ConsoleNotifier (rich panel with the stream URL).
+        # Empty list → bh falls back to its built-in ConsoleNotifier.
         notifiers: list[Notifier] = []
         if webhook := os.getenv("DISCORD_WEBHOOK_URL"):
             notifiers.append(
@@ -125,9 +121,8 @@ async def run_claude_oauth(public_base: str | None = None) -> dict[str, Any]:
                     complete=Detection.url(path_contains=["/oauth/authorize"]),
                 ),
             ],
-            # 0.0.0.0 so the stream is reachable from a phone over LAN, an
-            # ngrok tunnel, or a Daytona preview URL — `public_base`, when
-            # set, replaces what gets printed in logs and pushed to notifiers.
+            # Bind 0.0.0.0 for LAN / tunnel / sandbox reachability;
+            # public_base overrides the URL printed in logs and notifiers.
             server=ServerConfig(
                 host="0.0.0.0",
                 port=STREAMING_PORT,
@@ -150,10 +145,9 @@ async def run_claude_oauth(public_base: str | None = None) -> dict[str, Any]:
                     console.print("[cyan]→[/cyan] Opening authorize URL")
                     await page.goto(authorize_url, wait_until="domcontentloaded")
 
-                    # Fresh profile → claude.ai redirects /oauth/authorize → /login.
-                    # handoff.run catches the redirect via framenavigated, fires
-                    # the notifiers (rich panel + Discord), and returns once the
-                    # human lands back on /oauth/authorize.
+                    # Fresh profile → claude.ai bounces /oauth/authorize → /login.
+                    # The Login scenario fires, the human signs in, and run()
+                    # returns once they land back on /oauth/authorize.
                     result = await handoff.run(page, timeout=30)
                     if result.was_blocked:
                         if result.timed_out:
@@ -176,9 +170,8 @@ async def run_claude_oauth(public_base: str | None = None) -> dict[str, Any]:
                     await btn.wait_for(state="visible", timeout=60_000)
                     await btn.click()
 
-                    # claude.ai redirects to localhost:<port>/callback?code=...
-                    # ccauth's CallbackServer is already listening on that port —
-                    # wait_for_code() blocks until the redirect arrives.
+                    # claude.ai redirects to localhost:<port>/callback?code=…
+                    # ccauth's CallbackServer is already listening there.
                     code = await asyncio.to_thread(server.wait_for_code, 300)
                     console.print("[green]✓[/green] OAuth callback captured")
                     return code

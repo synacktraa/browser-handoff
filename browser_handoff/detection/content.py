@@ -15,12 +15,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class ContentDetection(BaseDetection):
-    """Detection based on page title or body content.
+    """Match on page title or full-document body content.
 
-    Triggers on: page.on("domcontentloaded")
+    Fires on `domcontentloaded`. Each clause is OR within its kind
+    (any title_contains hit, any body_matches hit, …); a single hit
+    across any clause is a match.
 
     Example:
-        detection = ContentDetection(
+        ContentDetection(
             title_contains=["Sign In", "Login Required"],
             body_contains=["please enter your password"],
         )
@@ -34,7 +36,6 @@ class ContentDetection(BaseDetection):
     body_matches: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        # Pre-compile regex patterns
         self._title_patterns = [re.compile(p) for p in self.title_matches]
         self._body_patterns = [re.compile(p) for p in self.body_matches]
 
@@ -43,7 +44,15 @@ class ContentDetection(BaseDetection):
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
-        """Register domcontentloaded listener."""
+        """Fire the callback on every `domcontentloaded`.
+
+        Args:
+            page: Playwright page to observe.
+            callback: Async function invoked with `self` after each load.
+
+        Returns:
+            A cleanup function that removes the listener.
+        """
         loop = asyncio.get_running_loop()
 
         async def on_dom_content_loaded() -> None:
@@ -61,7 +70,12 @@ class ContentDetection(BaseDetection):
         return cleanup
 
     async def check(self, page: "Page", **context: Any) -> DetectionResult:
-        """Check if page content matches any conditions."""
+        """Return a match on the first clause that hits title or body.
+
+        Args:
+            page: Playwright page to inspect.
+            **context: Unused.
+        """
         try:
             title = await page.title()
             body = await page.content()
@@ -72,8 +86,8 @@ class ContentDetection(BaseDetection):
                 reason=f"Failed to get page content: {e}",
             )
 
-        # Each success names the user-configured clause that fired so the
-        # operator can see which rule was responsible for the trigger.
+        # Name the matching clause in `reason` so logs/notifications
+        # surface which rule fired.
         for pattern in self.title_contains:
             if pattern in title:
                 return DetectionResult(
@@ -117,7 +131,6 @@ class ContentDetection(BaseDetection):
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         result: dict[str, Any] = {"type": self.detection_type}
         if self.title_contains:
             result["title_contains"] = self.title_contains
@@ -131,7 +144,6 @@ class ContentDetection(BaseDetection):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ContentDetection":
-        """Create from dictionary."""
         return cls(
             title_contains=data.get("title_contains", []),
             title_matches=data.get("title_matches", []),

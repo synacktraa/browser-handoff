@@ -16,12 +16,12 @@ if TYPE_CHECKING:
 
 @dataclass
 class UrlDetection(BaseDetection):
-    """Detection based on URL components.
+    """Match on URL components (scheme, host, path, query).
 
-    Triggers on: page.on("framenavigated")
+    All configured clauses are AND. Fires on main-frame navigation.
 
     Example:
-        detection = UrlDetection(
+        UrlDetection(
             host_equals=["localhost", "accounts.google.com"],
             path_matches=["/callback"],
             query_contains=["code="],
@@ -38,7 +38,6 @@ class UrlDetection(BaseDetection):
     query_contains: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        # Pre-compile path regex patterns
         self._path_patterns = [re.compile(p) for p in self.path_matches]
 
     def register_listeners(
@@ -46,16 +45,22 @@ class UrlDetection(BaseDetection):
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
-        """Register framenavigated listener."""
+        """Fire the callback on every main-frame navigation.
+
+        Args:
+            page: Playwright page to observe.
+            callback: Async function invoked with `self`.
+
+        Returns:
+            A cleanup function that removes the listener.
+        """
         loop = asyncio.get_running_loop()
 
         async def on_frame_navigated(frame: Any) -> None:
             if frame == page.main_frame:
                 await callback(self)
 
-        # The listener page.on() registers IS the lambda — store it so
-        # remove_listener can find it. Using a module-level function
-        # reference would point at a different object than what was added.
+        # Store the lambda so remove_listener can match by identity.
         listener = lambda frame: loop.create_task(on_frame_navigated(frame))
         page.on("framenavigated", listener)
 
@@ -68,7 +73,12 @@ class UrlDetection(BaseDetection):
         return cleanup
 
     async def check(self, page: "Page", **context: Any) -> DetectionResult:
-        """Check if current URL matches conditions."""
+        """Return a match only when every configured clause holds.
+
+        Args:
+            page: Playwright page to inspect.
+            **context: Unused.
+        """
         try:
             url = page.url
             parsed = urlparse(url)
@@ -79,9 +89,8 @@ class UrlDetection(BaseDetection):
                 reason=f"Failed to parse URL: {e}",
             )
 
-        # Each clause that fires records the user-configured condition that
-        # triggered it, so the success reason names the exact rules that
-        # matched instead of a generic "matches all conditions".
+        # Name the matching clauses in `reason` so logs surface which
+        # rules fired.
         matched_clauses: list[str] = []
 
         if self.scheme_equals is not None:
@@ -154,8 +163,8 @@ class UrlDetection(BaseDetection):
                 "query_contains matched " + ", ".join(f"'{s}'" for s in self.query_contains)
             )
 
-        # All conditions passed. unquote keeps the URL human-readable.
-        # `details["url"]` keeps the raw encoded form for programmatic consumers.
+        # `reason` shows the decoded URL for humans; `details["url"]`
+        # keeps the raw form for programmatic consumers.
         if matched_clauses:
             reason = f"URL '{unquote(url)}' matches: " + ", ".join(matched_clauses)
         else:
@@ -169,7 +178,6 @@ class UrlDetection(BaseDetection):
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         result: dict[str, Any] = {"type": self.detection_type}
         if self.scheme_equals:
             result["scheme_equals"] = self.scheme_equals
@@ -187,7 +195,6 @@ class UrlDetection(BaseDetection):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "UrlDetection":
-        """Create from dictionary."""
         return cls(
             scheme_equals=data.get("scheme_equals"),
             host_equals=data.get("host_equals", []),

@@ -8,33 +8,28 @@
 """
 Example: a browser-use shopping agent that asks a human for login + payment.
 
-browser-use drives a shopping flow on automationexercise.com (a test storefront
-built for automation — no anti-bot wall, no real charge). browser-handoff is
-exposed to the agent as a custom tool — when the agent decides it can't do
-something (login wall, signup form, card entry), it calls `request_human_help`
-with a natural-language `done_when` description of the resume condition.
-browser-handoff streams the page to a human and waits until an LLMDetection on
-that condition matches before handing control back.
+browser-use drives a t-shirt purchase on automationexercise.com (a test
+storefront — no anti-bot, no real charge). browser-handoff is exposed
+to the agent as a custom tool: when the agent gets stuck (login wall,
+signup form, card entry) it calls `request_human_help` with a
+natural-language `done_when` for the resume condition. The page
+streams to a human and the tool returns when an LLMDetection on that
+condition matches.
 
-Why a tool rather than outside-in detection: the agent already knows when it's
-stuck. Letting it raise its hand is more reliable than us trying to guess every
-possible blocker from the URL/DOM.
-
-Architecture — one Chrome shared over CDP:
-  * Playwright launches a real, visible Chrome with a fixed remote-debugging
-    port and keeps the Page objects — browser-handoff needs a Playwright Page
-    to screencast and forward the human's input.
-  * browser-use connects to the SAME Chrome over CDP and drives the agent loop.
-  * The `request_human_help` tool resolves the current Playwright page on each
-    invocation and awaits handoff.wait_for_completion(...).
+Architecture — one shared Chrome over CDP:
+  * Playwright launches Chrome with a fixed remote-debugging port and
+    holds the Page objects (browser-handoff needs a Playwright Page).
+  * browser-use connects to the SAME Chrome over CDP for its agent loop.
+  * `request_human_help` resolves the current Page on each call and
+    awaits `handoff.wait_for_completion(...)`.
 
 Prereqs:
-  * ANTHROPIC_API_KEY in the environment — used both by browser-use's planner
-    (ChatAnthropic) and by browser-handoff's LLMDetection.
+  * ANTHROPIC_API_KEY — used by both browser-use's planner and bh's
+    LLMDetection.
 
 Environment Variables (optional):
-  DISCORD_WEBHOOK_URL  Discord webhook for the handoff ping. If unset,
-                       browser-handoff prints a rich console panel instead.
+  DISCORD_WEBHOOK_URL  Discord webhook for the handoff notification.
+                       Falls back to bh's ConsoleNotifier when unset.
 
 Run:
   uv run examples/browser_use_shopping_handoff/local.py
@@ -46,11 +41,9 @@ import asyncio
 import logging
 import os
 
-# NOTE: browser-use's public API moves fast. If an import or method below
-# fails, these are the lines most likely to need a version tweak:
-#   1. `from browser_use import Agent, ActionResult, BrowserSession, ChatAnthropic, Tools`
-#   2. `await browser_session.get_current_page_url()`
-#   3. `Agent(..., browser_session=...)`  (older builds use `browser=...`)
+# NOTE: browser-use's public API moves fast. If something breaks here,
+# check the import line and `Agent(..., browser_session=...)` — older
+# builds used `browser=...`.
 from browser_use import ActionResult, Agent, BrowserSession, ChatAnthropic, Tools
 from playwright.async_api import Browser, Page, async_playwright
 
@@ -58,7 +51,7 @@ from browser_handoff import Handoff, ServerConfig
 from browser_handoff.detection import Detection
 from browser_handoff.notifiers import DiscordNotifier, Notifier
 
-# Quiet the frame/mouse/screencast chatter so the demo output stays readable.
+# Quiet bh's INFO chatter so the demo output stays readable.
 logging.basicConfig(level=logging.WARNING)
 
 CDP_PORT = 9222
@@ -71,12 +64,11 @@ confirmation. Let human handle any step that requires intervention — login, si
 
 
 def _resolve_current_page(browser: Browser) -> Page | None:
-    """Pick the Playwright page the agent is currently acting on.
+    """Return the Playwright Page the agent is acting on.
 
-    browser-use doesn't hand us a Page (it speaks CDP), so we walk Playwright's
-    own view of the shared Chrome and return the most recent non-blank tab.
-    For this flow the agent operates in a single tab, so that's reliably the
-    one the agent just acted on.
+    browser-use speaks CDP and doesn't hand us a Page; walk Playwright's
+    view of the shared Chrome and pick the most recent non-blank tab.
+    This flow uses a single tab, so that's reliably the right one.
     """
     pages: list[Page] = [
         p for ctx in browser.contexts for p in ctx.pages if not p.is_closed()
@@ -92,12 +84,11 @@ def _build_tools(
 ) -> Tools:
     """Register `request_human_help` against the shared handoff + browser.
 
-    `agent_ref` is a mutable holder for the browser-use Agent. Tools are
-    built before the Agent exists (the Agent constructor wants `tools=`),
-    so we accept a dict the caller populates after Agent(...) returns.
-    Used to pause/resume the agent loop around the handoff wait — keeps
-    browser-use's step_timeout from racing the human and stops the agent
-    from racing the operator's input inside the same page.
+    `agent_ref` is a mutable holder populated after Agent(...) returns —
+    Tools are built before the Agent exists. The tool uses it to
+    pause/resume the agent around the handoff so browser-use's
+    step_timeout doesn't race the human, and the agent doesn't race
+    operator input inside the same page.
     """
     tools = Tools()
 
@@ -150,11 +141,10 @@ def _build_tools(
             )
 
         print(f"\n-> Handoff requested: {reason}\n   done_when: {done_when}\n")
-        # Pause the agent loop while the human works. Otherwise browser-use's
-        # step_timeout countdown races the human's session_timeout — whoever
-        # is shorter wins, and the agent will cancel its own tool call mid-
-        # handoff if step_timeout fires first. try/finally so a timeout or
-        # error in the handoff still resumes the agent.
+        # Pause the agent while the human works — else browser-use's
+        # step_timeout races the human's session_timeout and the
+        # shorter one wins, cancelling the tool call mid-handoff.
+        # try/finally guarantees resume on timeout or error.
         agent = agent_ref["agent"]
         if agent is not None:
             agent.pause()
@@ -187,8 +177,7 @@ def _build_tools(
 
 
 async def main() -> None:
-    # Discord if configured; otherwise browser-handoff falls back to its
-    # built-in ConsoleNotifier (rich panel with the stream URL).
+    # Empty list → bh falls back to its built-in ConsoleNotifier.
     notifiers: list[Notifier] = []
     if webhook := os.getenv("DISCORD_WEBHOOK_URL"):
         notifiers.append(
@@ -201,18 +190,13 @@ async def main() -> None:
     )
 
     async with async_playwright() as pw:
-        # One real, visible Chrome that BOTH frameworks share over CDP.
-        # `launch()` alone gives us a Browser whose `.contexts` only sees
-        # contexts Playwright itself created — pages browser-use opens over
-        # its own CDP connection are invisible. Re-connecting via
-        # `connect_over_cdp` to the same Chrome returns a Browser handle that
-        # enumerates every target in the process, which is what the
-        # request_human_help tool needs to resolve the current Page.
-        # --window-size sets the rendered page dimensions for headless
-        # Chrome; browser-handoff reads window.innerWidth/innerHeight off
-        # the page so the captured stream comes through at the same ratio.
-        # 1600x900 (16:9) reads as a rectangular shopping site rather than
-        # the square-ish 1280x800 default.
+        # Both frameworks share one Chrome over CDP. launch() alone
+        # gives a Browser whose `.contexts` only sees Playwright-owned
+        # contexts; pages browser-use opens over its own CDP connection
+        # are invisible. connect_over_cdp returns a handle that
+        # enumerates every target — what _resolve_current_page needs.
+        # window-size 1600x900 reads more naturally for a shopping site
+        # than bh's 1280x800 default.
         launched = await pw.chromium.launch(
             headless=True,
             args=[
@@ -224,8 +208,8 @@ async def main() -> None:
             browser = await pw.chromium.connect_over_cdp(
                 f"http://127.0.0.1:{CDP_PORT}"
             )
-            # Holder for the agent — populated after Agent(...) returns so the
-            # tool closure can reach it without a real circular dependency.
+            # Populated after Agent(...) so the tool closure can pause/
+            # resume the agent without a circular dependency.
             agent_ref: dict[str, Agent | None] = {"agent": None}
             tools = _build_tools(handoff, browser, agent_ref)
             browser_session = BrowserSession(cdp_url=f"http://127.0.0.1:{CDP_PORT}")

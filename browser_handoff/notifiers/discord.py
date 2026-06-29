@@ -18,17 +18,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DiscordNotifier(Notifier):
-    """Notifier that sends messages via Discord webhook.
+    """Discord notifier via webhook.
 
     Example:
-        notifier = DiscordNotifier(
-            webhook_url="https://discord.com/api/webhooks/123/abc..."
-        )
-        await notifier.send(
-            title="Intervention Required",
-            message="Click here to help: https://...",
-            urgency="critical",
-        )
+        DiscordNotifier(webhook_url="https://discord.com/api/webhooks/123/abc...")
     """
 
     notifier_type: str = field(default="discord", init=False)
@@ -44,30 +37,25 @@ class DiscordNotifier(Notifier):
         urgency: Urgency = "normal",
         **kwargs: Any,
     ) -> bool:
-        """Send a Discord notification via webhook.
+        """Post the notification as an embed via the webhook.
 
         Args:
-            title: Message title (shown in embed).
+            title: Embed title.
             message: Plain string or list of structured message items.
-            urgency: Urgency level (affects embed color).
-            **kwargs: Additional options.
-
-        Returns:
-            True if sent successfully.
+            urgency: Picks the embed color + emoji.
+            **kwargs: Unused.
         """
         if not self.webhook_url:
             logger.warning("DiscordNotifier: No webhook_url configured")
             return False
 
-        # Map urgency to embed color (Discord uses decimal color values)
+        # Discord embed colors are decimal RGB.
         color_map = {
-            "low": 3066993,      # green (#2ecc71)
-            "normal": 3447003,   # blue (#3498db)
-            "high": 15105570,    # orange (#e67e22)
-            "critical": 15158332, # red (#e74c3c)
+            "low": 3066993,        # green
+            "normal": 3447003,     # blue
+            "high": 15105570,      # orange
+            "critical": 15158332,  # red
         }
-
-        # Map urgency to emoji prefix
         emoji_map = {
             "low": ":information_source:",
             "normal": ":bell:",
@@ -80,8 +68,7 @@ class DiscordNotifier(Notifier):
 
         items = self._normalize_items(message)
 
-        # Render items to Discord-flavoured Markdown. Bare URLs auto-link
-        # in the embed description.
+        # Bare URLs auto-link in the embed description.
         description_parts: list[str] = []
         for item in items:
             if isinstance(item, TextItem):
@@ -90,8 +77,8 @@ class DiscordNotifier(Notifier):
                 description_parts.append(f"{item.prefix}{item.url}{item.suffix}")
         description = "\n\n".join(description_parts)
 
-        # Promote the first LinkItem to the embed's `url` field so the
-        # title becomes a clickable hyperlink — most prominent place to
+        # Promote the first LinkItem to the embed's `url` so the title
+        # becomes a clickable hyperlink — the most prominent place to
         # surface the stream URL.
         first_link = next((i for i in items if isinstance(i, LinkItem)), None)
 
@@ -127,10 +114,9 @@ class DiscordNotifier(Notifier):
 
         try:
             status = await asyncio.to_thread(do_send)
-            # Discord returns 204 No Content on success
+            # Discord returns 204 on success.
             return status in (200, 204)
         except HTTPError as e:
-            # Try to read response body for more details
             error_body = ""
             try:
                 error_body = e.read().decode("utf-8")
@@ -164,7 +150,6 @@ class DiscordNotifier(Notifier):
             return False
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         result: dict[str, Any] = {
             "type": self.notifier_type,
             "webhook_url": self.webhook_url,
@@ -177,7 +162,6 @@ class DiscordNotifier(Notifier):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DiscordNotifier":
-        """Create from dictionary."""
         return cls(
             webhook_url=data.get("webhook_url", ""),
             username=data.get("username", "Browser Handoff"),

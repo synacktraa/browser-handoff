@@ -10,7 +10,7 @@ from .content import ContentDetection
 from .element import ElementDetection
 from .url import UrlDetection
 
-# LLM detection is optional
+# LLMDetection lives behind the [llm] extra.
 try:
     from .llm import LLMDetection
 
@@ -21,23 +21,12 @@ except ImportError:
 
 
 class Detection:
-    """Factory class for creating detection instances.
+    """Factory for building detection instances.
 
     Example:
-        # Content detection
-        detection = Detection.content(
-            title_contains=["Sign In"],
-            body_contains=["please log in"],
-        )
-
-        # URL detection
-        detection = Detection.url(
-            host_equals=["localhost"],
-            path_matches=["/callback"],
-        )
-
-        # Combinators
-        detection = Detection.all([
+        Detection.content(title_contains=["Sign In"])
+        Detection.url(host_equals=["localhost"], path_matches=["/callback"])
+        Detection.all([
             Detection.element(present=["#dashboard"]),
             Detection.not_(Detection.element(present=[".error"])),
         ])
@@ -50,7 +39,7 @@ class Detection:
         body_contains: list[str] | None = None,
         body_matches: list[str] | None = None,
     ) -> ContentDetection:
-        """Create a content-based detection."""
+        """Match on page title or body content."""
         return ContentDetection(
             title_contains=title_contains or [],
             title_matches=title_matches or [],
@@ -67,7 +56,7 @@ class Detection:
         path_contains: list[str] | None = None,
         query_contains: list[str] | None = None,
     ) -> UrlDetection:
-        """Create a URL-based detection."""
+        """Match on URL components (scheme / host / path / query)."""
         return UrlDetection(
             scheme_equals=scheme_equals,
             host_equals=host_equals or [],
@@ -84,7 +73,7 @@ class Detection:
         visible: list[str] | None = None,
         hidden: list[str] | None = None,
     ) -> ElementDetection:
-        """Create an element-based detection."""
+        """Match on DOM selector presence / absence / visibility."""
         return ElementDetection(
             present=present or [],
             missing=missing or [],
@@ -100,17 +89,19 @@ class Detection:
         idle_seconds: float = 3.0,
         max_interval: float = 30.0,
     ) -> "LLMDetection":
-        """Create an LLM-based detection.
+        """Match by asking a vision model whether `condition` holds.
 
-        Requires the 'llm' extra: pip install browser-handoff[llm]
+        Requires the 'llm' extra: pip install browser-handoff[llm].
+        With `api_key=None`, litellm reads the provider's env var
+        (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...).
 
-        If `api_key` is None, litellm picks up the key from the provider's
-        env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...).
-
-        While watching, a check runs once page activity (input / DOM change /
-        navigation) settles for `idle_seconds`, with a safety-net poll every
-        `max_interval` seconds (set 0 to disable). Tune these to trade latency
-        for cost — larger values mean fewer, later vision calls.
+        Args:
+            model: litellm model id.
+            condition: Natural-language statement the model evaluates.
+            api_key: Optional explicit key (else from env).
+            idle_seconds: Debounce — wait this long after the last
+                activity before checking.
+            max_interval: Safety-net interval; 0 disables.
         """
         if not _HAS_LLM:
             raise ImportError(
@@ -127,31 +118,29 @@ class Detection:
 
     @staticmethod
     def all(conditions: list[BaseDetection]) -> AllDetection:
-        """Create an AND combinator (all conditions must match)."""
+        """AND: all conditions must match."""
         return AllDetection(conditions=conditions)
 
     @staticmethod
     def any(conditions: list[BaseDetection]) -> AnyDetection:
-        """Create an OR combinator (any condition must match)."""
+        """OR: any condition must match."""
         return AnyDetection(conditions=conditions)
 
     @staticmethod
     def not_(condition: BaseDetection) -> NotDetection:
-        """Create a NOT combinator (invert condition)."""
+        """NOT: invert the condition."""
         return NotDetection(condition=condition)
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> BaseDetection:
-        """Create a detection from dictionary representation.
+        """Build a detection from its `to_dict()` shape.
 
         Args:
-            data: Dictionary with 'type' key and type-specific fields.
-
-        Returns:
-            The appropriate detection instance.
+            data: Dict carrying a `type` key plus type-specific fields.
 
         Raises:
-            ValueError: If the detection type is unknown.
+            ValueError: If `type` is unknown.
+            ImportError: If `type == "llm"` and the [llm] extra is missing.
         """
         detection_type = data.get("type")
 

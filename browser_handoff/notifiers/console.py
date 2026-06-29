@@ -11,9 +11,8 @@ from rich.panel import Panel
 from .base import Notifier, Urgency
 from .message import LinkItem, MessageItem, TextItem
 
-# force_terminal=True so colors render even when stdout is piped (e.g.,
-# the script is running inside a Daytona sandbox and a parent process
-# is forwarding the captured output to the operator's local terminal).
+# force_terminal=True so colors render when stdout is piped (e.g.,
+# a sandbox forwarding captured output to the operator's terminal).
 _console = Console(force_terminal=True)
 
 _URGENCY_STYLES: dict[str, str] = {
@@ -26,24 +25,17 @@ _URGENCY_STYLES: dict[str, str] = {
 
 @dataclass
 class ConsoleNotifier(Notifier):
-    """Render the handoff banner as a rich panel on stdout.
+    """Render the handoff banner as a Rich panel on stdout.
 
-    Items render sequentially inside the panel: `TextItem`s as paragraphs,
-    `LinkItem`s as `[link=…]` markup so OSC 8 terminals (iTerm2, Windows
-    Terminal, Kitty, Alacritty) make them Ctrl/Cmd+clickable and expose
-    "Copy Link Address" on right-click. Narrow terminals will still wrap
-    long URLs across the panel borders — the hyperlink metadata survives
-    the wrap, but triple-click in those terminals selects partial text.
+    `LinkItem`s become `[link=…]` markup so OSC 8 terminals (iTerm2,
+    Windows Terminal, Kitty, Alacritty) make them Ctrl/Cmd-clickable
+    and expose "Copy Link Address" on right-click.
 
-    Used by Handoff as the fallback when the caller passes no notifiers,
-    so the stream URL always lands somewhere obvious. Can also be added
-    explicitly alongside other notifiers — useful if you want a panel on
-    the developer terminal in addition to Slack/Discord pings.
+    Used as the fallback when the caller passes no notifiers; can also
+    be added alongside others.
 
     Example:
-        notifier = ConsoleNotifier()
-        # combined with another notifier:
-        Handoff(scenarios=[...], notifiers=[notifier, SlackNotifier(...)])
+        Handoff(notifiers=[ConsoleNotifier(), SlackNotifier(...)])
 
     Serialization:
         {"type": "console"}
@@ -61,8 +53,6 @@ class ConsoleNotifier(Notifier):
         style = _URGENCY_STYLES.get(urgency, "blue")
         items = self._normalize_items(message)
 
-        # Render items in order so the layout mirrors the caller's intent
-        # (TextItem, TextItem, LinkItem, TextItem reads top-to-bottom).
         rendered: list[str] = []
         for item in items:
             if isinstance(item, TextItem):

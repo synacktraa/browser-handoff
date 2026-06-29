@@ -5,41 +5,21 @@
 """
 Run examples/claude_oauth_login_handoff/local.py inside a Daytona sandbox.
 
-Story: the same browser-handoff + ccauth OAuth flow as `local.py`, but
-the whole thing — Chrome, the streaming server, ccauth's callback
-listener — runs inside a Daytona sandbox. The human just opens the
-Daytona preview URL to log in.
+Same browser-handoff + ccauth OAuth flow as `local.py`, but Chrome,
+the streaming server, and ccauth's callback listener all run inside a
+Daytona sandbox. The human opens the Daytona preview URL to sign in.
 
-Architecture (compared to a local run):
-  - local.py drives Chrome (patchright) inside the sandbox under xvfb
-  - browser-handoff's streaming server binds 0.0.0.0:8080 in the sandbox
-  - Daytona exposes port 8080 via a signed preview URL (token in the URL,
-    so the operator can open it without being logged into daytona.io)
-  - this script passes that preview URL into local.py as --public-base
-    so the human-facing stream link in the rich panel and notifier
-    messages uses it
-  - CDP traffic stays loopback inside the sandbox; only the JPEG frames
-    and control messages cross the wire (same wire profile as any
-    cloud-hosted browser session)
-
-Image build (declarative, runs once and is cached by Daytona):
-  - debian-slim with python 3.12
-  - apt: curl, ca-certs, xvfb, xauth, dbus-x11, git
-  - uv (via the official installer, symlinked into /usr/local/bin)
-  - patchright + Chrome (baked into the image so sandbox boot is fast)
-
-Boot sequence per run:
-  1. Create sandbox from the image (cached after first build)
-  2. Resolve a signed Daytona preview URL for port 8080 (1h validity)
-  3. `curl` the latest local.py from this repo on master
-  4. `xvfb-run -a uv run local.py --public-base <preview-url>`
-  5. Tail sandbox stdout to this terminal — local.py's rich panels
-     come through with ANSI colors intact
+What this script does per run:
+  1. Build (or reuse) the sandbox image (debian-slim + uv + patchright + Chrome).
+  2. Create a sandbox; resolve a signed preview URL for port 8080.
+  3. `curl` local.py from master, run it under xvfb with
+     `--public-base <preview-url>`.
+  4. Tail sandbox stdout; local.py's Rich panels pass through with
+     ANSI colors intact.
 
 Environment Variables:
-    DAYTONA_API_KEY:      required, your Daytona API key
-    DISCORD_WEBHOOK_URL:  optional, forwarded into the sandbox so
-                          browser-handoff can push login notifications
+    DAYTONA_API_KEY:      required, your Daytona API key.
+    DISCORD_WEBHOOK_URL:  optional, forwarded into the sandbox.
 
 Run:
     uv run examples/claude_oauth_login_handoff/in_daytona.py
@@ -70,38 +50,34 @@ SESSION_ID = "browser-handoff-oauth"
 
 
 def _build_image():
-    """Declarative image: everything local.py needs to run unattended."""
+    """Declarative image with everything local.py needs to run unattended."""
     from daytona import Image
 
     return (
         Image.debian_slim("3.12")
         .run_commands(
-            # System packages: curl for fetching local.py, xvfb+xauth for
-            # a headless X display so patchright's headed Chrome can run,
-            # git so uv can resolve our `git+https://...` script deps.
+            # curl: fetch local.py. xvfb+xauth: headless X for headed Chrome.
+            # git: uv resolves git+https script deps.
             "apt-get update && "
             "apt-get install -y --no-install-recommends "
             "curl ca-certificates xvfb xauth dbus-x11 git && "
             "rm -rf /var/lib/apt/lists/*",
-            # uv: official installer drops the binary into /root/.local/bin;
-            # symlink into /usr/local/bin so `uv` is on PATH for any shell.
+            # uv installer lands in /root/.local/bin; symlink to PATH.
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             "ln -sf /root/.local/bin/uv /usr/local/bin/uv",
         )
-        # Bake patchright + Chrome into the image so each sandbox boot
-        # doesn't re-download ~200MB of browser binary.
+        # Bake Chrome into the image so sandbox boot doesn't redownload ~200MB.
         .pip_install("patchright>=1.48")
         .run_commands("patchright install --with-deps chrome")
     )
 
 
 def _extract_log_text(log: object) -> str:
-    """Pull the actual log content out of Daytona's response object.
+    """Pull log content out of Daytona's response object.
 
-    Stringifying the response itself gives the repr, which escapes real
-    newlines as backslash-n inside `stderr='...'` and changes length
-    per call as inner fields grow — that breaks both rendering and
-    seen-bytes diffing. Read the actual fields instead.
+    Stringifying the response gives the repr — newlines are escaped and
+    the length drifts as inner fields grow, breaking seen-bytes diffing.
+    Read the fields directly.
     """
     if log is None:
         return ""
@@ -116,12 +92,11 @@ def _extract_log_text(log: object) -> str:
 
 
 async def _tail_logs(sandbox: AsyncSandbox, cmd_id: str) -> None:
-    """Stream the running command's stdout/stderr to this terminal verbatim.
+    """Stream the command's stdout/stderr to this terminal verbatim.
 
-    No per-line prefix — local.py emits multi-line rich panels with Unicode
-    box-drawing; a `[sandbox]` prefix per line would break the borders.
-    Raw passthrough also preserves the ANSI escape codes rich emitted, so
-    panels render with colors in the operator's terminal.
+    No per-line prefix — local.py emits Rich panels with Unicode
+    borders, and a prefix would break them. Raw passthrough also
+    preserves the ANSI colors.
     """
     seen = 0
     while True:
@@ -155,9 +130,8 @@ async def main() -> None:
         SessionExecuteRequest,
     )
 
-    # Forward DISCORD_WEBHOOK_URL into the sandbox if set, and silence
-    # uv's progress bar (the `\x02\x02\x02` cursor-control codes) since it
-    # adds nothing to a captured-log demo.
+    # Forward DISCORD_WEBHOOK_URL if set. UV_NO_PROGRESS suppresses
+    # uv's cursor-control codes — noise in a captured-log demo.
     env_vars: dict[str, str] = {"UV_NO_PROGRESS": "1"}
     if webhook := os.getenv("DISCORD_WEBHOOK_URL"):
         env_vars["DISCORD_WEBHOOK_URL"] = webhook
@@ -184,11 +158,10 @@ async def main() -> None:
         try:
             await sandbox.process.create_session(SESSION_ID)
 
-            # Signed preview URL: the token is embedded in the URL, so the
-            # human can open it without being logged into daytona.io and
-            # without setting an x-daytona-preview-token header. Valid for
-            # 1 hour — well beyond the 10-minute completion_timeout, but
-            # enough buffer if the operator steps away briefly.
+            # Signed preview URL: token is in the URL, so the human
+            # opens it without a daytona.io login or a custom header.
+            # 1h validity — well past session_timeout, with slack if
+            # the operator steps away.
             preview = await sandbox.create_signed_preview_url(
                 STREAMING_PORT, expires_in_seconds=3600
             )

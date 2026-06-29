@@ -16,11 +16,10 @@ _AND_BULLET = "• "
 
 
 def _flatten_and_items(reason: str) -> list[str]:
-    """Return child reasons of an AND-shaped reason, or [reason] otherwise.
+    """Splice bullets from a nested AND reason into the outer list.
 
-    AND nested in AND is semantically the same as one flat AND, so its bullet
-    items get spliced into the outer list instead of producing a nested
-    "Matched conditions:" header.
+    A flat AND inside an AND would render as a nested "Matched conditions:"
+    block; flattening keeps the output one level deep.
     """
     if not reason.startswith(_AND_HEADER):
         return [reason]
@@ -34,10 +33,10 @@ def _flatten_and_items(reason: str) -> list[str]:
 
 @dataclass
 class AllDetection(BaseDetection):
-    """AND logic - all conditions must match.
+    """AND: all conditions must match.
 
     Example:
-        detection = AllDetection(conditions=[
+        AllDetection(conditions=[
             UrlDetection(path_matches=["/dashboard"]),
             ElementDetection(present=[".user-avatar"]),
         ])
@@ -51,13 +50,19 @@ class AllDetection(BaseDetection):
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
-        """Register listeners for all child conditions.
+        """Register every child's listeners; forward the combinator on fire.
 
-        Wraps the user's callback so it receives the combinator itself,
-        not the child whose listener actually fired. Without this wrap,
-        wait_for_completion's `result = await detection.check(page)` would
-        run on the child alone — defeating the AND semantics (a single
-        matching child would trigger completion).
+        The callback receives `self` (not the child whose listener
+        actually fired), so the orchestrator runs its `check` against the
+        combinator and re-evaluates AND semantics.
+
+        Args:
+            page: Playwright page to observe.
+            callback: Async function invoked with `self` when any child
+                fires.
+
+        Returns:
+            A cleanup function that tears down every child's listeners.
         """
         cleanups: list[Callable[[], None]] = []
 
@@ -78,7 +83,12 @@ class AllDetection(BaseDetection):
         return cleanup_all
 
     async def check(self, page: "Page", **context: Any) -> DetectionResult:
-        """Check if ALL conditions are met."""
+        """Return a match only when every child matches.
+
+        Args:
+            page: Playwright page to inspect.
+            **context: Forwarded verbatim to each child's `check`.
+        """
         child_reasons: list[str] = []
         for condition in self.conditions:
             result = await condition.check(page, **context)
@@ -89,9 +99,6 @@ class AllDetection(BaseDetection):
                     reason=f"Condition '{condition.detection_type}' not met: {result.reason}",
                     details={"failed_condition": condition.to_dict()},
                 )
-            # Flatten nested AND: an AND inside an AND is semantically the
-            # same as one flat AND, so its bullet items contribute directly
-            # rather than producing a nested "Matched conditions:" header.
             child_reasons.extend(_flatten_and_items(result.reason))
 
         if child_reasons:
@@ -109,7 +116,6 @@ class AllDetection(BaseDetection):
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         return {
             "type": self.detection_type,
             "conditions": [c.to_dict() for c in self.conditions],
@@ -118,10 +124,10 @@ class AllDetection(BaseDetection):
 
 @dataclass
 class AnyDetection(BaseDetection):
-    """OR logic - any condition must match.
+    """OR: any condition matches.
 
     Example:
-        detection = AnyDetection(conditions=[
+        AnyDetection(conditions=[
             ElementDetection(present=["#success"]),
             ContentDetection(body_contains=["Welcome"]),
         ])
@@ -135,13 +141,18 @@ class AnyDetection(BaseDetection):
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
-        """Register listeners for all child conditions.
+        """Register every child's listeners; forward the combinator on fire.
 
-        Wraps the user's callback so it receives the combinator itself,
-        not the child whose listener fired. For OR the bug is subtler than
-        AND — a child firing IS sufficient — but wait_for_completion would
-        also report the child's `reason` instead of the OR's "Condition X
-        matched: …" framing, which is confusing in logs/notifications.
+        The callback receives `self` so the orchestrator's logs and
+        `check` report the OR's framing instead of the child's.
+
+        Args:
+            page: Playwright page to observe.
+            callback: Async function invoked with `self` when any child
+                fires.
+
+        Returns:
+            A cleanup function that tears down every child's listeners.
         """
         cleanups: list[Callable[[], None]] = []
 
@@ -162,7 +173,12 @@ class AnyDetection(BaseDetection):
         return cleanup_all
 
     async def check(self, page: "Page", **context: Any) -> DetectionResult:
-        """Check if ANY condition is met."""
+        """Return a match on the first matching child.
+
+        Args:
+            page: Playwright page to inspect.
+            **context: Forwarded verbatim to each child's `check`.
+        """
         for condition in self.conditions:
             result = await condition.check(page, **context)
             if result.matched:
@@ -181,7 +197,6 @@ class AnyDetection(BaseDetection):
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         return {
             "type": self.detection_type,
             "conditions": [c.to_dict() for c in self.conditions],
@@ -190,12 +205,10 @@ class AnyDetection(BaseDetection):
 
 @dataclass
 class NotDetection(BaseDetection):
-    """Invert result of a condition.
+    """NOT: invert the inner condition.
 
     Example:
-        detection = NotDetection(
-            condition=ElementDetection(present=[".error-message"])
-        )
+        NotDetection(condition=ElementDetection(present=[".error-message"]))
     """
 
     detection_type: str = field(default="not", init=False)
@@ -206,12 +219,18 @@ class NotDetection(BaseDetection):
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
-        """Register listeners for the wrapped condition.
+        """Register the inner condition's listeners; forward `self` on fire.
 
-        Wraps the user's callback so it receives the NotDetection itself,
-        not the inner condition. Without this wrap, wait_for_completion's
-        `result = await detection.check(page)` would call the inner
-        condition's check directly — completely bypassing the inversion.
+        The orchestrator's `check` runs against `self`, so the
+        inversion isn't bypassed. A `None` inner is a no-op.
+
+        Args:
+            page: Playwright page to observe.
+            callback: Async function invoked with `self` when the inner
+                condition fires.
+
+        Returns:
+            A cleanup function (no-op if `condition` is None).
         """
         if self.condition is None:
             return lambda: None
@@ -222,7 +241,14 @@ class NotDetection(BaseDetection):
         return self.condition.register_listeners(page, on_child_event)
 
     async def check(self, page: "Page", **context: Any) -> DetectionResult:
-        """Check if condition is NOT met."""
+        """Return a match when the inner condition does NOT match.
+
+        A `None` inner trivially matches.
+
+        Args:
+            page: Playwright page to inspect.
+            **context: Forwarded verbatim to the inner condition's `check`.
+        """
         if self.condition is None:
             return DetectionResult(
                 matched=True,
@@ -248,7 +274,6 @@ class NotDetection(BaseDetection):
             )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         return {
             "type": self.detection_type,
             "condition": self.condition.to_dict() if self.condition else None,

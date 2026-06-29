@@ -19,21 +19,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class EmailNotifier(Notifier):
-    """Notifier that sends emails via SMTP.
+    """SMTP email notifier (multipart plain+HTML).
 
     Example:
-        notifier = EmailNotifier(
+        EmailNotifier(
             smtp_host="smtp.gmail.com",
             smtp_port=587,
             username="bot@example.com",
             password="app-password",
-            from_addr="bot@example.com",
             to=["ops@example.com"],
-        )
-        await notifier.send(
-            title="Intervention Required",
-            message="Click here to help: https://...",
-            urgency="critical",
         )
     """
 
@@ -54,16 +48,13 @@ class EmailNotifier(Notifier):
         urgency: Urgency = "normal",
         **kwargs: Any,
     ) -> bool:
-        """Send an email notification.
+        """Send a multipart email.
 
         Args:
             title: Email subject.
             message: Plain string or list of structured message items.
-            urgency: Urgency level (adds prefix to subject).
-            **kwargs: Additional options.
-
-        Returns:
-            True if sent successfully.
+            urgency: Prefixes the subject ([Info] / [Important] / [URGENT]).
+            **kwargs: Unused.
         """
         if not self.to:
             logger.warning("EmailNotifier: No recipients configured")
@@ -73,7 +64,6 @@ class EmailNotifier(Notifier):
             logger.warning("EmailNotifier: No credentials configured")
             return False
 
-        # Add urgency prefix to subject
         prefix_map = {
             "low": "[Info]",
             "normal": "",
@@ -85,21 +75,15 @@ class EmailNotifier(Notifier):
 
         items = self._normalize_items(message)
 
-        # Create message
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = self.from_addr or self.username
         msg["To"] = ", ".join(self.to)
 
-        # Plain text fallback flattens the items via the base helper.
         msg.attach(MIMEText(self._items_to_plain_text(items), "plain"))
-
-        # HTML part renders TextItems as <p> and LinkItems as proper
-        # <a href> anchors. All user-supplied strings are HTML-escaped
-        # before interpolation to prevent HTML injection.
         msg.attach(MIMEText(self._build_html(title, items), "html"))
 
-        # Send in executor to avoid blocking the event loop.
+        # smtplib blocks; run it off the event loop.
         try:
             await asyncio.to_thread(self._send_sync, msg)
             return True
@@ -109,7 +93,7 @@ class EmailNotifier(Notifier):
 
     @staticmethod
     def _build_html(title: str, items: list[MessageItem]) -> str:
-        """Render the HTML body with all user-supplied strings escaped."""
+        """Render the HTML body, escaping every user-supplied string."""
         safe_title = html_lib.escape(title)
         body_parts: list[str] = []
         for item in items:
@@ -127,7 +111,6 @@ class EmailNotifier(Notifier):
         return f"<html><body><h2>{safe_title}</h2>{''.join(body_parts)}</body></html>"
 
     def _send_sync(self, msg: MIMEMultipart) -> None:
-        """Synchronous send operation."""
         with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
             if self.use_tls:
                 server.starttls()
@@ -139,7 +122,6 @@ class EmailNotifier(Notifier):
             )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         return {
             "type": self.notifier_type,
             "smtp_host": self.smtp_host,
@@ -153,7 +135,6 @@ class EmailNotifier(Notifier):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EmailNotifier":
-        """Create from dictionary."""
         return cls(
             smtp_host=data.get("smtp_host", "smtp.gmail.com"),
             smtp_port=data.get("smtp_port", 587),
