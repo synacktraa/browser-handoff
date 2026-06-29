@@ -1036,6 +1036,17 @@
         }
       }
 
+      // Wrapper-presence heartbeat. The server's orchestration uses these
+      // pings to gate detection.check calls behind "is the operator still
+      // here." Only sent while the tab is visible so a backgrounded tab
+      // closes the gate within freshness_threshold (~5s).
+      setInterval(() => {
+        if (!ws || ws.readyState !== WebSocket.OPEN || isTerminal) return;
+        if (document.visibilityState === 'visible') {
+          send({type: 'presence'});
+        }
+      }, 2000);
+
       reloadBtn.onclick = () => {
         if (isTerminal) return;
         reloadBtn.classList.add('spinning');
@@ -1060,10 +1071,9 @@
       //
       // Operator activity tracking is NOT done from this wrapper. Cross-origin
       // restrictions block us from seeing any event that targets the iframe
-      // (which is most operator input). Instead the server installs a stealth
-      // in-page observer on the underlying page (see
-      // _PassthroughActivityWatcher) that sees events directly, after the
-      // substrate has delivered them via CDP Input.dispatch.
+      // (which is most operator input). Instead LLMDetection installs a
+      // stealth in-page observer on the underlying page that sees events
+      // directly, after the substrate has delivered them via CDP Input.dispatch.
       document.onkeydown = (e) => {
         if (document.activeElement === iframe) return;
 

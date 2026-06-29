@@ -101,8 +101,15 @@ async def test_concurrent_handoffs_share_one_server(
         bogus = await page1.request.get(f"http://127.0.0.1:{port}/?t=does-not-exist")
         assert bogus.status == 404, "unknown token must not resolve"
 
-        # Give both handoffs a beat to arm their completion listeners, then
-        # complete each by navigating to the completion URL.
+        # Simulate operators opening each wrapper. One bump on each
+        # session's presence flips the connect gate (so the URL listener
+        # registers) AND satisfies the freshness check in the callback.
+        # The WS handler does this on first accept; bypassing it directly
+        # is fine here since the assertion is about the shared server,
+        # not the WS protocol. Give the listeners a beat to arm before
+        # completing via navigation.
+        for s in sessions:
+            s.presence.bump()
         await asyncio.sleep(0.3)
         await page1.goto(f"{base_url}/dashboard")
         await page2.goto(f"{base_url}/dashboard")
@@ -156,10 +163,23 @@ async def test_sequential_handoffs_restart_server_on_same_port(
             await page.goto(f"{base_url}/login")
             h = asyncio.create_task(handoff.wait_for_completion(page, on=complete))
 
-            # Server starts lazily for this handoff.
+            # Server starts lazily for this handoff. Gate on the sessions
+            # dict (not live_session_count) — _acquire_server bumps the
+            # count before register_session populates the dict, so the
+            # count flipping is not yet safe to dereference.
             await _wait_until(
-                lambda: handoff.is_serving and handoff.live_session_count == 1
+                lambda: handoff.is_serving
+                and bool(handoff._server.sessions)
             )
+            assert handoff.live_session_count == 1
+
+            # Simulate the operator opening the wrapper. One bump flips
+            # the connect gate (so wait_for_completion registers the URL
+            # listener) AND records the freshness timestamp. The WS
+            # handler does this on first accept; bypassing it directly is
+            # fine here since the assertion is about server lifecycle.
+            session = next(iter(handoff._server.sessions.values()))
+            session.presence.bump()
 
             # Complete it and confirm the server is fully gone afterward.
             await asyncio.sleep(0.3)  # let the completion listener arm

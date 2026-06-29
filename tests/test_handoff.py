@@ -39,6 +39,49 @@ class TestHandoffCreation:
         with pytest.raises(ValueError, match="requires at least one scenario"):
             asyncio.run(handoff.run(object()))
 
+    def test_run_rejects_llm_in_trigger(self):
+        """Triggers must not use LLMDetection — wrong prompt shape (no
+        operator-facing reason), wrong activity signal (no operator yet),
+        no first-event gate. Reject early at the scenario level so the
+        misuse fails at the wiring site, not minutes into a hot loop.
+        """
+        import asyncio
+
+        pytest.importorskip("litellm")
+
+        handoff = Handoff()
+        scenarios = [
+            Scenario(
+                name="bad-llm-trigger",
+                trigger=Detection.llm(condition="login form visible"),
+                complete=Detection.url(path_contains=["/done"]),
+            ),
+        ]
+        with pytest.raises(TypeError, match="bad-llm-trigger"):
+            asyncio.run(handoff.run(object(), scenarios=scenarios))
+
+    def test_run_rejects_llm_nested_in_combinator(self):
+        """The walk catches combinator nesting too — most likely accidental
+        misuse since AnyOf/AllOf hide the LLMDetection in plain sight.
+        """
+        import asyncio
+
+        pytest.importorskip("litellm")
+
+        handoff = Handoff()
+        scenarios = [
+            Scenario(
+                name="nested-llm-trigger",
+                trigger=Detection.any([
+                    Detection.url(path_contains=["/login"]),
+                    Detection.llm(condition="hard-to-tell visually"),
+                ]),
+                complete=Detection.url(path_contains=["/done"]),
+            ),
+        ]
+        with pytest.raises(TypeError, match="nested-llm-trigger"):
+            asyncio.run(handoff.run(object(), scenarios=scenarios))
+
     def test_programmatic_creation(self):
         """Test creating Handoff programmatically."""
         handoff = Handoff(

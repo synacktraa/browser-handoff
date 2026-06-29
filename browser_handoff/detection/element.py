@@ -316,7 +316,7 @@ class ElementDetection(BaseDetection):
 
         return cleanup
 
-    async def check(self, page: "Page") -> DetectionResult:
+    async def check(self, page: "Page", **context: Any) -> DetectionResult:
         """Check if element conditions are met."""
         try:
             for selector in self.present:

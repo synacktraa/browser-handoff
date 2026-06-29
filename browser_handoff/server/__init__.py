@@ -1,14 +1,13 @@
 """Streaming server for browser-handoff."""
 
 from .config import ServerConfig
-from .operator_activity import OperatorActivity
-from .session import DEFAULT_VIEWPORT, HandoffSession
+from .session import DEFAULT_VIEWPORT, HandoffSession, SessionPresence
 from .streaming import StreamingServer
 
 __all__ = [
     "ServerConfig",
     "StreamingServer",
     "HandoffSession",
-    "OperatorActivity",
+    "SessionPresence",
     "DEFAULT_VIEWPORT",
 ]

@@ -60,7 +60,7 @@ class ContentDetection(BaseDetection):
 
         return cleanup
 
-    async def check(self, page: "Page") -> DetectionResult:
+    async def check(self, page: "Page", **context: Any) -> DetectionResult:
         """Check if page content matches any conditions."""
         try:
             title = await page.title()

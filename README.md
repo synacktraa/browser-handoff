@@ -130,7 +130,7 @@ What changes when `stream_url` is set:
 - No local CDP screencast pump — the substrate's viewer owns frames.
 - The operator opens a `browser-handoff` served wrapper URL that iframes the substrate's viewer, cropped to just the page content.
 - Window maximization at handoff start gives the crop math a clean, deterministic rect.
-- A stealth in-page observer (non-enumerable window stamp + capture/passive listeners on deliberate input — `mousedown` / `keydown` / `wheel` / `scroll` / `touchstart` / `input` / `paste`) feeds operator-activity ticks to LLMDetection's gating, with no detectable JS surface beyond a single non-enumerable random-named integer.
+- LLMDetection installs the same stealth in-page observer it uses in streaming mode (non-enumerable window stamp + capture/passive listeners on deliberate input — `mousedown` / `keydown` / `wheel` / `scroll` / `touchstart` / `input` / `paste`), with no detectable JS surface beyond a single non-enumerable random-named integer. Only installed after the operator opens the wrapper URL, so anyone with just the substrate viewer URL can't drive vision calls.
 
 `stream_url` works on both entry points — `handoff.wait_for_completion(stream_url=...)` and `handoff.run(stream_url=...)`. Everything else (detection contracts, notifiers, completion semantics) is identical to streaming mode.
 
