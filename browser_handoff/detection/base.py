@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class DetectionResult:
-    """Result of a detection check."""
+    """Outcome of a detection check; truthy when matched."""
 
     matched: bool
     detection_type: str
@@ -24,14 +24,10 @@ class DetectionResult:
 
 
 class BaseDetection(ABC):
-    """Abstract base class for all detection types.
+    """Abstract base for all detection types.
 
-    Detections are session-unaware. They take only `(page, callback)` for
-    `register_listeners` and `(page, **context)` for `check` — orchestration
-    (Handoff.wait_for_completion) owns all session-aware decisions
-    (presence gate, lazy install, etc.). This keeps detections drivable
-    standalone (tests, ad-hoc scripts) and prevents the watcher from being
-    coupled to handoff state.
+    Detections are session-unaware: orchestration owns gating, lazy
+    install, and presence checks. This keeps them drivable standalone.
     """
 
     detection_type: str = "base"
@@ -42,11 +38,12 @@ class BaseDetection(ABC):
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
-        """Register event listeners that call callback when detection should be checked.
+        """Wire `callback` to fire whenever the detection should be re-checked.
 
         Args:
-            page: The Playwright page to monitor.
-            callback: Async callback to invoke when detection should be checked.
+            page: Playwright page to observe.
+            callback: Async function invoked with `self` when a re-check
+                is due.
 
         Returns:
             A cleanup function that removes the registered listeners.
@@ -55,29 +52,19 @@ class BaseDetection(ABC):
 
     @abstractmethod
     async def check(self, page: "Page", **context: Any) -> DetectionResult:
-        """Check if detection condition is met.
+        """Evaluate the condition against `page`.
 
         Args:
-            page: The Playwright page to check.
-            **context: Per-call orchestration context. Most detections
-                ignore this; LLMDetection reads `reason` (the operator-
-                facing explanation the agent gave) to ground its prompt
-                — much more informative than the bare condition alone.
-                Combinators forward kwargs to their children unchanged.
-
-        Returns:
-            DetectionResult indicating whether condition was matched.
+            page: Playwright page to inspect.
+            **context: Per-call info from the orchestrator. Each detection
+                reads only the keys it needs and ignores the rest;
+                combinators forward unchanged.
         """
         pass
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize detection to dictionary format."""
         return {"type": self.detection_type}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "BaseDetection":
-        """Deserialize detection from dictionary format.
-
-        This should be overridden by subclasses.
-        """
         raise NotImplementedError("Subclasses must implement from_dict")

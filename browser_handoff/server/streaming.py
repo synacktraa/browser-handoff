@@ -25,15 +25,13 @@ from .session import DEFAULT_VIEWPORT, HandoffSession
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, CDPSession, Page
 
-# Setup Jinja2 templates
 TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
 jinja_env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=True)
 
-# Injected into a streamed page to suppress the native right-click context
-# menu. That menu is an OS-level overlay the screencast can't capture, so a
-# right-click would trap the operator in front of an invisible menu. Capture
-# at the capture phase so it fires before page handlers. The flag is
-# non-enumerable so it doesn't show up if the page enumerates window.
+# Suppress the native right-click menu — it's an OS-level overlay the
+# screencast can't capture, so the operator would click into an invisible
+# menu. Capture phase to beat page handlers; non-enumerable flag to keep
+# us off window enumeration.
 _CONTEXT_MENU_GUARD_JS = """
 (() => {
   if (window.__bhContextGuard) return;
@@ -44,28 +42,19 @@ _CONTEXT_MENU_GUARD_JS = """
 """
 
 
-# Injected into a streamed page to replace native input UIs that the CDP
-# screencast can't capture — same fundamental problem as the right-click
-# menu above. Native <select> popups, <input type=date|time|...> pickers,
-# and color pickers are OS-level overlays rendered outside the page
-# viewport, so the operator clicks them and sees nothing happen.
+# Replace native input UIs that the screencast can't capture (same
+# OS-overlay problem as the right-click menu).
 #
 # Strategy:
 #   * <select> (non-multiple): intercept mousedown, render a DOM overlay
-#     of <option>/<optgroup> children. Click an option to set the value
-#     and dispatch input + change events so site listeners still fire.
+#     of <option>/<optgroup> children. Click → set value + dispatch
+#     input/change events so site listeners still fire.
 #   * <input type=date|time|datetime-local|month|week>: suppress the
-#     native picker, focus the input so the operator can type a value in
-#     the input's own native format (browsers accept typed input even
-#     when the picker is suppressed).
+#     native picker, focus the input; browsers accept typed values for
+#     these types even without the picker.
 #
-# Out of scope for v1: <select multiple>, <input type=color>,
-# <input type=file> (OS file picker is unreachable from page JS).
-#
-# Globals are non-enumerable so site code that walks window won't see
-# them. Listeners run in the capture phase so they fire before site
-# handlers; preventDefault on mousedown blocks the native picker, focus()
-# is called manually to compensate for the suppressed default focus.
+# Out of scope: <select multiple>, <input type=color>, <input type=file>.
+# Globals are non-enumerable; listeners run in capture phase.
 _NATIVE_INPUT_SHIM_JS = """
 (() => {
   if (window.__bhInputShim) return;
@@ -281,23 +270,18 @@ _NATIVE_INPUT_SHIM_JS = """
 
 
 class StreamingServer:
-    """Server that manages streaming sessions for human intervention.
+    """Hosts the operator wrapper and streams the page over a WebSocket.
 
     Example:
         server = StreamingServer(config=ServerConfig(port=8080))
         await server.start()
-
-        # Register a session
         await server.register_session(
             session_id="abc123",
             page=page,
             context=context,
             reason="Login required",
         )
-
-        # Wait for user to complete task
-        # ...
-
+        # ... wait for the human to finish ...
         await server.stop()
     """
 
@@ -305,23 +289,20 @@ class StreamingServer:
         """Initialize the streaming server.
 
         Args:
-            config: Server configuration. If not provided, uses defaults.
+            config: Server configuration; defaults to `ServerConfig()`.
         """
         self.config = config or ServerConfig()
         self.sessions: dict[str, HandoffSession] = {}
-        # Public capability token -> internal session id. The stream endpoints
-        # resolve by token (the secret in the URL); session_id stays internal.
+        # Capability token → session id. Endpoints resolve by token (the
+        # URL-borne secret); session_id stays internal.
         self._token_to_session: dict[str, str] = {}
         self.app = self._create_app()
         self._server: uvicorn.Server | None = None
 
     def _create_app(self) -> FastAPI:
-        """Create the FastAPI application."""
-
         @asynccontextmanager
         async def lifespan(app: FastAPI):
             yield
-            # Cleanup on shutdown
             for session in self.sessions.values():
                 if session.capture_task and not session.capture_task.done():
                     session.capture_task.cancel()
@@ -332,10 +313,9 @@ class StreamingServer:
 
         app = FastAPI(title="Browser Handoff Stream", lifespan=lifespan)
 
-        # No credentials are used (the stream is gated by the session id in the
-        # URL, not cookies/auth headers), so wildcard origins are valid here.
-        # allow_credentials must stay False: browsers reject "*" together with
-        # credentials, and Starlette disallows that combination.
+        # Wildcard origins are fine: the stream is gated by the
+        # URL-borne token, not cookies. `allow_credentials=False` is
+        # required because browsers/Starlette reject "*" with credentials.
         app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
@@ -346,27 +326,22 @@ class StreamingServer:
 
         @app.get("/", response_class=HTMLResponse, response_model=None)
         async def index(t: str | None = None):
-            """Serve the HTML client. `t` is the capability token."""
+            """Serve the operator HTML; `t` is the capability token."""
             session_state = self._resolve_token(t)
             if not session_state:
                 return HTMLResponse("<h1>Session not found</h1>", status_code=404)
-
-            # Mark session as accessed
             session_state.mark_accessed()
-
             return self._get_html_client(session_state.session_id, session_state.reason)
 
         @app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket, t: str | None = None):
-            """WebSocket endpoint.
+            """Two protocols on one URL, picked by session mode.
 
-            Two protocols on the same URL, picked by session mode:
-              - streaming sessions: binary frames out, JSON control in
-                (mouse/keyboard/paste/copy_request/ping…)
-              - passthrough sessions: text-only — server sends
-                ready/url_changed/completed/expired events; client sends
-                reload + iframe_focus events. No frames either direction;
-                the substrate's viewer owns the video channel.
+            - Streaming: binary frames out, JSON control in
+              (mouse / keyboard / paste / copy_request / ping…).
+            - Passthrough: text-only lifecycle (ready, url_changed,
+              completed, expired) + client reload/iframe_focus events.
+              No frames; the substrate's viewer owns the video channel.
 
             `t` is the capability token; an unknown or expired one is closed.
             """
@@ -378,12 +353,9 @@ class StreamingServer:
                 return
 
             session_state.websockets.append(websocket)
-            # Single bump covers both signals: the timestamp that
-            # `state` reads from, and the one-shot connect event that
-            # Handoff.wait_for_completion's lazy-install gate awaits.
-            # accept() succeeded → operator's tab is up → presence is the
-            # right framing even before the first explicit `presence`
-            # message lands.
+            # One bump on accept flips both presence signals at once:
+            # the connect gate for lazy install AND the freshness
+            # timestamp the orchestration callback reads.
             session_state.presence.bump()
 
             if session_state.is_passthrough:
@@ -397,8 +369,8 @@ class StreamingServer:
             cdp = session_state.cdp
             page = session_state.page
 
-            # Push the most recent frame immediately so the client paints
-            # something before the next screencast tick arrives.
+            # Push the latest frame so the client paints something before
+            # the next screencast tick.
             if session_state.latest_frame is not None:
                 with suppress(Exception):
                     await websocket.send_bytes(session_state.latest_frame)
@@ -422,13 +394,10 @@ class StreamingServer:
                         msg_type = message.get("type")
 
                         try:
-                            # Activity tracking moved into LLMDetection's
-                            # unified in-page watcher: the operator's
-                            # input is routed via CDP into the page, fires
-                            # real DOM events, and the watcher's listeners
-                            # catch them — same code path as passthrough
-                            # mode. So this handler is back to being a
-                            # pure event router, no activity bookkeeping.
+                            # Pure event router: activity tracking lives
+                            # in LLMDetection's in-page watcher, which
+                            # observes the DOM events these CDP calls
+                            # produce.
                             if msg_type == "mouse":
                                 await self._handle_mouse(cdp, message)
                             elif msg_type == "keyboard":
@@ -444,11 +413,10 @@ class StreamingServer:
                                         {"type": "copy_response", "text": text}
                                     )
                             elif msg_type == "cut_request":
-                                # Read the selection, ship it back as the
-                                # copy payload, then dispatch Delete to
-                                # remove it. Only effective in editable
-                                # contexts (input/textarea/contenteditable)
-                                # — same behavior as native ctrl+x.
+                                # Selection → operator's clipboard, then
+                                # dispatch Delete to remove it. Same as
+                                # native ctrl+x; only meaningful in
+                                # editable contexts.
                                 text = await self._read_selection(page)
                                 with suppress(Exception):
                                     await websocket.send_json(
@@ -471,21 +439,17 @@ class StreamingServer:
                                             "nativeVirtualKeyCode": 46,
                                         })
                             elif msg_type == "ping":
-                                # Echo the client's timestamp straight back so
-                                # the viewer can measure RTT against its own
-                                # clock. Avoids any server/client clock skew.
+                                # Echo the client's timestamp so the viewer
+                                # measures RTT against its own clock,
+                                # immune to clock skew.
                                 with suppress(Exception):
                                     await websocket.send_json(
                                         {"type": "pong", "ts": message.get("ts")}
                                     )
                             elif msg_type == "presence":
-                                # Wrapper sends this every ~2s while the tab
-                                # is visible. Bumps presence so its `state`
-                                # stays "present" for the orchestration's
-                                # gate; when the operator closes the tab or
-                                # backgrounds it, the pings stop and the
-                                # state decays to "stale" within
-                                # freshness_threshold.
+                                # ~2s heartbeat while the tab is visible;
+                                # missed pings let the state decay to
+                                # "stale" so the orchestration gate closes.
                                 session_state.presence.bump()
                         except Exception as e:
                             logger.error(f"Error handling {msg_type} event: {e}")
@@ -503,12 +467,10 @@ class StreamingServer:
     async def _stream_frames_to_ws(
         self, websocket: WebSocket, session: HandoffSession
     ) -> None:
-        """Push the latest frame to a single WS, dropping intermediate frames.
+        """Send the latest frame to one WS, dropping intermediate frames.
 
-        Latest-frame-wins: if capture produces N new frames while we're
-        awaiting send_bytes (slow client / tunnel / WAN), the next loop
-        iteration sees only the newest one and skips the rest. That gives
-        smooth playback under load instead of building a backlog.
+        Latest-frame-wins: under a slow client / WAN / tunnel, the next
+        loop iteration sees only the newest frame and skips backlog.
         """
         last_seq = -1
         while True:
@@ -545,18 +507,14 @@ class StreamingServer:
             session_id: Unique identifier for the session.
             page: Playwright page to stream.
             context: Browser context the page belongs to.
-            reason: Reason for handoff (shown to user).
-            scenario_name: Label of the matched scenario (breadcrumb header).
+            reason: Operator-facing explanation shown in the wrapper.
+            scenario_name: Label for the wrapper's breadcrumb header.
             viewport_size: Optional viewport dimensions.
-            stream_url: Optional substrate viewer URL. When set, the session
-                runs in passthrough mode: the screencast pump is skipped and
-                the operator gets a wrapper page that iframes this URL.
-            crop_metrics: Page-rect-on-display metrics for the iframe crop.
-                Six ints (screen_w/h, page_x/y, page_w/h) captured via
-                page.evaluate at handoff start. Only meaningful with stream_url.
-
-        Returns:
-            The created HandoffSession.
+            stream_url: Optional substrate viewer URL. Set → passthrough
+                mode: no screencast pump; the wrapper iframes this URL.
+            crop_metrics: Six ints (screen_w/h, page_x/y, page_w/h) used
+                to crop the iframe in passthrough mode. Only meaningful
+                with `stream_url`.
         """
         cdp = await context.new_cdp_session(page)
         await cdp.send("Page.enable")
@@ -572,46 +530,38 @@ class StreamingServer:
             stream_url=stream_url,
             crop_metrics=crop_metrics,
         )
-        # The token can't outlive the handoff itself, which is bounded by
-        # session_timeout — so a leaked link is dead once the handoff ends.
+        # Token lifetime is bounded by the handoff's session_timeout —
+        # leaked links die with the handoff.
         session.expires_at = time.time() + self.config.session_timeout
         self.sessions[session_id] = session
         self._token_to_session[session.access_token] = session_id
 
-        # Page-modifying helpers (context-menu suppression, native input shim)
-        # exist to make the operator's stream view behave like a real browser
-        # for input. In passthrough mode the operator interacts via the
-        # substrate's own viewer — touching the page from here would be a
-        # no-op at best and a behavior change at worst. Skip.
+        # Page-modifying helpers make the streamed view behave like a
+        # real browser for input (right-click, native picker UIs). In
+        # passthrough mode the operator drives the substrate's viewer
+        # directly — modifying the page would be confusing at best.
         if not session.is_passthrough:
             await self._suppress_context_menu(page)
             await self._inject_native_input_shim(page)
 
-        # Seed the URL with whatever Playwright has now, then track every
-        # subsequent main-frame navigation so the viewer's URL bar matches
-        # the page. Subframe navigations are ignored — operators care about
-        # the document URL, not third-party iframes. Both modes need this —
-        # the proxy template also renders a URL bar.
+        # Seed the URL bar with the current value and track navigations
+        # for the rest of the session. Both modes need this — the proxy
+        # template also renders a URL bar.
         with suppress(Exception):
             session.current_url = page.url
         self._attach_url_tracker(session)
 
-        # The initial screenshot + screencast pump only exist to feed the
-        # streaming WS. In passthrough mode there's no streaming WS to feed
-        # — frames flow operator <-> substrate directly via whatever
-        # transport the substrate's viewer uses. Activity tracking lives
-        # entirely inside LLMDetection's unified in-page watcher now, so
-        # the server has no setup to do for it in either mode.
+        # In passthrough mode the substrate viewer owns the video
+        # channel; bh's screencast pump only feeds the streaming WS.
         if not session.is_passthrough:
-            # Take initial screenshot as first frame so the page paints
-            # immediately when a client connects, before screencast warms up.
+            # Seed with one screenshot so the client paints immediately
+            # before the screencast warms up.
             with suppress(Exception):
                 screenshot_bytes = await page.screenshot(
                     type="jpeg", quality=self.config.jpeg_quality
                 )
                 await self._publish_frame(session, screenshot_bytes)
 
-            # Start capture immediately
             session.capture_task = asyncio.create_task(self._capture_frames(session))
 
         return session
@@ -619,10 +569,9 @@ class StreamingServer:
     def _attach_url_tracker(self, session: HandoffSession) -> None:
         """Push main-frame URL changes to every connected viewer.
 
-        Playwright fires framenavigated on the loop thread but from a sync
-        callback, so the async fan-out has to be scheduled via the
-        background-task pattern. Subframes (ads, embeds) are filtered out
-        — the URL bar is for the document.
+        Playwright fires `framenavigated` from a sync callback, so the
+        async fan-out runs via the background-task pattern. Subframes
+        are ignored — the URL bar is for the document.
         """
         page = session.page
 
@@ -653,21 +602,18 @@ class StreamingServer:
     async def _handle_passthrough_websocket(
         self, websocket: WebSocket, session: HandoffSession
     ) -> None:
-        """Status-only WS protocol for passthrough sessions.
+        """Status-only WS for passthrough sessions.
 
-        No binary frames either direction. Server pushes ready /
-        url_changed / completed / expired lifecycle events; client sends
-        reload requests and iframe_focus pings. The substrate's own
-        viewer owns the video + input channels — this WS is purely the
-        wrapper-page's lifeline back to the Handoff.
+        Server pushes lifecycle events (ready, url_changed, completed,
+        expired); client sends reload and presence. The substrate viewer
+        owns the video + input channels — this WS is the wrapper's
+        lifeline back to the Handoff.
         """
-        # Acknowledge so the wrapper page can flip its connection-state
-        # pill from "Connecting" to "Live".
+        # Flip the wrapper's connection pill from "Connecting" to "Live".
         with suppress(Exception):
             await websocket.send_json({"type": "ready"})
 
-        # Seed the URL bar — same behavior as streaming mode, just no
-        # frame seeding (no frames to seed).
+        # Seed the URL bar (no frames to seed in passthrough).
         if session.current_url is not None:
             with suppress(Exception):
                 await websocket.send_json(
@@ -686,26 +632,18 @@ class StreamingServer:
                     msg_type = message.get("type")
 
                     if msg_type == "reload":
-                        # Operator clicked reload in the wrapper toolbar.
-                        # Trigger page.reload() via Playwright; the resulting
-                        # framenavigated will push url_changed back to all
-                        # WSes via _attach_url_tracker.
+                        # Operator clicked reload; the resulting
+                        # framenavigated will push url_changed back via
+                        # _attach_url_tracker.
                         try:
                             await page.reload()
                         except Exception as e:
                             logger.info("passthrough reload failed: %s", e)
                     elif msg_type == "presence":
-                        # Wrapper sends this every ~2s while the tab is
-                        # visible. Bumps presence so its `state` stays
-                        # "present" for the orchestration's gate; when
-                        # the operator closes the tab the pings stop and
-                        # the state decays to "stale" within
-                        # freshness_threshold.
+                        # ~2s heartbeat while the tab is visible.
                         session.presence.bump()
-                    # Other types: ignored. Streaming-mode messages
-                    # (mouse/keyboard/paste/etc.) don't apply here — the
-                    # substrate owns input — and silently dropping them is
-                    # the right behavior if a client sends one by mistake.
+                    # Other types are silently ignored — streaming-mode
+                    # messages (mouse/keyboard/…) don't apply here.
         except Exception as e:
             logger.error(f"passthrough WebSocket error: {e}")
 
@@ -713,9 +651,9 @@ class StreamingServer:
     async def _suppress_context_menu(page: "Page") -> None:
         """Block the native right-click menu on a streamed page.
 
-        add_init_script covers documents loaded later (navigations during the
-        handoff); evaluate covers the one already loaded. Both are best-effort
-        — a transient failure must not abort the handoff.
+        `add_init_script` covers future documents (navigations during
+        the handoff); `evaluate` covers the one already loaded. Both
+        best-effort — transient failure must not abort the handoff.
         """
         with suppress(Exception):
             await page.add_init_script(_CONTEXT_MENU_GUARD_JS)
@@ -726,11 +664,8 @@ class StreamingServer:
     async def _inject_native_input_shim(page: "Page") -> None:
         """Replace native <select> popups and date/time pickers with DOM UI.
 
-        Same install pattern as the context-menu guard: add_init_script for
-        future documents, evaluate for the already-loaded one. Both
-        best-effort — a transient failure must not abort the handoff, the
-        operator can still drive the page via keyboard / type-to-search even
-        if the shim doesn't install.
+        Same dual-install pattern as the context-menu guard. Best-effort
+        — without the shim the operator can still keyboard-drive the page.
         """
         with suppress(Exception):
             await page.add_init_script(_NATIVE_INPUT_SHIM_JS)
@@ -746,14 +681,11 @@ class StreamingServer:
             session.frame_condition.notify_all()
 
     async def unregister_session(self, session_id: str) -> None:
-        """Unregister a session and fully tear it down.
+        """Tear down a single session: capture, sender tasks, WSes, token.
 
-        Cancels the capture task, wakes the per-WS sender tasks, and closes any
-        client connections — so a single session unwinds cleanly on its own,
-        without waiting for the whole server to stop. This matters when the
-        server is shared across concurrent handoffs: one handoff finishing must
-        not leave its WebSocket/sender task dangling on the still-running
-        server.
+        Lets one handoff unwind cleanly without waiting for the whole
+        server to stop — matters when the server is shared across
+        concurrent handoffs.
 
         Args:
             session_id: The session to unregister.
@@ -761,14 +693,12 @@ class StreamingServer:
         session = self.sessions.pop(session_id, None)
         if session is None:
             return
-        # Drop the token so a leaked link stops resolving the moment the
-        # handoff ends.
+        # Drop the token so leaked links stop resolving at handoff end.
         self._token_to_session.pop(session.access_token, None)
 
         if session.capture_task and not session.capture_task.done():
             session.capture_task.cancel()
-        # Cancel any in-flight ack/publish tasks (copy first — done callbacks
-        # mutate the set as they finish).
+        # Copy first — done callbacks mutate the set as tasks finish.
         for task in list(session.background_tasks):
             task.cancel()
 
@@ -780,7 +710,7 @@ class StreamingServer:
                 await ws.close()
 
     def is_session_accessed(self, session_id: str) -> bool:
-        """Check if a session has been accessed by the user.
+        """Return True if any client has loaded the operator URL.
 
         Args:
             session_id: The session to check.
@@ -806,9 +736,8 @@ class StreamingServer:
     def _resolve_token(self, token: str | None) -> HandoffSession | None:
         """Resolve a capability token to its session, or None.
 
-        Returns None for a missing/unknown token or one past its expiry — the
-        endpoints treat all three identically (not found), so a caller can't
-        distinguish "wrong token" from "expired".
+        Missing, unknown, and expired tokens all return None — callers
+        can't distinguish them from "wrong token."
         """
         if not token:
             return None
@@ -826,12 +755,10 @@ class StreamingServer:
     def _spawn_tracked(
         session: HandoffSession, coro: "Coroutine[Any, Any, Any]"
     ) -> "asyncio.Task[Any]":
-        """Schedule a fire-and-forget coroutine while holding a strong ref.
+        """Schedule a fire-and-forget task and hold a strong ref to it.
 
-        The event loop keeps only weak references to tasks, so an unreferenced
-        ack/publish task could be garbage-collected mid-flight (a dropped ack
-        stalls the whole screencast). Keep it in session.background_tasks until
-        it completes, then let it remove itself.
+        The event loop only keeps weak refs; an unreferenced ack/publish
+        task could be GC'd mid-flight (a dropped ack stalls capture).
         """
         task = asyncio.ensure_future(coro)
         session.background_tasks.add(task)
@@ -839,12 +766,11 @@ class StreamingServer:
         return task
 
     async def _capture_frames(self, session: HandoffSession) -> None:
-        """Capture frames from CDP screencast and publish via Condition.
+        """Capture CDP screencast frames and publish them via Condition.
 
-        Defensive early return for passthrough sessions: register_session
-        already skips scheduling this task in that mode, but if a caller
-        invokes _capture_frames directly we must not start a screencast on
-        a session whose viewer is the substrate's (not ours).
+        Defensive no-op in passthrough mode — register_session already
+        skips this task, but a direct caller must not start a screencast
+        on a substrate-owned session.
         """
         if session.is_passthrough:
             return
@@ -854,7 +780,7 @@ class StreamingServer:
             frame_session_id = params.get("sessionId")
             data = params.get("data", "")
 
-            # Ack first so Chrome keeps producing — otherwise capture stalls.
+            # Ack first or Chrome stops producing.
             if frame_session_id:
                 self._spawn_tracked(
                     session,
@@ -867,8 +793,7 @@ class StreamingServer:
                 frame_bytes = base64.b64decode(data)
             except Exception:
                 return
-            # CDP fires this on the loop thread but from a sync callback —
-            # schedule the async publish without awaiting it.
+            # CDP fires sync; schedule the async publish without awaiting.
             self._spawn_tracked(session, self._publish_frame(session, frame_bytes))
 
         cdp.on("Page.screencastFrame", on_frame)
@@ -900,9 +825,8 @@ class StreamingServer:
 
         if action in ["mousedown", "mouseup"]:
             logger.info(f"Mouse {action} at ({x}, {y})")
-            # clickCount drives the remote's double/triple-click detection
-            # (word/paragraph selection). The client forwards `e.detail` from
-            # the local MouseEvent, which is the consecutive-click count.
+            # clickCount drives double/triple-click selection. Forwarded
+            # from the client's `e.detail`.
             click_count = int(message.get("clickCount", 1) or 1)
             await cdp.send(
                 "Input.dispatchMouseEvent",
@@ -915,9 +839,9 @@ class StreamingServer:
                 },
             )
         elif action == "mousemove":
-            # CDP needs the held-button identity on mouseMoved for drag
-            # semantics — without it, a move during a held click is treated
-            # as a hover and the remote never extends a text selection.
+            # CDP needs the held button on mouseMoved for drag semantics —
+            # without it, a move under a held click reads as hover and
+            # text selection won't extend.
             buttons = int(message.get("buttons", 0) or 0)
             params: dict[str, Any] = {"type": "mouseMoved", "x": x, "y": y, "buttons": buttons}
             if buttons & 1:
@@ -940,7 +864,7 @@ class StreamingServer:
             )
 
     async def _handle_keyboard(self, cdp: "CDPSession", message: dict[str, Any]) -> None:
-        """Handle keyboard events with proper special character support."""
+        """Translate a client keyboard event into Input.dispatchKeyEvent."""
         action = message.get("action")
         key = message.get("key", "")
         code = message.get("code", "")
@@ -966,7 +890,6 @@ class StreamingServer:
             "modifiers": modifiers,
         }
 
-        # Special keys mapping
         key_codes = {
             "Backspace": 8,
             "Tab": 9,
@@ -996,7 +919,6 @@ class StreamingServer:
             "F12": 123,
         }
 
-        # Add virtual key code
         if key in key_codes:
             params["windowsVirtualKeyCode"] = key_codes[key]
             params["nativeVirtualKeyCode"] = key_codes[key]
@@ -1008,12 +930,9 @@ class StreamingServer:
             params["windowsVirtualKeyCode"] = key_code
             params["nativeVirtualKeyCode"] = key_code
 
-        # `text` is what drives the page's default action — inserting the
-        # character, submitting a form, adding a newline. It belongs only on
-        # keyDown without ctrl/alt/meta (shift is fine). Without it, Enter
-        # dispatches a keydown but never submits/inserts. Enter carries a
-        # carriage return; other named keys (Tab, arrows, …) carry no text;
-        # single printable characters carry themselves.
+        # `text` drives the page's default action (insert / submit /
+        # newline). keyDown only, no ctrl/alt/meta (shift is fine).
+        # Without it, Enter would dispatch but never submit.
         if action == "keydown" and not (ctrl or alt or meta):
             if key == "Enter":
                 params["text"] = "\r"
@@ -1023,7 +942,7 @@ class StreamingServer:
         await cdp.send("Input.dispatchKeyEvent", params)
 
     def _get_symbol_keycode(self, key: str) -> int:
-        """Get the Windows virtual key code for symbol characters."""
+        """Windows virtual key code for a printable symbol character."""
         symbol_map = {
             "!": 49,
             "@": 50,
@@ -1080,10 +999,9 @@ class StreamingServer:
     async def _handle_paste(cdp: "CDPSession", message: dict[str, Any]) -> None:
         """Insert clipboard text from the operator at the page's focus.
 
-        The remote browser has its own clipboard, isolated from the operator's,
-        so `Input.insertText` is used instead of dispatching ctrl+v — the
-        operator's local clipboard is the authority and the remote just drops
-        the text where the caret is.
+        The remote browser has its own clipboard; `Input.insertText`
+        drops the operator's local text at the caret instead of
+        dispatching ctrl+v (which would paste the remote's clipboard).
         """
         text = message.get("text", "")
         if not text:
@@ -1092,18 +1010,14 @@ class StreamingServer:
 
     @staticmethod
     async def _read_selection(page: "Page") -> str:
-        """Return the current text selection on the remote page.
-
-        Empty string when nothing is selected — used as the copy payload sent
-        back to the operator's clipboard.
-        """
+        """Return the page's current text selection; empty string if none."""
         try:
             return await page.evaluate("() => window.getSelection().toString()")
         except Exception:
             return ""
 
     async def notify_task_completed(self, session_id: str, reason: str | None = None) -> None:
-        """Notify frontend that task is completed.
+        """Push a task_completed event to every connected viewer.
 
         Args:
             session_id: The session that completed.
@@ -1122,10 +1036,8 @@ class StreamingServer:
     ) -> str | None:
         """Snapshot the page as a base64 JPEG data URL for session-end events.
 
-        Only meaningful for passthrough sessions — streaming mode already
-        shows its own last frame when the screencast stops. Returns None
-        on any failure (page detached, headless mocks, etc.) so callers
-        can include the field conditionally.
+        Only meaningful in passthrough mode — streaming mode keeps its
+        last screencast frame on display. Returns None on any failure.
         """
         if not session.is_passthrough:
             return None
@@ -1139,11 +1051,10 @@ class StreamingServer:
     async def _broadcast_session_end(
         self, session_id: str, event_type: str
     ) -> None:
-        """Shared shape for task_expired / task_cancelled.
+        """Shared body for task_expired / task_cancelled.
 
-        Captures the screenshot, builds {type, screenshot?}, fans out to
-        every connected WS, suppresses send errors so one disconnected
-        viewer doesn't abort the broadcast.
+        Builds `{type, screenshot?}`, fans out to every connected WS,
+        swallows per-WS send errors.
         """
         if session_id not in self.sessions:
             return
@@ -1157,31 +1068,25 @@ class StreamingServer:
                 await ws.send_json(message)
 
     async def notify_task_expired(self, session_id: str) -> None:
-        """Notify frontend that the session hit session_timeout.
+        """Push a task_expired event — the human didn't finish in time.
 
-        Distinct from cancellation: this fires when the operator simply
-        didn't finish within the configured budget. The proxy template
-        renders a "Session expired" card and swaps the iframe out for the
-        captured screenshot (passthrough's WebRTC stream survives bh's
-        teardown — the screenshot is the bh-controlled stand-in that does
-        not). Streaming-mode UI ignores this event.
+        Distinct from cancellation: this is the timeout path. The proxy
+        template swaps the iframe out for the captured screenshot;
+        streaming-mode UI ignores this event.
         """
         await self._broadcast_session_end(session_id, "task_expired")
 
     async def notify_task_cancelled(self, session_id: str) -> None:
-        """Notify frontend that the session was cancelled by the caller.
+        """Push a task_cancelled event — the caller gave up on the await.
 
-        Fires when wait_for_completion's await gets cancelled —
-        browser-use's per-step timeout, ctrl-c at the script level,
-        an explicit asyncio.Task.cancel(). Distinct from task_expired
-        so the operator sees "the agent gave up on this step" instead
-        of "you ran out of time" — accurate framing matters when the
-        operator is debugging why they got booted.
+        Fires on wait_for_completion's CancelledError (per-step timeout,
+        ctrl-c, explicit Task.cancel). Distinct from expired so the
+        operator sees "the agent gave up" instead of "you ran out of time".
         """
         await self._broadcast_session_end(session_id, "task_cancelled")
 
     async def stop_screencast(self, session_id: str) -> None:
-        """Stop the screencast for a session (e.g., before sensitive data appears).
+        """Stop the screencast for a session (e.g. before sensitive data appears).
 
         Args:
             session_id: The session to stop screencasting.
@@ -1192,14 +1097,11 @@ class StreamingServer:
                 session.capture_task.cancel()
 
     def _get_html_client(self, session_id: str, reason: str) -> str:
-        """Render the operator-facing HTML for a session.
+        """Render the operator HTML for a session.
 
-        Picks the template based on session mode:
-          - passthrough → proxy_intervention.html (wraps the substrate's own
-            viewer URL in a thin chrome + reason banner, no own streaming)
-          - streaming   → intervention.html (the screencast-driven viewer)
-        Same render call shape; proxy template additionally gets stream_url
-        and crop_metrics so its iframe can be positioned/cropped correctly.
+        Passthrough sessions get `proxy_intervention.html` (iframes the
+        substrate viewer + crops via crop_metrics); streaming sessions
+        get `intervention.html` (the screencast viewer).
         """
         session = self.sessions[session_id]
         if session.is_passthrough:
@@ -1223,38 +1125,33 @@ class StreamingServer:
         )
 
     def get_operator_url(self, session_id: str) -> str:
-        """Get the public operator URL for a session.
+        """Build the public URL the operator opens.
 
-        The URL carries the session's capability token (not the session id),
-        which is the secret an operator needs to open the wrapper page.
-        The Handoff sends this URL to the operator via notifiers; the
-        operator's browser loads it and gets the intervention or proxy
-        template depending on session mode.
+        The URL carries the session's capability token (not the
+        session id) — that's the secret an operator needs to load the
+        wrapper. Handoff ships this URL through notifiers.
 
         Args:
             session_id: The session ID.
-
-        Returns:
-            The full URL the operator opens.
         """
         base_url = self.config.get_base_url()
         token = self.sessions[session_id].access_token
         return f"{base_url}/?t={token}"
 
     def get_stream_url(self, session_id: str) -> str:
-        """Deprecated alias for :meth:`get_operator_url`. Removed in v0.6."""
+        """Deprecated alias for :meth:`get_operator_url`. Removed in v0.7."""
         import warnings
 
         warnings.warn(
             "get_stream_url() is deprecated; use get_operator_url() instead. "
-            "Will be removed in v0.6.",
+            "Will be removed in v0.7.",
             DeprecationWarning,
             stacklevel=2,
         )
         return self.get_operator_url(session_id)
 
     async def start(self) -> None:
-        """Start the server."""
+        """Bind the port and serve until `stop()` is called."""
         config = uvicorn.Config(
             self.app,
             host=self.config.host,
@@ -1267,13 +1164,13 @@ class StreamingServer:
     async def stop(self) -> None:
         """Stop the server gracefully.
 
-        Close WebSockets from the server side BEFORE asking uvicorn to exit
-        so their handlers unwind via the WebSocketDisconnect path instead
-        of getting cancelled mid-await (which surfaces noisy CancelledError
-        tracebacks from starlette/uvicorn's protocol layer).
+        Close WebSockets server-side BEFORE asking uvicorn to exit so
+        handlers unwind via WebSocketDisconnect instead of getting
+        cancelled mid-await (which surfaces noisy CancelledError
+        tracebacks from starlette/uvicorn).
         """
         for session in list(self.sessions.values()):
-            # Wake up per-WS sender tasks so they exit cleanly.
+            # Wake per-WS sender tasks so they exit cleanly.
             async with session.frame_condition:
                 session.closed = True
                 session.frame_condition.notify_all()

@@ -1,13 +1,7 @@
 """Structured message items for notifiers.
 
-Notifiers receive a list of these in `Notifier.send(message=...)` and each
-channel renders them with its native primitives — Rich link markup for
-the console, embed fields for Discord, mrkdwn hyperlinks for Slack,
-<a href> tags for HTML email — instead of a pre-formatted string that
-every channel has to parse back out.
-
-A plain `str` is still accepted for back-compat; the base class wraps it
-as a single TextItem so subclasses always operate on the structured form.
+Each notifier renders these natively (Rich markup, Discord embeds,
+Slack mrkdwn, HTML <a>) instead of parsing a flat string.
 """
 
 from __future__ import annotations
@@ -27,10 +21,9 @@ class TextItem:
 class LinkItem:
     """A URL with optional prefix/suffix labels.
 
-    Notifiers render the link natively (clickable hyperlink in Slack/email,
-    OSC 8 link in supported terminals, embed `url` field on Discord). The
-    URL is kept as one logical token so triple-click selection picks it up
-    in the console even when the line wraps visually.
+    Notifiers render the URL natively (clickable hyperlink, OSC 8 in
+    supported terminals, Discord embed `url`). Kept as one logical
+    token so triple-click selection picks it up even when wrapped.
     """
 
     url: str
@@ -38,8 +31,7 @@ class LinkItem:
     suffix: str = ""
 
 
-# Use the Union syntax (not `|`) because the typing module's get_args /
-# isinstance helpers work on Union[...] across all supported Pythons.
+# typing.Union (not `|`) so get_args / isinstance helpers work uniformly.
 MessageItem = Union[TextItem, LinkItem]
 
 

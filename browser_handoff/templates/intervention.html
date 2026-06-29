@@ -1074,10 +1074,9 @@
       const reasonDropdown = document.getElementById('reason-dropdown');
       const reconnectPill = document.getElementById('reconnect-pill');
 
-      // Show more / Show less for long reasons. The header truncates with a
-      // right-edge fade; clicking the inline "Show more" link drops a panel
-      // with the full text over the stream (z-index: 60), so the layout
-      // doesn't shift.
+      // Show more / Show less for long reasons. Truncates in the header
+      // with a right-edge fade; click opens an overlay panel (z-index 60)
+      // so layout doesn't shift.
       function checkReasonOverflow() {
         const overflows = headerReasonEl.scrollWidth > headerReasonEl.clientWidth + 1;
         reasonWrap.classList.toggle('truncated', overflows);
@@ -1112,42 +1111,35 @@
       });
       window.addEventListener('resize', checkReasonOverflow);
       new ResizeObserver(checkReasonOverflow).observe(headerReasonEl);
-      // First measurement before font swap can mis-report overflow when
-      // Plex's metrics differ from the fallback system font.
+      // Pre-font-swap measure can mis-report overflow when Plex's
+      // metrics differ from the system fallback — re-check on fonts.ready.
       checkReasonOverflow();
       if (document.fonts && document.fonts.ready) {
         document.fonts.ready.then(checkReasonOverflow);
       }
 
-      // Determine WebSocket protocol based on page protocol.
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?t=${ACCESS_TOKEN}`);
       ws.binaryType = 'blob';
       let mouseThrottle = null;
 
-      // Once the task is marked completed, the server tears down and the WS
-      // closes — that's expected. This flag suppresses any further connection-
-      // state updates so the latency pill doesn't flip to Offline and the
-      // reconnecting overlay doesn't reappear under the completion overlay.
+      // Suppresses connection-state churn after a completed task — the
+      // server tears down and the WS closes, but we don't want the
+      // latency pill flipping to Offline under the completion overlay.
       let isCompleted = false;
       let streamConnected = false;
       let lastLatency = null;
-      // Watchdog: timestamp of the most recent pong we received. We ping
-      // every 2s; if too many pings go unanswered the WS is presumed dead
-      // (uvicorn crashed, OS killed the parent process, network cable
-      // yanked — any case where the close frame never arrives so
-      // ws.onclose doesn't fire on its own). Without this, the wrapper
-      // would sit frozen at the last frame with the last good latency
-      // value, no way for the operator to know the session is gone.
+      // Pong watchdog: trips when too many pings go unanswered (server
+      // crashed / OS-killed / network dropped — cases where ws.onclose
+      // never fires). Without it the wrapper would sit frozen on the
+      // last frame with no signal the session is gone.
       let lastPongTs = null;
       const PONG_TIMEOUT_MS = 6000;  // ~3 missed pings → assume dead
 
       function applyLatencyState(state) {
-        // Only two real states for the pill now: 'connecting' (initial
-        // handshake, no frame yet) and 'connected' (RTT values flow into
-        // setLatencyValue). Any unrecoverable disconnect goes straight to
-        // the ended-overlay card via showEndedOverlay — there's no
-        // "Reconnecting" sweep because streaming-mode doesn't actually try.
+        // Two states: 'connecting' (no frame yet) and 'connected' (RTT
+        // values flow). Any disconnect goes straight to showEndedOverlay
+        // — streaming mode doesn't reconnect.
         if (isCompleted) return;
         latencyPill.classList.remove('warn', 'bad', 'connecting');
         if (state === 'connecting') {
@@ -1180,10 +1172,9 @@
         lockEl.title = isSecure ? 'Secure' : 'Not secure';
       }
 
-      // Latest-frame-wins client-side. We may receive frames faster than the
-      // screen can paint; only the newest unrendered frame matters.
-      // requestAnimationFrame coalesces multiple receive ticks into a single
-      // paint per refresh cycle.
+      // Latest-frame-wins: only the newest unrendered frame matters.
+      // requestAnimationFrame coalesces N receive ticks into one paint
+      // per refresh cycle.
       let pendingBlob = null;
       let rafScheduled = false;
       let currentObjectUrl = null;
@@ -1199,29 +1190,25 @@
         if (previous) URL.revokeObjectURL(previous);
         if (!streamConnected) {
           streamConnected = true;
-          // Reveal the <img> now that it has a real frame to display;
-          // before this point the alt-text placeholder would show.
+          // Reveal the <img> now that it has a real frame; before this
+          // the alt-text placeholder showed.
           stream.classList.add('has-frame');
           applyLatencyState('connected');
-          // Stop the spinner now that frames are arriving.
           reloadBtn.classList.remove('spinning');
         }
       }
 
       ws.onopen = () => {
-        // Keep the pill in 'connecting' until the first frame actually
-        // arrives — a clean ws.onopen with no frames yet still feels stalled.
-        // Seed the watchdog so it doesn't trip while we're waiting for the
-        // first pong; ping cadence is 2s and PONG_TIMEOUT_MS is 6s so the
-        // first pong has plenty of slack on a healthy connection.
+        // Seed the watchdog so it doesn't trip while we wait for the
+        // first pong. Pill stays 'connecting' until the first frame —
+        // a bare ws.onopen with no frames still feels stalled.
         lastPongTs = Date.now();
       };
 
       ws.onclose = () => {
         if (isCompleted) return;
-        // No clean end event arrived before the close: caller's process
-        // died, network dropped, server crashed. The cause doesn't matter
-        // to the operator — the session is unrecoverable either way.
+        // No clean end event landed before close — the session is
+        // unrecoverable; the cause doesn't matter to the operator.
         streamConnected = false;
         showEndedOverlay();
       };
@@ -1247,14 +1234,12 @@
         } else if (message.type === 'task_expired') {
           showExpiredOverlay();
         } else if (message.type === 'task_cancelled') {
-          // Server distinguishes cancelled from a connection drop, but the
-          // operator sees one "session ended" card either way.
+          // One "session ended" card whether the server sent cancelled
+          // or the WS just dropped — the cause isn't actionable here.
           showEndedOverlay();
         } else if (message.type === 'copy_response') {
-          // The page selection round-trips here so we can drop it onto the
-          // operator's local clipboard. Silent failure (no permission, no
-          // selection) — operator can retry. `cut` flag distinguishes a
-          // cut from a copy so the toast reads correctly.
+          // Page selection arriving back from the server → operator's
+          // local clipboard. `cut` flag picks the toast wording.
           if (message.text && navigator.clipboard && navigator.clipboard.writeText) {
             const toastKind = message.cut ? 'cut' : 'copy';
             navigator.clipboard.writeText(message.text)
@@ -1264,13 +1249,12 @@
         } else if (message.type === 'url_changed') {
           setUrl(message.url);
         } else if (message.type === 'pong') {
-          // Echo'd timestamp from the server — RTT is now() minus that ts.
+          // Echo'd timestamp → RTT = now() - ts.
           if (typeof message.ts === 'number') {
             const rtt = Date.now() - message.ts;
             if (rtt >= 0) setLatencyValue(rtt);
           }
-          // Refresh the watchdog. As long as pongs are flowing we know
-          // the server is alive even if no other events are firing.
+          // Refresh the watchdog — pongs are the liveness signal.
           lastPongTs = Date.now();
         }
       };
@@ -1282,10 +1266,9 @@
       }
 
       function markEnded() {
-        // Shared cleanup for any terminal state. Setting isCompleted gates
-        // every other connection-state path so the WS close that follows
-        // session teardown doesn't flip the latency pill to Offline or
-        // re-show the reconnecting overlay underneath the end-card.
+        // Shared cleanup for any terminal state. `isCompleted` gates
+        // every later connection-state path so the post-teardown WS
+        // close doesn't flip the pill or re-show the reconnect overlay.
         isCompleted = true;
         latencyPill.style.display = 'none';
         streamContainer.classList.remove('reconnecting');
@@ -1319,8 +1302,7 @@
         }
       }
 
-      // Toast system — cap at 3 visible so a burst of clipboard events
-      // doesn't bury the stream.
+      // Toast stack — cap visible so a burst doesn't bury the stream.
       const MAX_TOASTS = 3;
       const TOAST_SPECS = {
         paste: {
@@ -1362,8 +1344,7 @@
 
       reloadBtn.onclick = () => {
         reloadBtn.classList.add('spinning');
-        // Safety net: even if no frame arrives, drop the spinner after 2s so
-        // it doesn't stay spinning forever on a stalled stream.
+        // Drop the spinner after 2s regardless — covers stalled streams.
         setTimeout(() => reloadBtn.classList.remove('spinning'), 2000);
         send({type: 'navigate', action: 'reload'});
       };
@@ -1376,10 +1357,9 @@
       function getCoords(e) {
         const rect = stream.getBoundingClientRect();
 
-        // Use actual frame dimensions, not VIEWPORT_WIDTH/HEIGHT. The
-        // template values can disagree with what CDP actually captures
-        // (Xvfb display size, window decorations, devicePixelRatio, or
-        // Page.startScreencast clamping). naturalWidth/Height is the truth.
+        // Use frame dimensions, not VIEWPORT_WIDTH/HEIGHT — the
+        // template values can disagree with what CDP captures (Xvfb
+        // size, window chrome, devicePixelRatio, screencast clamping).
         const naturalW = stream.naturalWidth;
         const naturalH = stream.naturalHeight;
         if (!naturalW || !naturalH) return null;
@@ -1407,18 +1387,18 @@
           return null;
         }
 
-        // Map displayed-pixel → frame-pixel. Input.dispatchMouseEvent expects
-        // page CSS pixels; with devicePixelRatio=1 (default Xvfb), frame
-        // pixels equal viewport CSS pixels, so this is what CDP wants.
+        // Map displayed-pixel → frame-pixel. CDP wants page CSS
+        // pixels; with devicePixelRatio=1 (default Xvfb) frame pixels
+        // equal viewport CSS pixels.
         return {
           x: Math.round((x - offsetX) * (naturalW / imageWidth)),
           y: Math.round((y - offsetY) * (naturalH / imageHeight)),
         };
       }
 
-      // Suppress native image drag — without this the browser swallows
-      // mousemoves into its drag-and-drop machinery and the page sees a
-      // click, never a drag-select.
+      // Suppress native image drag — otherwise the browser captures
+      // mousemoves into drag-and-drop and the page sees a click,
+      // never a drag-select.
       stream.ondragstart = (e) => e.preventDefault();
 
       function spawnClickRing(clientX, clientY) {
@@ -1432,9 +1412,9 @@
       }
 
       stream.onmousedown = (e) => {
-        // preventDefault on the left button so the local browser doesn't try
-        // to start a selection / drag on the <img>. All movement semantics
-        // belong to the page being streamed.
+        // preventDefault on left so the local browser doesn't start a
+        // selection or drag on the <img>; movement semantics belong to
+        // the streamed page.
         if (e.button === 0) e.preventDefault();
         const coords = getCoords(e);
         if (!coords) return;
@@ -1468,15 +1448,12 @@
         send({type: 'mouse', action: 'wheel', x: coords.x, y: coords.y, deltaX: e.deltaX, deltaY: e.deltaY});
       };
 
-      // Clipboard relay: the streamed browser has its own (isolated)
-      // clipboard, so ctrl/cmd + v / c are intercepted here. Paste reads the
-      // operator's local clipboard and sends the text; copy asks the server
-      // for the page's current selection and writes it to the local
-      // clipboard.
+      // Clipboard relay — the streamed browser has its own clipboard,
+      // so paste/copy/cut are intercepted: paste sends the operator's
+      // local text; copy/cut round-trip the page's current selection.
       function isClipboardShortcut(e) {
         if (!(e.ctrlKey || e.metaKey)) return null;
-        // Prefer e.code (physical key) so non-Latin layouts still trigger
-        // the intercept. Fall back to e.key when code isn't populated.
+        // Prefer e.code so non-Latin layouts still match.
         const code = e.code || '';
         if (code === 'KeyV') return 'v';
         if (code === 'KeyC') return 'c';
@@ -1485,10 +1462,9 @@
         return (k === 'v' || k === 'c' || k === 'x') ? k : null;
       }
 
-      // The four Ctrl/Meta combos we forward to the remote page: A (select
-      // all), C (copy), V (paste), X (cut). Every other Ctrl/Meta combo
-      // passes through to the local browser so Ctrl+W, Ctrl+T, Ctrl+R,
-      // F11, etc. behave normally.
+      // Ctrl/Meta combos forwarded to the remote page: A (select all),
+      // C (copy), V (paste), X (cut). Everything else passes through
+      // to the local browser (Ctrl+W, Ctrl+R, F11, …).
       function isForwardedShortcut(e) {
         if (!(e.ctrlKey || e.metaKey)) return false;
         const code = e.code || '';
@@ -1498,13 +1474,11 @@
       }
 
       document.onkeydown = async (e) => {
-        // Stream not focused -> every key belongs to the local browser.
-        // Operator interacting with URL bar, a toolbar button, the help
-        // overlay, anything else outside the stream -> we do nothing.
+        // Stream not focused → keys belong to the local browser (URL
+        // bar, toolbar, help overlay, etc.).
         if (document.activeElement !== streamContainer) return;
 
-        // Viewer-specific shortcuts (only when stream has focus).
-        // `?` toggles the help overlay; Esc closes it / the reason dropdown.
+        // Viewer shortcuts: `?` toggles help; Esc closes help / reason.
         if (e.key === '?' || (e.shiftKey && e.key === '/')) {
           e.preventDefault();
           helpOverlay.classList.toggle('show');
@@ -1521,10 +1495,9 @@
           }
         }
 
-        // Ctrl/Meta combo that isn't one of the four forwarded ones ->
-        // belongs to the local browser (Ctrl+W close tab, Ctrl+R reload,
-        // Ctrl+F find, etc.). Plain keys (no modifier) fall through to
-        // the forward path below so typing into form fields still works.
+        // Non-forwarded Ctrl/Meta combos belong to the local browser
+        // (Ctrl+W, Ctrl+R, Ctrl+F, …). Plain keys fall through so
+        // typing into form fields still works.
         if ((e.ctrlKey || e.metaKey) && !isForwardedShortcut(e)) return;
 
         e.preventDefault();
@@ -1539,8 +1512,7 @@
             }
           } catch (err) {
             showToast('warn');
-            // Fall back to the raw key so behavior matches today's
-            // broken-but-familiar baseline.
+            // Fall back to forwarding the raw key on permission denial.
             send({type: 'keyboard', action: 'keydown', key: e.key, code: e.code, ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey});
           }
           return;
@@ -1566,43 +1538,31 @@
 
       stream.oncontextmenu = (e) => e.preventDefault();
 
-      // The orange focus ring is the operator's signal that the stream
-      // owns typing. Track real DOM focus so it can't mislead them — if
-      // the ring is on, keys forward; if it's off, keys go to the local
-      // tab. Auto-focus on load so the common path (open viewer, start
-      // typing) works without an explicit click.
+      // Orange focus ring = stream owns typing. Bound to real DOM
+      // focus so the visual can't lie. Auto-focus on load so the
+      // common path (open viewer → start typing) works click-free.
       streamContainer.addEventListener('focus', () =>
         streamContainer.classList.add('has-focus'));
       streamContainer.addEventListener('blur', () =>
         streamContainer.classList.remove('has-focus'));
       streamContainer.focus();
 
-      // Latency ping/pong: client measures RTT against its own clock.
-      // Doubles as the keepalive heartbeat — the pong watchdog below
-      // catches the "server died abruptly without sending a WS close"
-      // case (Ctrl+C from a parent process, uvicorn crash, OS kill,
-      // network cable yanked — anywhere ws.onclose doesn't fire).
-      //
-      // Same interval doubles as the wrapper-presence ping: a `presence`
-      // message tells the server "operator's tab is still up" so the
-      // session's presence stays "present" for the orchestration gate.
-      // Only sent while the tab is actually visible — a backgrounded
-      // tab is presence-absent and the gate should close so vision
-      // calls don't fire against someone who walked away.
+      // 2s heartbeat. Three jobs in one interval:
+      //   - ping/pong: measure RTT (client clock both sides).
+      //   - pong watchdog: trip showEndedOverlay if pongs stop,
+      //     catching the "server died without sending WS close" case.
+      //   - presence: tell the server the operator's tab is still up
+      //     (only while visible — a backgrounded tab is presence-absent
+      //     so the orchestration gate decays to "stale").
       setInterval(() => {
         if (ws.readyState !== WebSocket.OPEN || isCompleted) return;
-        // If we haven't heard a pong in too long, the WS is a zombie:
-        // alive from the browser's perspective but the other end is gone.
-        // Force the disconnected state so the operator stops trusting the
-        // last frame. lastPongTs is seeded at open and refreshed on each
-        // pong, so a value older than PONG_TIMEOUT_MS means the server
-        // has been unresponsive across multiple ping cycles.
+        // No pongs across several ping cycles → zombie WS (alive to
+        // the browser but the other end is gone). Trip immediately.
         if (lastPongTs !== null && Date.now() - lastPongTs > PONG_TIMEOUT_MS) {
           streamConnected = false;
           showEndedOverlay();
-          // Try to close the zombie so subsequent code paths treat it as
-          // a normal disconnect. Browsers may or may not actually deliver
-          // this on a half-open TCP — best effort.
+          // Best-effort close so later code treats it as a normal
+          // disconnect; browsers may not deliver on a half-open TCP.
           try { ws.close(); } catch (_) {}
           return;
         }

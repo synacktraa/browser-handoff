@@ -32,15 +32,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
 
-# JS run inside the handed-off Page to read the page's position and size on
-# the substrate's display. The substrate streams the whole desktop (window
-# chrome + display background); these six numbers let the proxy template crop
-# the iframe down to just the page area.
-#
-# Note: window.screenY is the top of the *window*, not the page. Chrome
-# (tabs + address bar) lives in `outerHeight - innerHeight`, so the actual
-# page top on the display is `screenY + (outer - inner)`. Same logic for X
-# in case the window has symmetric left/right borders.
+# Read the page's rect on the substrate's display so the proxy template
+# can crop the iframe to just the page area (the substrate streams the
+# whole desktop). page_y accounts for browser chrome via
+# `outerHeight - innerHeight`; page_x mirrors that in case of symmetric
+# window borders.
 _CROP_METRICS_JS = """() => ({
     screen_w: window.screen.width,
     screen_h: window.screen.height,
@@ -54,18 +50,13 @@ _CROP_METRICS_JS = """() => ({
 async def _maximize_substrate_window(page: "Page") -> None:
     """Maximize the substrate browser window via CDP.
 
-    Load-bearing for the crop math: when the window sits asymmetrically on
-    the substrate display, CSS sub-pixel rounding on the iframe boundary
-    produces 5-15px leakage strips that depend on which side the window is
-    near (verified end-to-end against a real substrate). Maximizing forces
-    screenX/Y to 0 and innerW to screen_w, which makes horizontal overflow
-    exactly zero — the rendering then has nothing to round against on those
-    sides, and the only overflow is the top chrome strip, which the existing
-    math handles cleanly.
+    Load-bearing for crop math: an asymmetric window position produces
+    CSS sub-pixel rounding leakage (5-15px strips) on the iframe edges.
+    Maximizing forces screenX/Y to 0 and innerW to screen_w so the only
+    overflow is the top chrome strip, which the math already handles.
 
-    Wrapped in try/except so a substrate that ignores
-    Browser.setWindowBounds (headless mode, custom builds) doesn't break
-    the handoff — we just get degraded crop quality, not failure.
+    Best-effort — substrates that ignore Browser.setWindowBounds
+    (headless, custom builds) degrade crop quality but don't fail.
     """
     try:
         cdp = await page.context.new_cdp_session(page)
@@ -75,10 +66,9 @@ async def _maximize_substrate_window(page: "Page") -> None:
     try:
         wt = await cdp.send("Browser.getWindowForTarget")
         window_id = wt["windowId"]
-        # Toggle through 'normal' first to force re-layout if the window is
-        # already reported as maximized but bounds don't quite match the
-        # display (observed on some Chromium builds — the second call to
-        # 'maximized' is a no-op without this).
+        # Toggle through 'normal' first — some Chromium builds report
+        # already-maximized state but with off-by-N bounds, and a
+        # second 'maximized' call is a no-op without this nudge.
         await cdp.send("Browser.setWindowBounds", {
             "windowId": window_id,
             "bounds": {"windowState": "normal"},
@@ -88,8 +78,7 @@ async def _maximize_substrate_window(page: "Page") -> None:
             "windowId": window_id,
             "bounds": {"windowState": "maximized"},
         })
-        # Let the substrate re-layout and the remote stream catch up to the
-        # new dimensions before we measure.
+        # Let the substrate re-layout settle before we measure.
         await asyncio.sleep(0.5)
     except Exception as e:
         logger.info("substrate window maximize failed: %s", e)
@@ -101,23 +90,14 @@ async def _capture_crop_metrics(
     attempts: int = 3,
     backoff: float = 0.1,
 ) -> dict[str, int] | None:
-    """Query the page for its rect on the substrate's display.
+    """Read the page's rect on the substrate's display.
 
-    Maximizes the substrate browser window first (see
-    `_maximize_substrate_window` — load-bearing for clean crop math), then
-    reads the page rect via window.screen + window.screenX/Y +
-    (outerH - innerH) chrome offset.
+    Maximizes the substrate window first (load-bearing for clean crop
+    math), then reads `window.screen` + `screenX/Y` + chrome offset.
 
-    Returns six ints when the page reports honest, non-degenerate values.
-    Returns None when:
-      - the evaluate raises (page detached, frame gone)
-      - the page is mid-load and reports zero dims, even after retries
-      - the substrate is headless and mocks screen dims to zero
-
-    Retries with `backoff` between attempts so transient zeros (page just
-    starting to navigate) get a chance to settle before we give up. When we
-    do return None, the proxy template falls back to a non-cropped iframe —
-    visually less polished but functionally fine.
+    Returns None when the evaluate raises, the page reports zero dims
+    even after retries, or the substrate mocks screen dims (headless).
+    On None, the proxy template falls back to a non-cropped iframe.
     """
     await _maximize_substrate_window(page)
 
@@ -146,27 +126,14 @@ async def _capture_crop_metrics(
 
 
 def _detection_tree_has_llm(detection: BaseDetection) -> bool:
-    """Recursive walk: does this detection (or any nested child) use LLM?
+    """True if `detection` or any nested child is an LLMDetection.
 
-    Handles the three shapes any current detection can have:
-      - leaf detection: isinstance check decides directly.
-      - single-inner combinator (NotDetection): inspect `.condition`.
-      - multi-inner combinator (AllDetection/AnyDetection): inspect
-        `.conditions`.
-
-    Used in two places:
-      - Handoff.run() rejects a scenario whose trigger tree contains an
-        LLMDetection. Trigger-mode LLM is broken (no operator yet, no
-        reason context, MutationObserver-driven page noise) and the
-        explicit reject names the scenario so users notice.
-      - Handoff.wait_for_completion() skips its initial check when `on`
-        is LLM-shaped — vision calls before the wrapper is even loaded
-        are wasted, and the wrapper-presence gate inside the gated
-        callback wouldn't pass anyway.
+    Walks the three current detection shapes — leaf, single-inner
+    combinator (`.condition`), and multi-inner combinator
+    (`.conditions`). Used by `Handoff.run` to reject LLM triggers and
+    by `wait_for_completion` to skip the initial check for LLM `on`.
     """
-    # Avoid an import cycle: llm module imports from detection.base which
-    # is imported here. Lazy-import is fine; the function is hot-path
-    # adjacent (called once per run/wait, not per check).
+    # Lazy import: llm imports detection.base which imports this module.
     from .detection.llm import LLMDetection
 
     if isinstance(detection, LLMDetection):
@@ -189,19 +156,19 @@ class HandoffResult:
     """
 
     was_blocked: bool
-    """Whether a trigger fired and a human handoff was performed."""
+    """Whether a trigger fired and a human handoff ran."""
 
     timed_out: bool = False
-    """Only meaningful if was_blocked: human exceeded session_timeout."""
+    """Only meaningful if `was_blocked`: human exceeded session_timeout."""
 
     scenario_name: str | None = None
     """Name of the scenario that fired."""
 
     trigger_reason: str | None = None
-    """Why the trigger matched (e.g. URL pattern, element appeared)."""
+    """What matched the trigger (e.g. URL pattern, element appeared)."""
 
     completion_reason: str | None = None
-    """Why the completion matched. None if not blocked or if timed out."""
+    """What matched the completion. None if not blocked or if timed out."""
 
     duration: float = 0.0
     """Seconds spent waiting for the human (0 if not blocked)."""
@@ -209,37 +176,27 @@ class HandoffResult:
 
 @dataclass
 class Handoff:
-    """Main handoff orchestrator.
+    """Reusable handoff orchestrator.
 
-    A Handoff bundles the transport config (streaming server, notifiers,
-    viewport) and is reusable across many pages/runs. *What* to watch for is
-    supplied per-call, so the same Handoff can serve any number of scenarios.
+    Holds the transport config (server, notifiers, viewport) and is
+    shared across many pages/runs. Two entry points:
 
-    Two entry points:
+      - `run(page, scenarios=...)` — watch a page for triggers; on
+        match, stream the page to a human and wait for completion.
+        Use when the library should decide *when* a human is needed.
+      - `wait_for_completion(page, on=...)` — stream the page to a
+        human now and wait until `on` matches. Use when the caller has
+        already decided a human is needed (e.g. an agent tool).
 
-      - run(page, scenarios=...) — watch a page for trigger conditions, and
-        when one fires, stream the page to a human and wait for the matching
-        completion. Use this when you want the library to decide *when* a human
-        is needed.
+    Pass scenarios per-call to `run`. The `scenarios` constructor arg
+    is deprecated.
 
-      - wait_for_completion(page, on=...) — stream the page to a human *now*
-        and wait until `on` matches. Use this when you've already decided a
-        human is needed (e.g. an agent framework detected the condition
-        itself), so there's no trigger to watch.
-
-    Pass scenarios per-call to `run(scenarios=...)`. The `scenarios`
-    constructor argument is deprecated (and emits a DeprecationWarning): it
-    couples *what to watch for* to the reusable transport object. Set them on
-    `run()` instead.
-
-    Streaming server lifecycle: a single server (on `server.port`) is shared
-    by every handoff this instance performs. It starts lazily on the first
-    handoff and stops when the last one finishes — concurrent handoffs run as
-    separate sessions on the same port (distinguished by session id) and never
-    collide, so you can drive many pages from one Handoff at once.
+    The streaming server is shared across all handoffs on this instance
+    — it starts lazily on the first handoff and stops when the last one
+    finishes. Concurrent handoffs run as distinct sessions on one port.
 
     Example:
-        handoff = Handoff(notifiers=[DiscordNotifier(...)])  # reusable
+        handoff = Handoff(notifiers=[DiscordNotifier(...)])
 
         result = await handoff.run(
             page,
@@ -261,11 +218,9 @@ class Handoff:
     notifiers: list[Notifier] = field(default_factory=list)
     viewport_size: dict[str, int] = field(default_factory=lambda: DEFAULT_VIEWPORT.copy())
 
-    # Runtime state for the shared streaming server. Not constructor args —
-    # see _acquire_server / _release_server for the lazy-start, ref-counted
-    # lifecycle. _session_count tracks live handoffs; the server stops when it
-    # returns to zero. _server_lock serializes start/stop so concurrent
-    # handoffs neither double-bind the port nor overlap a start with a stop.
+    # Shared streaming-server state, ref-counted via _acquire_server /
+    # _release_server. _server_lock serializes start/stop so concurrent
+    # handoffs neither double-bind the port nor overlap start with stop.
     _server: StreamingServer | None = field(default=None, init=False, repr=False, compare=False)
     _server_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
     _session_count: int = field(default=0, init=False, repr=False, compare=False)
@@ -317,9 +272,8 @@ class Handoff:
     def _build_from_dict(cls, data: dict[str, Any]) -> "Handoff":
         """Assemble a Handoff from a config dict (no deprecation warning).
 
-        Shared by the deprecated from_* loaders. Scenarios are assigned after
-        construction so the deprecated `scenarios` constructor argument — and
-        its warning — is not involved.
+        Scenarios are assigned after construction to avoid the deprecated
+        constructor-arg warning.
         """
         scenarios = [Scenario.from_dict(s) for s in data.get("scenarios", [])]
         server_data = data.get("server", {})
@@ -347,37 +301,25 @@ class Handoff:
         timeout: float = 30.0,
         stream_url: str | None = None,
     ) -> "HandoffResult":
-        """Wait until handoff completes, or no handoff is needed.
+        """Watch for triggers; on match, run a handoff and await completion.
 
-        Registers framenavigated/element-mutation listeners on every scenario's
-        trigger, then waits for either:
-          - A trigger to fire → run the human handoff and wait for the
-            scenario's completion condition (bounded by
-            self.server.session_timeout).
-          - `timeout` seconds to elapse with no trigger → return was_blocked=False.
-
-        The browser context is auto-detected from page.context — there's no
-        case where you'd want a different one for the same page.
+        Registers listeners on every scenario's trigger and waits for
+        one to fire (within `timeout`) or for `timeout` to elapse.
 
         Args:
             page: Playwright page to monitor.
-            scenarios: Trigger-completion pairs to watch. Falls back to the
-                scenarios set on the instance (e.g. via from_file) when omitted.
-                Raises ValueError if neither is provided.
-            timeout: Max seconds to wait for any trigger to fire before
-                concluding no handoff is needed. Default: 30.0.
-                Does NOT bound the human-completion phase — that uses
-                self.server.session_timeout (default 600s, set on
-                ServerConfig).
-            stream_url: Optional substrate-served viewer URL. When set, the
-                matched scenario's handoff runs in passthrough mode:
-                browser-handoff skips its own CDP screencast and the operator
-                gets a wrapper page that iframes this URL. Forwarded as-is
-                to wait_for_completion on trigger match.
+            scenarios: Trigger-completion pairs to watch. Falls back to
+                the scenarios set on the instance. ValueError if neither.
+            timeout: Max seconds to wait for any trigger. Does NOT bound
+                the human-completion phase — that uses
+                `ServerConfig.session_timeout` (default 600s).
+            stream_url: Optional substrate viewer URL. When set, the
+                handoff runs in passthrough mode and `stream_url` is
+                forwarded to `wait_for_completion`.
 
         Returns:
             HandoffResult describing what happened. Never raises on
-            human-completion timeout — check result.timed_out instead.
+            completion-phase timeout — check `result.timed_out`.
         """
         scenarios = scenarios if scenarios is not None else self.scenarios
         if not scenarios:
@@ -387,13 +329,10 @@ class Handoff:
                 "wait_for_completion()."
             )
 
-        # LLMDetection in a trigger tree is a misuse: there's no operator
-        # yet to ground "did they finish", no reason for the prompt, and
-        # the only signal would be page DOM noise — which produces a
-        # vision-call-per-mutation hot loop on real sites. Reject with a
-        # clear message naming the scenario so the user can fix the
-        # scenario, not chase a vague runtime symptom later. Walk the
-        # trigger tree to catch combinator nesting.
+        # LLMDetection in a trigger tree is misuse: no operator yet, no
+        # reason for the prompt, and only DOM-noise signal — a
+        # vision-call-per-mutation hot loop on real sites. Reject early
+        # with the scenario name; walk to catch combinator nesting.
         for scenario in scenarios:
             if _detection_tree_has_llm(scenario.trigger):
                 raise TypeError(
@@ -474,34 +413,23 @@ class Handoff:
     ) -> "HandoffResult":
         """Stream the page to a human *now* and wait until `on` matches.
 
-        Unlike run(), this skips trigger detection entirely — use it when
-        you've already decided a human is needed (e.g. an agent framework
-        detected the condition and called you), so watching for a trigger
-        would be redundant. run() funnels here once its trigger fires.
-
-        Runs as one session on the instance's shared streaming server (see
-        _acquire_server): the server starts on the first concurrent handoff
-        and stops when the last finishes, so handoffs never collide on the
-        port — each is just a distinct session id.
+        Skips trigger detection — use when the caller has already
+        decided a human is needed. `run()` funnels here on trigger match.
 
         Args:
-            page: Playwright page to stream. Streaming starts immediately.
-            on: Completion detection that signals the human is done. The
-                handoff returns the moment it matches (or when the page
-                already satisfies it on entry).
-            reason: Human-facing explanation shown in the notification and the
-                operator UI. Defaults to a generic message.
-            name: Label recorded on the result (HandoffResult.scenario_name).
-            stream_url: Optional substrate viewer URL. When set, this handoff
-                runs in passthrough mode: browser-handoff skips its own CDP
-                screencast and the operator gets a wrapper page that iframes
-                this URL. browser-handoff still owns detection, notification,
-                and lifecycle. The wrapper page crops the iframe to just the
-                page content via a one-shot JS query at handoff start.
+            page: Playwright page to stream.
+            on: Completion detection; the handoff returns the moment it
+                matches (or on entry if the page already satisfies it).
+            reason: Operator-facing explanation shown in the wrapper and
+                notifications.
+            name: Label recorded on `HandoffResult.scenario_name`.
+            stream_url: Optional substrate viewer URL. When set, the
+                wrapper iframes this URL; bh still owns detection,
+                notification, and lifecycle.
 
         Returns:
-            HandoffResult with was_blocked=True. Check timed_out for whether
-            the human finished within self.server.session_timeout. Never
+            HandoffResult with `was_blocked=True`. Check `timed_out` for
+            whether the human finished within session_timeout. Never
             raises on timeout.
         """
         context = page.context
@@ -511,11 +439,8 @@ class Handoff:
         completion_event = asyncio.Event()
         completion_reason: str | None = None
 
-        # Captured here so the gated callback below (defined before the
-        # session exists) can read the session through this closure cell
-        # once register_session has returned. Without this hop the
-        # callback would need session passed in explicitly, which forces
-        # a re-bind on every fire.
+        # Closure cell — the gated callback is defined before the
+        # session exists; we patch it in once register_session returns.
         session_ref: dict[str, Any] = {"session": None}
 
         async def on_completion_detected(detection: BaseDetection) -> None:
@@ -523,20 +448,14 @@ class Handoff:
             if completion_event.is_set():
                 return
             session = session_ref["session"]
-            # Wrapper-presence gate: the watcher inside LLMDetection
-            # fires on its own schedule (idle-settle + safety-net), so
-            # by the time it calls back the operator may have closed
-            # the tab. Skipping here saves the LLM call. Other
-            # detections (URL/Element/Content) are cheap, but routing
-            # them through the same gate keeps the orchestration model
-            # consistent — completion shouldn't be reported against a
-            # session with no operator present.
+            # Presence gate: a detection may fire on its own schedule
+            # (LLMDetection's idle-settle + safety-net) after the
+            # operator wandered off — skip the check until they're back.
             if session is not None and session.presence.state != "present":
                 return
-            # `reason` is what LLMDetection needs to ground its prompt;
-            # other detections accept and ignore via **context. The
-            # session.reason is the same string the operator sees in the
-            # wrapper header, so it's the right framing for the model.
+            # session.reason is the string the operator sees in the
+            # wrapper header — the right framing for LLMDetection's
+            # prompt. Other detections accept and ignore via **context.
             ctx_reason = session.reason if session is not None else reason
             result = await detection.check(page, reason=ctx_reason)
             if result.matched:
@@ -559,9 +478,8 @@ class Handoff:
             except Exception as e:
                 logger.info(f"Could not get viewport: {e}, using default: {viewport_size}")
 
-            # Capture page-rect-on-display metrics for the proxy template's
-            # iframe crop. Only matters in passthrough mode; in normal mode
-            # we'd just be doing work for no reason.
+            # Page-rect-on-display metrics for the proxy template's
+            # iframe crop. Only used in passthrough mode.
             crop_metrics: dict[str, int] | None = None
             if stream_url is not None:
                 crop_metrics = await _capture_crop_metrics(page)
@@ -589,25 +507,20 @@ class Handoff:
 
             await self._send_notifications(reason, operator_url)
 
-            # Already complete? (e.g. page raced past completion before we
-            # finished setting up listeners.) Run as a cheap check for the
-            # non-LLM paths (URL/Element/Content). LLM completion is not
-            # initial-eligible (would burn a vision call before the
-            # wrapper is even loaded), so skip the initial probe when `on`
-            # is LLM-shaped.
+            # Already complete? (E.g. page raced past completion before
+            # listeners are set up.) Skip the initial probe when `on` is
+            # LLM-shaped — vision calls before the wrapper loads are
+            # wasted; only cheap non-LLM checks run here.
             if not _detection_tree_has_llm(on):
                 initial = await on.check(page, reason=reason)
                 if initial.matched:
                     completion_reason = initial.reason
                     completion_event.set()
 
-            # Lazy install: defer detection.register_listeners until an
-            # operator has actually opened the wrapper. Closes the
-            # substrate-URL leak — anyone reaching the substrate viewer
-            # URL directly can no longer drive vision calls, because the
-            # in-page watcher only installs after wrapper auth via
-            # access_token. session_timeout bounds the wait so "operator
-            # never showed up" still terminates the handoff cleanly.
+            # Lazy install: defer register_listeners until an operator
+            # opens the wrapper. Closes the substrate-URL leak — the
+            # in-page watcher only runs after wrapper auth via the
+            # access token. session_timeout bounds the wait.
             timed_out = False
             try:
                 if not completion_event.is_set():
@@ -632,15 +545,12 @@ class Handoff:
                     "within %.0fs", self.server.session_timeout,
                 )
             except asyncio.CancelledError:
-                # Caller (e.g. browser-use's per-step timeout, ctrl-c)
-                # cancelled the await. Surface a task_cancelled event so
-                # the operator's wrapper distinguishes "the agent gave up"
-                # from "you ran out of time" (task_expired) — both end the
-                # session but for different reasons, and the operator
-                # debugging the situation needs accurate framing. Without
-                # the notify the passthrough iframe would stay interactive
-                # against a substrate bh no longer owns. Re-raise so the
-                # caller's cancellation semantics are preserved.
+                # Caller (per-step timeout, ctrl-c, explicit cancel)
+                # gave up. Push a task_cancelled event so the wrapper
+                # shows "the agent gave up" instead of "you ran out of
+                # time" — without it, a passthrough iframe would also
+                # stay interactive against a substrate bh no longer
+                # owns. Re-raise to preserve cancellation semantics.
                 with suppress(Exception):
                     await server.notify_task_cancelled(session_id)
                 raise
@@ -672,11 +582,9 @@ class Handoff:
     async def _acquire_server(self) -> StreamingServer:
         """Return the shared streaming server, starting it on first use.
 
-        Reference-counted: every caller that acquires must pair with a
-        _release_server() in its finally. The start (bind + readiness wait)
-        happens under the lock, so concurrent first handoffs don't both try to
-        bind the port — the second waits, sees the server already up, and just
-        joins it as another session.
+        Reference-counted: every acquire must pair with a `_release_server`
+        in `finally`. Start happens under the lock so concurrent first
+        handoffs don't double-bind the port.
         """
         async with self._server_lock:
             if self._server is None:
@@ -690,10 +598,9 @@ class Handoff:
     async def _release_server(self) -> None:
         """Drop one handoff's hold on the shared server.
 
-        When the last session leaves (count hits zero) the server is stopped
-        under the lock — so a handoff arriving in the same instant blocks until
-        the stopping server has fully released the port before a new one binds.
-        Start and stop therefore never overlap.
+        On the last release the server stops under the lock, so a
+        concurrent acquire waits for the port to release before
+        re-binding. Start and stop never overlap.
         """
         async with self._server_lock:
             self._session_count -= 1
@@ -707,9 +614,9 @@ class Handoff:
             if server:
                 await server.stop()
             if task and not task.done():
-                # server.stop() already signaled should_exit and closed the
-                # client connections. Let uvicorn unwind on its own; only
-                # cancel as a last resort if it hangs.
+                # server.stop() already closed connections and signaled
+                # should_exit — let uvicorn unwind on its own, cancel
+                # only as a last resort if it hangs.
                 try:
                     await asyncio.wait_for(task, timeout=5.0)
                 except asyncio.TimeoutError:
@@ -725,22 +632,17 @@ class Handoff:
     ) -> None:
         """Poll until uvicorn is accepting connections on host:port.
 
-        Replaces a magic asyncio.sleep — works regardless of how slow the
-        machine is to bind, and returns the moment the port is ready.
-
-        Each connect attempt has its own short timeout. Without it, a
-        single attempt that stalls mid-handshake (uvicorn between bind and
-        accept; WSL2 loopback quirks; firewall holding the SYN) would hang
-        forever — the outer deadline is only checked between iterations
-        and never fires.
+        Each attempt has its own short cap — without it, a single
+        connect stalled mid-handshake (uvicorn between bind and accept,
+        WSL2 loopback quirks, firewall holding the SYN) would hang past
+        the outer deadline.
         """
         # 0.0.0.0 / :: are bind addresses, not connect addresses.
         connect_host = "127.0.0.1" if host in ("0.0.0.0", "") else (
             "::1" if host == "::" else host
         )
-        # Tight per-attempt cap so a stuck connect doesn't starve the loop.
-        # interval is the retry pause AFTER a failure; per_attempt is the
-        # ceiling on a single try.
+        # `interval` is the retry pause after a failure; `per_attempt`
+        # caps a single try so a stuck connect can't starve the loop.
         per_attempt = min(1.0, max(interval * 4, 0.2))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -761,17 +663,15 @@ class Handoff:
         )
 
     async def _send_notifications(self, reason: str, operator_url: str) -> None:
-        # No explicit notifiers → fall back to a rich console panel so the
-        # operator still gets a clearly-formatted stream URL. When the
-        # caller configures any notifier(s) we stay out of the way — they
-        # asked for those specific channels, double-pushing to stdout
-        # would just be noise.
+        # Fall back to a console panel when no notifiers are configured
+        # — the operator still needs the URL somewhere. Caller-supplied
+        # notifiers replace it; we don't double-push to stdout.
         notifiers = self.notifiers or [ConsoleNotifier()]
 
         title = "Human Intervention Required"
-        # Structured items let each notifier render natively (Rich link
-        # markup, Discord embed url field, Slack mrkdwn hyperlinks, HTML
-        # <a> in email) without parsing a flat template back out.
+        # Structured items let each notifier render natively (Rich
+        # markup, Discord embed, Slack mrkdwn, HTML <a>) instead of
+        # parsing a flat string.
         items: list[MessageItem] = [
             TextItem(
                 "Human intervention is required to complete a browser automation task."

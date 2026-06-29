@@ -15,15 +15,11 @@ if TYPE_CHECKING:
 
 
 def _observer_setup_js(var: str) -> str:
-    """JS injected once per document: a MutationObserver that stamps a hidden
-    window property with Date.now() on any relevant DOM change. Python reads
-    that stamp by polling — a plain property read, with no injected binding or
-    callback function for the page to detect.
+    """Inject a MutationObserver that stamps `window[var]` with Date.now().
 
-    `var` is a per-session random name, defined non-enumerable, so site JS can
-    neither list it (Object.keys / for-in / JSON.stringify skip it) nor guess
-    it to probe for it. The attributeFilter keeps the observer focused on the
-    attributes that actually change element presence/visibility.
+    `var` is non-enumerable and per-session random, so site JS can't list
+    or probe it. Python reads the stamp via polling — no injected binding
+    or callback for the page to fingerprint.
     """
     return (
         "(() => {"
@@ -33,9 +29,8 @@ def _observer_setup_js(var: str) -> str:
         f"const mark = () => {{ window.{var} = Date.now(); }};"
         "try {"
         "const mo = new MutationObserver(mark);"
-        # Observe the document node (always present, even at document_start
-        # when add_init_script re-injects after navigation — body/documentElement
-        # may still be null then). subtree:true covers the whole tree.
+        # Observe document, not body — body may still be null when
+        # add_init_script re-runs at document_start after navigation.
         "mo.observe(document, "
         "{childList:true, subtree:true, attributes:true, "
         "attributeFilter:['class','style','hidden','disabled']});"
@@ -54,16 +49,14 @@ def _observer_read_js(var: str) -> str:
 
 @dataclass(eq=False)
 class _Subscriber:
-    """A single (detection, callback) pair attached to a `_PageWatcher`.
+    """A (detection, callback) pair attached to a `_PageWatcher`.
 
-    `cancelled` is set synchronously by `register_listeners`' cleanup so any
-    callback already in flight or scheduled before the async unsubscribe runs
-    is dropped on the floor — preserving the invariant that no callback fires
-    after cleanup() has returned.
+    `cancelled` is flipped synchronously by cleanup so callbacks already
+    in flight or scheduled before the async unsubscribe lands are
+    skipped — no callback fires after cleanup() returns.
 
-    `eq=False` keeps identity-based equality and hashing — each registration
-    is a distinct subscriber even if fields collide, and the watcher's
-    `set[_Subscriber]` needs hashability.
+    `eq=False` keeps identity equality so each registration is a
+    distinct entry in the watcher's `set[_Subscriber]`.
     """
 
     detection: "BaseDetection"
@@ -72,12 +65,10 @@ class _Subscriber:
 
 
 class _PageWatcher:
-    """One MutationObserver + one poll loop per Playwright page, shared by
-    every `ElementDetection` subscription on that page.
+    """One MutationObserver + one poll loop per page, shared by every
+    `ElementDetection` subscription on that page.
 
-    Installs on the first subscriber and tears down when the last leaves —
-    so a page with N element detections runs a single observer, a single
-    init script, and a single 100ms poll loop instead of N of each.
+    Installs on the first subscriber, tears down when the last leaves.
     """
 
     def __init__(
@@ -91,23 +82,21 @@ class _PageWatcher:
         self._poll_interval = poll_interval
         self._var = f"__bh_{secrets.token_hex(8)}"
         self._subscribers: set[_Subscriber] = set()
-        # Serialises install / teardown decisions so a subscribe arriving
-        # mid-teardown can't race the shutdown into an inconsistent state.
+        # Serialises install/teardown so a subscribe arriving mid-shutdown
+        # can't race into an inconsistent state.
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._poll_task: asyncio.Task[None] | None = None
         self._installed = False
         self._closed = False
-        # Held so we can remove the listener during teardown — Playwright's
-        # remove_listener matches by identity, not by name.
+        # Stored so remove_listener can match by identity at teardown.
         self._on_navigate_handler: Callable[..., None] | None = None
 
     def _on_navigate(self, *_: Any) -> None:
-        """Re-install the observer on the new document and fire subscribers.
+        """Re-inject the observer on the new document and fire subscribers.
 
-        Re-injection lives here (not in `page.add_init_script`) so teardown of
-        this listener also stops future re-injection — after the last cleanup,
-        nothing re-runs the setup script, and the page is left clean.
+        Re-injection lives here (not via `add_init_script`) so removing
+        this listener at teardown also stops future re-injection.
         """
         if not self._closed:
             self._loop.create_task(self._reinject_and_fire())
@@ -118,11 +107,14 @@ class _PageWatcher:
         await self._fire_all()
 
     async def add(self, sub: _Subscriber) -> bool:
-        """Register a subscriber, installing the watcher on first use.
+        """Register a subscriber; install the watcher on first use.
 
-        Returns False if the watcher was already closed (the caller raced a
-        concurrent teardown); the caller retries with a fresh watcher in that
-        case so the subscriber isn't orphaned.
+        Args:
+            sub: Subscriber to attach.
+
+        Returns:
+            True on success. False if the watcher had already closed
+            (caller should retry with a fresh watcher from the registry).
         """
         async with self._lock:
             if self._closed:
@@ -130,9 +122,8 @@ class _PageWatcher:
             self._subscribers.add(sub)
             if self._installed:
                 return True
-            # Attach the navigation listener BEFORE seeding the current doc,
-            # so a navigation racing the initial evaluate is still caught and
-            # re-installs the observer on whatever document wins.
+            # Attach the nav listener BEFORE seeding the current doc, so
+            # a navigation racing the initial evaluate is still caught.
             self._on_navigate_handler = self._on_navigate
             self._page.on("framenavigated", self._on_navigate_handler)
             with suppress(Exception):
@@ -142,10 +133,14 @@ class _PageWatcher:
             return True
 
     async def remove(self, sub: _Subscriber) -> bool:
-        """Drop a subscriber; if it was the last, tear the watcher down.
+        """Drop a subscriber; tear down on the last leave.
 
-        Returns True if the watcher was torn down (the caller should evict
-        it from the registry), False otherwise.
+        Args:
+            sub: Subscriber to detach.
+
+        Returns:
+            True if the watcher was torn down (caller should evict from
+            the registry); False otherwise.
         """
         async with self._lock:
             self._subscribers.discard(sub)
@@ -155,7 +150,7 @@ class _PageWatcher:
             return True
 
     async def shutdown(self) -> None:
-        """Force teardown regardless of subscribers (called when the page closes)."""
+        """Force teardown regardless of subscribers (called on page close)."""
         async with self._lock:
             if self._closed:
                 return
@@ -163,7 +158,7 @@ class _PageWatcher:
             self._close_locked()
 
     def _close_locked(self) -> None:
-        """Teardown body. Must be called with `self._lock` held."""
+        """Teardown body. Caller must hold `self._lock`."""
         self._closed = True
         self._stop.set()
         if self._poll_task is not None:
@@ -183,8 +178,8 @@ class _PageWatcher:
                 ms = prev
             if ms != prev:
                 prev = ms
-                # ms == 0 means a fresh/navigated document with no mutation
-                # yet — the reset itself isn't a change to report.
+                # ms == 0 is a fresh/navigated document — the reset
+                # itself isn't a change to report.
                 if ms:
                     await self._fire_all()
             try:
@@ -193,9 +188,8 @@ class _PageWatcher:
                 pass
 
     async def _fire_all(self) -> None:
-        # Snapshot first — a callback may schedule an unsubscribe, and we
-        # also want cancelled subscribers (cleanup ran but remove hasn't yet)
-        # to be skipped without racing the set's contents.
+        # Snapshot — a callback may schedule an unsubscribe, and a
+        # cancelled subscriber whose remove hasn't run yet must be skipped.
         for sub in list(self._subscribers):
             if sub.cancelled:
                 continue
@@ -203,16 +197,15 @@ class _PageWatcher:
                 await sub.callback(sub.detection)
 
 
-# Page → watcher registry. Keyed by id(page) because Playwright Page objects
-# aren't reliably hashable across implementations and we want identity, not
-# equality. Eviction happens on the last unsubscribe or on page close.
+# Page → watcher registry, keyed by id(page) (Playwright Pages aren't
+# reliably hashable across implementations, and we want identity anyway).
 _watchers: dict[int, _PageWatcher] = {}
 
 
 def _watcher_for(
     page: "Page", loop: asyncio.AbstractEventLoop, poll_interval: float
 ) -> _PageWatcher:
-    """First call for a page wins the poll interval; later subscribers share it."""
+    """Get or create the per-page watcher; first caller wins the interval."""
     key = id(page)
     watcher = _watchers.get(key)
     if watcher is not None:
@@ -232,18 +225,14 @@ def _watcher_for(
 
 @dataclass
 class ElementDetection(BaseDetection):
-    """Detection based on DOM element presence, absence, or visibility.
+    """Match on DOM selector presence, absence, or visibility.
 
-    check() queries the page's DOM locally for the configured selectors. While
-    watching (register_listeners), all element subscriptions on a given page
-    share a single MutationObserver: one observer stamps a hidden window var,
-    one Python poll loop reads it, and every subscriber's callback fires when
-    the stamp advances (plus once per navigation so freshly-rendered DOM is
-    evaluated). The shared watcher installs on the first subscriber and tears
-    down when the last cleanup() runs.
+    All four clauses are AND: every `present` must exist, every `missing`
+    must not, every `visible` must be visible, every `hidden` must not be
+    visible. Subscriptions on a page share one MutationObserver.
 
     Example:
-        detection = ElementDetection(
+        ElementDetection(
             present=["input[type=password]", "#login-form"],
             missing=[".user-menu", ".logout-button"],
             visible=[".consent-modal"],
@@ -258,11 +247,9 @@ class ElementDetection(BaseDetection):
     visible: list[str] = field(default_factory=list)
     hidden: list[str] = field(default_factory=list)
 
-    # How often the shared page watcher polls the JS mutation stamp. Cheap
-    # (reads a number); doubles as the debounce window, so it's also the
-    # trigger latency. Lowering it on a detection only matters when that
-    # detection is the FIRST subscriber on a page — the watcher inherits the
-    # interval from whichever detection brings it up.
+    # Mutation poll cadence; also the trigger latency. Only the first
+    # subscriber on a page wins the interval — the shared watcher
+    # inherits it from whoever brings it up.
     _poll_interval: float = field(default=0.1, init=False, repr=False)
 
     def register_listeners(
@@ -270,15 +257,24 @@ class ElementDetection(BaseDetection):
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
+        """Subscribe to the page's shared mutation watcher.
+
+        Args:
+            page: Playwright page to observe.
+            callback: Async function invoked with `self` on every
+                mutation tick.
+
+        Returns:
+            A cleanup function that drops the subscription (and tears
+            down the watcher if it was the last subscriber).
+        """
         loop = asyncio.get_running_loop()
         sub = _Subscriber(detection=self, callback=callback)
 
         async def _do_add() -> _PageWatcher:
-            # Look up at task-run time, not at register_listeners-call time,
-            # so a teardown completing between call and run is visible. On a
-            # closed watcher (race: cleanup of the previous subscriber drained
-            # the dict during a separate scheduling tick), evict the stale
-            # entry and retry — the next _watcher_for creates a fresh one.
+            # Look up at task-run time so a teardown completing between
+            # call and run is visible. On a closed watcher (race),
+            # evict the stale entry and retry with a fresh one.
             while True:
                 watcher = _watcher_for(page, loop, self._poll_interval)
                 if await watcher.add(sub):
@@ -295,20 +291,20 @@ class ElementDetection(BaseDetection):
             if cleaned:
                 return
             cleaned = True
-            # Flip cancelled synchronously so any in-flight or pre-scheduled
-            # _fire_all skips this subscriber even before remove() runs.
+            # Flip cancelled synchronously so any in-flight or pre-
+            # scheduled _fire_all skips this subscriber before remove() runs.
             sub.cancelled = True
 
             async def _do_remove() -> None:
-                # Wait for the add to land so we know which watcher we joined,
-                # otherwise we'd race the install and leak a subscription.
+                # Wait for the add to land so we know which watcher we
+                # joined — otherwise we'd race the install and leak.
                 try:
                     watcher = await add_task
                 except Exception:
                     return
                 if await watcher.remove(sub):
-                    # Only evict if this watcher is still the one in the
-                    # registry — a fresh registration may have replaced it.
+                    # Only evict if this is still the registered watcher;
+                    # a fresh registration may have replaced it.
                     if _watchers.get(id(page)) is watcher:
                         _watchers.pop(id(page), None)
 
@@ -317,7 +313,12 @@ class ElementDetection(BaseDetection):
         return cleanup
 
     async def check(self, page: "Page", **context: Any) -> DetectionResult:
-        """Check if element conditions are met."""
+        """Return a match only when every configured selector clause holds.
+
+        Args:
+            page: Playwright page to inspect.
+            **context: Unused.
+        """
         try:
             for selector in self.present:
                 element = await page.query_selector(selector)
@@ -361,9 +362,8 @@ class ElementDetection(BaseDetection):
                         reason=f"Element '{selector}' should be hidden but is visible",
                     )
 
-            # Name the selectors that satisfied each configured clause so
-            # the operator can see what specifically matched — not just a
-            # generic "all conditions met".
+            # Name the matching selectors in `reason` so logs surface
+            # which clauses fired.
             parts: list[str] = []
             if self.present:
                 parts.append("present=" + repr(self.present))

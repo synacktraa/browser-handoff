@@ -7,50 +7,39 @@
 # ]
 # ///
 """
-Example: the same browser-use shopping agent, run on a Kernel cloud browser
+Example: the same browser-use shopping agent on a Kernel cloud browser
 in passthrough mode.
 
-This is the Kernel-substrate variant of `local.py`. The agent loop, the
-`request_human_help` tool, the detection contract, and the notifier wiring are
-identical — the only swap is what's underneath: instead of launching a local
-visible Chromium with --remote-debugging-port, we spin up a Kernel browser via
-their SDK and connect to its `cdp_ws_url`.
+Kernel-substrate variant of `local.py`. Agent loop, the
+`request_human_help` tool, detection contract, and notifier wiring are
+identical — only the underlying Chrome changes: instead of launching
+locally with --remote-debugging-port, we create a Kernel browser and
+connect to its `cdp_ws_url`.
 
-Passthrough mode is the key shape here. browser-handoff's own CDP screencast
-would have to pull every frame from Kernel's cloud Chrome back through this
-local process and re-serve it to the operator — an unworkable round-trip over
-WAN. Instead we pass Kernel's own viewer URL (`browser_live_view_url`) to
-`wait_for_completion(stream_url=...)`, and browser-handoff:
-
-  * skips its own screencast pump entirely
-  * serves a wrapper page that iframes Kernel's viewer (cropped to just the
-    page content, with browser-handoff's chrome around it)
-  * runs the LLMDetection loop locally against the Page over CDP
-  * pushes completion / expiration events to the wrapper over a status WS
-  * installs a stealth in-page activity watcher so LLMDetection's gating
-    still sees operator interaction (without bh ever seeing the operator's
-    raw input — substrate delivers it directly to the page)
+Why passthrough: bh's own CDP screencast would pull every frame from
+Kernel's cloud Chrome through this local process and re-serve it to
+the operator — an unworkable WAN round-trip. Passing Kernel's
+`browser_live_view_url` to `wait_for_completion(stream_url=...)`
+makes bh iframe that viewer in its wrapper instead, while keeping
+detection + notification + lifecycle local.
 
 Architecture — one cloud Chrome shared over CDP:
-  * `kernel.browsers.create()` returns a session with `cdp_ws_url` and
-    `browser_live_view_url`.
-  * Playwright connects to the cdp_ws_url — gives us the `Browser` whose
-    `.contexts[*].pages[*]` the `request_human_help` tool walks to resolve
-    the current Page.
-  * browser-use connects to the SAME cdp_ws_url and drives the agent loop.
-  * `request_human_help` calls `wait_for_completion(..., stream_url=...)`
-    with Kernel's live-view URL. The operator opens browser-handoff's
-    wrapper URL (printed in console / sent via Discord) and interacts with
-    the iframed substrate view directly over WebRTC.
+  * `kernel.browsers.create()` returns `cdp_ws_url` + `browser_live_view_url`.
+  * Playwright connects to `cdp_ws_url`; the tool walks `.contexts[*]`
+    on that handle to resolve the current Page.
+  * browser-use connects to the SAME `cdp_ws_url` for its agent loop.
+  * `request_human_help` calls `wait_for_completion(stream_url=...)`
+    with Kernel's live-view URL; the operator opens bh's wrapper URL
+    (printed / Discord) and drives the iframed viewer over WebRTC.
 
 Prereqs:
-  * KERNEL_API_KEY in the environment — used by the Kernel SDK.
-  * ANTHROPIC_API_KEY in the environment — used both by browser-use's planner
-    (ChatAnthropic) and by browser-handoff's LLMDetection.
+  * KERNEL_API_KEY in the environment.
+  * ANTHROPIC_API_KEY — used by both browser-use's planner and bh's
+    LLMDetection.
 
 Environment Variables (optional):
-  DISCORD_WEBHOOK_URL  Discord webhook for the handoff ping. If unset,
-                       browser-handoff prints a rich console panel instead.
+  DISCORD_WEBHOOK_URL  Discord webhook; falls back to bh's
+                       ConsoleNotifier when unset.
 
 Run:
   uv run examples/browser_use_assisted_shopping/using_kernel.py
@@ -62,11 +51,9 @@ import asyncio
 import logging
 import os
 
-# NOTE: browser-use's public API moves fast. If an import or method below
-# fails, these are the lines most likely to need a version tweak:
-#   1. `from browser_use import Agent, ActionResult, BrowserSession, ChatAnthropic, Tools`
-#   2. `await browser_session.get_current_page_url()`
-#   3. `Agent(..., browser_session=...)`  (older builds use `browser=...`)
+# NOTE: browser-use's public API moves fast. If something breaks here,
+# check the import line and `Agent(..., browser_session=...)` — older
+# builds used `browser=...`.
 from browser_use import ActionResult, Agent, BrowserSession, ChatAnthropic, Tools
 from kernel import AsyncKernel
 from playwright.async_api import Browser, Page, async_playwright
@@ -75,7 +62,7 @@ from browser_handoff import Handoff, ServerConfig
 from browser_handoff.detection import Detection
 from browser_handoff.notifiers import DiscordNotifier, Notifier
 
-# Quiet the frame/mouse/screencast chatter so the demo output stays readable.
+# Quiet bh's INFO chatter so the demo output stays readable.
 logging.basicConfig(level=logging.WARNING)
 
 STREAMING_PORT = 8080
@@ -87,12 +74,11 @@ confirmation. Let human handle any step that requires intervention — login, si
 
 
 def _resolve_current_page(browser: Browser) -> Page | None:
-    """Pick the Playwright page the agent is currently acting on.
+    """Return the Playwright Page the agent is acting on.
 
-    browser-use doesn't hand us a Page (it speaks CDP), so we walk Playwright's
-    own view of the shared Chrome and return the most recent non-blank tab.
-    For this flow the agent operates in a single tab, so that's reliably the
-    one the agent just acted on.
+    browser-use speaks CDP and doesn't hand us a Page; walk Playwright's
+    view of the shared Chrome and pick the most recent non-blank tab.
+    This flow uses a single tab, so that's reliably the right one.
     """
     pages: list[Page] = [
         p for ctx in browser.contexts for p in ctx.pages if not p.is_closed()
@@ -109,16 +95,12 @@ def _build_tools(
 ) -> Tools:
     """Register `request_human_help` against the shared handoff + browser.
 
-    `stream_url` is Kernel's live-view URL, captured at browser creation
-    time and reused for every handoff this session triggers — the substrate
-    serves a single live-view URL for the whole browser session, not
-    per-page or per-handoff.
+    `stream_url` is Kernel's live-view URL — one per session, not per
+    page or per handoff. Reused for every handoff this run triggers.
 
-    `agent_ref` is a mutable holder for the browser-use Agent. Tools are
-    built before the Agent exists (the Agent constructor wants `tools=`),
-    so we accept a dict the caller populates after Agent(...) returns.
-    Used to pause/resume the agent loop around the handoff wait — keeps
-    browser-use's step_timeout from racing the human.
+    `agent_ref` is a mutable holder populated after Agent(...) returns
+    so the tool can pause/resume the agent around the handoff —
+    otherwise browser-use's step_timeout races the human.
     """
     tools = Tools()
 
@@ -171,11 +153,10 @@ def _build_tools(
             )
 
         print(f"\n-> Handoff requested: {reason}\n   done_when: {done_when}\n")
-        # Pause the agent loop while the human works. Otherwise browser-use's
-        # step_timeout countdown races the human's session_timeout — whoever
-        # is shorter wins, and the agent will cancel its own tool call mid-
-        # handoff if step_timeout fires first. try/finally so a timeout or
-        # error in the handoff still resumes the agent.
+        # Pause the agent while the human works — else browser-use's
+        # step_timeout races the human's session_timeout and the
+        # shorter one wins, cancelling the tool call mid-handoff.
+        # try/finally guarantees resume on timeout or error.
         agent = agent_ref["agent"]
         if agent is not None:
             agent.pause()
@@ -185,10 +166,9 @@ def _build_tools(
                 on=Detection.llm(condition=done_when),
                 reason=reason,
                 name="shopping-handoff",
-                # Passthrough: browser-handoff iframes Kernel's live-view URL
-                # in its wrapper page (cropped to page content) instead of
-                # streaming frames itself. Operator interacts with the
-                # substrate viewer directly over WebRTC.
+                # Passthrough — bh iframes Kernel's live-view URL
+                # instead of streaming frames itself; the operator
+                # drives it directly over WebRTC.
                 stream_url=stream_url,
             )
         finally:
@@ -213,8 +193,7 @@ def _build_tools(
 
 
 async def main() -> None:
-    # Discord if configured; otherwise browser-handoff falls back to its
-    # built-in ConsoleNotifier (rich panel with the stream URL).
+    # Empty list → bh falls back to its built-in ConsoleNotifier.
     notifiers: list[Notifier] = []
     if webhook := os.getenv("DISCORD_WEBHOOK_URL"):
         notifiers.append(
@@ -226,25 +205,23 @@ async def main() -> None:
         notifiers=notifiers,
     )
 
-    # Kernel SDK reads KERNEL_API_KEY from the environment by default.
+    # Kernel SDK reads KERNEL_API_KEY from env.
     kernel = AsyncKernel()
     kernel_browser = await kernel.browsers.create()
     cdp_url = kernel_browser.cdp_ws_url
-    # Kernel's WebRTC live-view URL — what the operator's iframe will load
-    # inside browser-handoff's wrapper page. Kept constant for the whole
-    # browser session.
+    # Kernel's WebRTC live-view URL — iframed in bh's wrapper page.
+    # One URL for the whole session.
     live_view_url = kernel_browser.browser_live_view_url
 
     async with async_playwright() as pw:
         try:
-            # Playwright handle on the cloud Chrome — `_resolve_current_page`
-            # walks `.contexts[*].pages[*]` against this exact handle, so
-            # both frameworks must connect to the *same* cdp_ws_url. The
-            # cloud browser launches with a default context and page already
-            # present, so don't create a new context — work with what's there.
+            # Both frameworks must share this exact handle so
+            # _resolve_current_page sees the same `.contexts[*].pages[*]`
+            # the agent is acting on. The cloud browser ships with a
+            # default context + page; don't make a new one.
             browser = await pw.chromium.connect_over_cdp(cdp_url)
-            # Holder for the agent — populated after Agent(...) returns so the
-            # tool closure can reach it without a real circular dependency.
+            # Populated after Agent(...) so the tool closure can pause/
+            # resume the agent without a circular dependency.
             agent_ref: dict[str, Agent | None] = {"agent": None}
             tools = _build_tools(handoff, browser, live_view_url, agent_ref)
             browser_session = BrowserSession(cdp_url=cdp_url)
@@ -257,8 +234,8 @@ async def main() -> None:
             agent_ref["agent"] = agent
             await agent.run(max_steps=40)
         finally:
-            # Explicit delete; otherwise the cloud session lingers until the
-            # configured idle timeout fires.
+            # Explicit delete — otherwise the cloud session lingers
+            # until the configured idle timeout fires.
             await kernel.browsers.delete_by_id(kernel_browser.session_id)
 
 

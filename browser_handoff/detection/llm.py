@@ -47,34 +47,19 @@ the task implied by the reason / condition is observably done on this page \
 — even on an intermediate or downstream page from the one the condition \
 literally describes. Otherwise "no". Respond with only "yes" or "no"."""
 
-# Rendered into USER_PROMPT_TEMPLATE only when the orchestration passes a
-# `reason` via **context (the common case under Handoff). Omitted in
-# standalone use to avoid printing an empty heading.
+# Rendered into USER_PROMPT_TEMPLATE only when a `reason` is passed via
+# **context; omitted otherwise so the prompt doesn't carry an empty heading.
 _REASON_BLOCK_TEMPLATE = "\nTask given to the human: {reason}\n"
 
 
 def _activity_setup_js(var: str) -> str:
-    """JS injected once per document: stealth in-page activity stamp.
+    """Inject capture/passive listeners that stamp `window[var]` on input.
 
-    Capture/passive listeners on deliberate-input events (mousedown,
-    keydown, wheel, scroll, touchstart, input, paste) update a Date.now()
-    stamp held on `window[var]`. The watch loop reads that stamp via a
-    cheap number-only evaluate and runs a check when it advances + idle
-    has settled.
-
-    `var` is a per-session random name, defined non-enumerable, so site
-    JS can neither list it (Object.keys / for-in / JSON.stringify skip
-    it) nor guess it to probe for it. capture:true beats any
-    stopPropagation in the page; passive:true tells the browser we
-    won't call preventDefault, which functionally makes the listener
-    invisible to the page's own handlers.
-
-    No MutationObserver, no mousemove: page-driven mutations (carousels,
-    ads, analytics) constantly fire on real sites and would burn vision
-    calls against a still operator; mousemove fires continuously while
-    the cursor sits in the viewer and means nothing for task progress.
-    The set covers the keyboard / mouse / touch / clipboard channels
-    the operator actually drives through.
+    `var` is non-enumerable and per-session random — site JS can't list
+    or probe it. Listeners only fire on deliberate input (mousedown,
+    keydown, wheel, scroll, touchstart, input, paste). Mousemove and
+    DOM mutations are deliberately excluded: hover and page-driven
+    changes (carousels, ads, analytics) aren't operator activity.
     """
     return (
         "(() => {"
@@ -97,22 +82,19 @@ def _activity_read_js(var: str) -> str:
 
 @dataclass
 class LLMDetection(BaseDetection):
-    """Detection based on LLM (vision) analysis of screenshots.
+    """Vision-LLM detection: screenshot + prompt, answer yes/no.
 
-    check() takes one screenshot and asks the model (via LiteLLM) whether the
-    condition holds. Because that vision call is the expensive part, watching
-    (register_listeners) is activity-gated rather than timed: it tracks human
-    input, DOM mutations, and navigation, and runs a single check once activity
-    *settles* for `idle_seconds`, plus a safety-net poll every `max_interval`
-    seconds to catch changes it can't observe (e.g. canvas/video).
+    Checks fire on idle-settle (operator stops interacting for
+    `idle_seconds`), with a `max_interval` safety net for async page
+    work the input listeners can't see (canvas, video, late XHR).
 
     Example:
-        detection = LLMDetection(
+        LLMDetection(
             model="anthropic/claude-sonnet-4-5",
-            condition="The page is showing a login form or asking for credentials",
+            condition="The page is showing a login form",
             api_key="sk-ant-...",   # optional; falls back to provider env var
-            idle_seconds=2.0,       # check after the page is quiet this long
-            max_interval=30.0,      # safety-net poll while a handoff is active
+            idle_seconds=3.0,
+            max_interval=30.0,
         )
     """
 
@@ -120,38 +102,23 @@ class LLMDetection(BaseDetection):
 
     model: str = "anthropic/claude-sonnet-4-5"
     condition: str = ""
-    # If None, litellm picks up the key from the provider's env var
+    # If None, litellm reads the key from the provider's env var
     # (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, ...).
     api_key: str | None = None
 
-    # Debounce window: run a check once activity has been quiet this long.
-    # The dominant cost knob — bigger means fewer, later checks. When the
-    # detection is bound to a Handoff (the common case), "activity" = the
-    # operator's clicks/keys/scrolls forwarded through the stream; 3s
-    # tolerates normal operator pauses without spamming the model.
+    # Debounce window: fire once activity has been quiet this long.
+    # The dominant cost knob — larger means fewer, later checks.
     idle_seconds: float = 3.0
-    # Safety-net: check at least this often once there has been any activity,
-    # even with nothing new observed. Bound mode: handles the "operator is
-    # done, page is processing" case (e.g. payment confirmation). 0 disables
-    # it (debounce-only).
+    # Safety net: fire at least this often after the first activity.
+    # 0 disables it (debounce-only).
     max_interval: float = 30.0
 
-    # How often the loop polls the JS activity stamp. Cheap (reads a number),
-    # so this is small; not a public knob. 0.25s matches the previous
-    # passthrough watcher's cadence — at 0.5s the perceived idle wait
-    # after an input event lagged the configured idle_seconds by an
-    # extra poll period.
+    # JS stamp poll cadence. Cheap (reads a number); not a public knob.
     _poll_interval: float = field(default=0.25, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Verify litellm is importable at construction time.
-
-        Doing the check here — not lazily in `check()` — means a missing
-        [llm] extra fails the moment the agent code wires up an
-        LLMDetection, not minutes (or hours) into a long-running flow
-        when the first vision check finally fires. The import itself is
-        cheap; the module is cached in sys.modules so check() reuses it.
-        """
+        """Verify litellm is importable; surface a missing [llm] extra now,
+        not minutes into a flow when the first vision check fires."""
         try:
             import litellm  # noqa: F401  (import for side-effect verification)
         except ImportError as e:
@@ -169,15 +136,13 @@ class LLMDetection(BaseDetection):
         idle_seconds: float,
         max_interval: float,
     ) -> bool:
-        """Decide whether to run a vision check this tick.
+        """Decide whether to fire a check this tick (pure timing function).
 
-        Pure function of the timing state so it can be tested without a browser
-        or an LLM call. A check fires when EITHER:
-          - activity has settled: the most recent activity is newer than what
-            the last check covered, and the page has since been quiet for
-            idle_seconds; OR
-          - the safety net trips: max_interval has elapsed since the last check
-            (and there has been activity at all).
+        Fires when EITHER:
+          - settled: activity is newer than the last check covered AND the
+            page has been quiet for `idle_seconds`; OR
+          - stale: `max_interval` has elapsed since the last check.
+
         Never fires before the first activity.
         """
         if last_activity is None:
@@ -192,54 +157,45 @@ class LLMDetection(BaseDetection):
         page: "Page",
         callback: Callable[["BaseDetection"], Coroutine[Any, Any, None]],
     ) -> Callable[[], None]:
-        """Install the unified in-page activity watcher and the check loop.
+        """Install the in-page activity watcher and run the check loop.
 
-        One observer for any mode: a stealth Date.now() stamp on a hidden
-        window property, capture/passive listeners on deliberate-input
-        events (mousedown/keydown/wheel/scroll/touchstart/input/paste). The
-        loop polls the stamp and fires the callback when _should_check
-        says so (idle-settle or stale-safety-net).
+        Mode-agnostic: operator input becomes real DOM events on the
+        page in both streaming (via the WS handler's CDP dispatch) and
+        passthrough (via the substrate's viewer), so the same listeners
+        catch them. The loop polls the stamp and fires the callback when
+        `_should_check` says so.
 
-        Mode-agnostic by design: in streaming mode the operator's input
-        flows back through the substrate's CDP into the page, fires real
-        DOM events, and the same listeners catch them. In passthrough mode
-        the substrate's viewer delivers the input directly to the page —
-        again, real DOM events, same listeners. Nothing here knows about
-        the wrapper WebSocket.
+        Args:
+            page: Playwright page to observe.
+            callback: Async function invoked with `self` when a check
+                is due.
 
-        Lifecycle: orchestration only calls this after the session's
-        presence has flipped its connect gate (Handoff.wait_for_completion
-        awaits `session.presence.wait_until_connected()`), so we install
-        unconditionally — there's no separate "wait for operator" step
-        inside the watcher anymore.
+        Returns:
+            A cleanup function that stops the loop and removes listeners.
         """
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
 
-        # Per-session, non-enumerable property name so the injected activity
-        # stamp can't be enumerated or probed for by the page (see
-        # _activity_setup_js).
+        # Per-session, non-enumerable property name (see _activity_setup_js).
         activity_var = f"__bh_{secrets.token_hex(8)}"
         setup_js = _activity_setup_js(activity_var)
         read_js = _activity_read_js(activity_var)
         state: dict[str, Any] = {
-            "last_activity": None,       # loop.time() of most recent activity
-            "last_check": loop.time(),   # loop.time() of most recent check
-            "last_check_activity": None, # last_activity value the last check covered
-            "prev_ms": 0,                # last JS activity stamp we've seen
+            "last_activity": None,
+            "last_check": loop.time(),
+            "last_check_activity": None,
+            "prev_ms": 0,
         }
 
         def mark_activity(*_args: Any) -> None:
-            # Navigation is treated as activity — the operator changed the
-            # document, the new page is interesting, and the in-page
-            # listeners on the old document can't fire on the new one.
+            # Navigation counts as activity — old listeners can't fire
+            # on a new document, so the stamp won't catch the change.
             state["last_activity"] = loop.time()
 
         page.on("framenavigated", mark_activity)
 
-        # Re-inject the setup script after every navigation so the new
-        # document gets a fresh listener set on the same name (the script
-        # is idempotent — returns early if the var is already present).
+        # Re-inject on navigation so the new document gets a fresh
+        # listener set on the same name (the setup script is idempotent).
         def _reinject(*_args: Any) -> None:
             if stop_event.is_set():
                 return
@@ -252,7 +208,7 @@ class LLMDetection(BaseDetection):
         page.on("framenavigated", _reinject)
 
         async def watch() -> None:
-            # Install on every future document (re-runs on navigation) and on
+            # add_init_script covers future documents; evaluate covers
             # the one already loaded.
             with suppress(Exception):
                 await page.add_init_script(setup_js)
@@ -300,31 +256,25 @@ class LLMDetection(BaseDetection):
         return cleanup
 
     async def check(self, page: "Page", **context: Any) -> DetectionResult:
-        """Check condition using LLM vision.
+        """Ask the model whether the condition holds on the current page.
 
         Args:
-            page: The page to capture and reason about.
-            **context: Per-call orchestration context. Reads `reason` (the
-                operator-facing explanation the agent gave) when present —
-                much more informative for the model than the bare
-                condition alone, which is the agent's over-specific guess
-                at the resume state. Standalone callers can pass it too.
+            page: Playwright page to screenshot.
+            **context: Reads `reason` — the operator-facing explanation
+                shown in the wrapper — to ground the prompt. More
+                informative than `condition` alone, which is the caller's
+                guess at the resume state.
         """
         from litellm import acompletion
 
         try:
-            # Take screenshot
             screenshot = await page.screenshot(type="jpeg", quality=80)
             base64_image = base64.b64encode(screenshot).decode("utf-8")
 
-            # URL + title disambiguate look-alike screenshots (e.g. partial
-            # form fill vs. successful submission landing page). Reason
-            # (when a session is bound) is the operator-facing explanation
-            # the agent gave — much more informative than `condition` alone,
-            # which is the agent's over-specific guess at the resume state.
-            # All captured defensively — each can throw on closed pages or
-            # during navigation, and a missing string is strictly better
-            # than aborting the whole check.
+            # URL + title disambiguate look-alike screenshots (partial
+            # form fill vs. successful submission landing page). All
+            # captured defensively — a missing string is fine, but a
+            # raised exception would abort the whole check.
             url = ""
             title = ""
             try:
@@ -340,7 +290,6 @@ class LLMDetection(BaseDetection):
             if ctx_reason:
                 reason_block = _REASON_BLOCK_TEMPLATE.format(reason=ctx_reason)
 
-            # Call LLM
             kwargs: dict[str, Any] = {
                 "model": self.model,
                 "messages": [
@@ -372,7 +321,6 @@ class LLMDetection(BaseDetection):
                 kwargs["api_key"] = self.api_key
             response = await acompletion(**kwargs)
 
-            # Parse response
             answer = response.choices[0].message.content.strip().lower()
             matched = answer == "yes"
 
@@ -391,7 +339,6 @@ class LLMDetection(BaseDetection):
             )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dictionary."""
         result: dict[str, Any] = {
             "type": self.detection_type,
             "model": self.model,
@@ -405,7 +352,6 @@ class LLMDetection(BaseDetection):
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LLMDetection":
-        """Create from dictionary."""
         return cls(
             model=data.get("model", "anthropic/claude-sonnet-4-5"),
             condition=data.get("condition", ""),
