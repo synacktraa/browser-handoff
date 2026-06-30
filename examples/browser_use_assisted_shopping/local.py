@@ -142,7 +142,7 @@ def _build_tools(
 
         print(f"\n-> Handoff requested: {reason}\n   done_when: {done_when}\n")
         # Pause the agent while the human works — else browser-use's
-        # step_timeout races the human's session_timeout and the
+        # step_timeout races the human's completion_timeout and the
         # shorter one wins, cancelling the tool call mid-handoff.
         # try/finally guarantees resume on timeout or error.
         agent = agent_ref["agent"]
