@@ -160,8 +160,8 @@ async def main() -> None:
 
             # Signed preview URL: token is in the URL, so the human
             # opens it without a daytona.io login or a custom header.
-            # 1h validity — well past session_timeout, with slack if
-            # the operator steps away.
+            # 1h validity — well past access + completion timeouts,
+            # with slack if the operator steps away.
             preview = await sandbox.create_signed_preview_url(
                 STREAMING_PORT, expires_in_seconds=3600
             )
