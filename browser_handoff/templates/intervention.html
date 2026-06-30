@@ -436,6 +436,32 @@
         50%      { opacity: 0.4; }
       }
 
+      /* Completion-deadline countdown banner. Hidden until the server
+         pushes a deadline; switches to a warning style in the last 60s. */
+      .countdown-pill {
+        display: none;
+        align-items: center;
+        gap: 7px;
+        height: 26px;
+        padding: 0 10px;
+        background: rgba(255, 255, 255, 0.035);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        color: var(--text-dim);
+        flex-shrink: 0;
+        text-transform: uppercase;
+        letter-spacing: 1.2px;
+      }
+      .countdown-pill.visible { display: inline-flex; }
+      .countdown-pill.warn {
+        color: var(--amber);
+        border-color: rgba(255, 149, 0, 0.4);
+        background: rgba(255, 149, 0, 0.08);
+      }
+
       #stream-container {
         position: relative;
         width: 100%;
@@ -776,8 +802,9 @@
       }
 
       /* Expired / ended overlays — same shape as the completion card,
-         different glyph + accent color. Expired (red) means session_timeout
-         fired; ended (gray) is the catchall for any other non-success exit:
+         different glyph + accent color. Expired (red) means a handoff
+         timeout fired (access or completion); ended (gray) is the
+         catchall for any other non-success exit:
          caller cancellation, abrupt process death, lost WS without a prior
          end event. The operator doesn't need the cause split out — "this is
          over and you can close the tab" is the only actionable framing. */
@@ -945,6 +972,10 @@
           />
         </div>
 
+        <div class="countdown-pill" id="countdown-pill">
+          <span id="countdown-value">--:--</span>
+        </div>
+
         <div class="latency-pill connecting" id="latency-pill">
           <span class="lat-dot"></span>
           <span class="lat-value" id="latency-value">Connecting</span>
@@ -1073,6 +1104,8 @@
       const reasonExpandLabel = document.getElementById('reason-expand-label');
       const reasonDropdown = document.getElementById('reason-dropdown');
       const reconnectPill = document.getElementById('reconnect-pill');
+      const countdownPill = document.getElementById('countdown-pill');
+      const countdownValue = document.getElementById('countdown-value');
 
       // Show more / Show less for long reasons. Truncates in the header
       // with a right-edge fade; click opens an overlay panel (z-index 60)
@@ -1205,11 +1238,18 @@
         lastPongTs = Date.now();
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (isCompleted) return;
+        streamConnected = false;
+        // Late-click rejection: server closed us with 1008 because
+        // access_timeout already fired. Surface the expired card
+        // directly instead of the generic ended one.
+        if (event && event.code === 1008 && event.reason === 'access_timeout_expired') {
+          showExpiredOverlay();
+          return;
+        }
         // No clean end event landed before close — the session is
         // unrecoverable; the cause doesn't matter to the operator.
-        streamConnected = false;
         showEndedOverlay();
       };
 
@@ -1248,6 +1288,10 @@
           }
         } else if (message.type === 'url_changed') {
           setUrl(message.url);
+        } else if (message.type === 'session_state') {
+          if (typeof message.completion_deadline_ms === 'number') {
+            startCountdown(message.completion_deadline_ms);
+          }
         } else if (message.type === 'pong') {
           // Echo'd timestamp → RTT = now() - ts.
           if (typeof message.ts === 'number') {
@@ -1258,6 +1302,32 @@
           lastPongTs = Date.now();
         }
       };
+
+      // Completion-deadline countdown. Anchored on a wall-clock epoch
+      // from the server so reconnects don't reset the visible time. Past
+      // zero, the server's normal expiry path renders the expired card —
+      // we just stop ticking and let the overlay take over.
+      let countdownTimer = null;
+      function startCountdown(deadlineMs) {
+        if (countdownTimer) clearInterval(countdownTimer);
+        countdownPill.classList.add('visible');
+        const tick = () => {
+          if (isCompleted) {
+            clearInterval(countdownTimer);
+            return;
+          }
+          const remaining = Math.max(0, deadlineMs - Date.now());
+          const totalSec = Math.ceil(remaining / 1000);
+          const m = Math.floor(totalSec / 60);
+          const s = totalSec % 60;
+          countdownValue.textContent =
+            String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+          countdownPill.classList.toggle('warn', remaining > 0 && remaining <= 60000);
+          if (remaining <= 0) clearInterval(countdownTimer);
+        };
+        tick();
+        countdownTimer = setInterval(tick, 1000);
+      }
 
       function nowTimeText() {
         return new Date().toLocaleTimeString([], {
@@ -1271,6 +1341,8 @@
         // close doesn't flip the pill or re-show the reconnect overlay.
         isCompleted = true;
         latencyPill.style.display = 'none';
+        countdownPill.style.display = 'none';
+        if (countdownTimer) clearInterval(countdownTimer);
         streamContainer.classList.remove('reconnecting');
       }
 
