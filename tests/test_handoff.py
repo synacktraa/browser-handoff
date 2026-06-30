@@ -120,7 +120,8 @@ class TestHandoffCreation:
             ],
             "server": {
                 "port": 8080,
-                "session_timeout": 300,
+                "access_timeout": 120,
+                "completion_timeout": 300,
             },
             "notifiers": [
                 {"type": "slack", "webhook_url": "https://test.com/webhook"},
@@ -130,7 +131,8 @@ class TestHandoffCreation:
         assert len(handoff.scenarios) == 1
         assert handoff.scenarios[0].name == "challenge"
         assert handoff.server.port == 8080
-        assert handoff.server.session_timeout == 300
+        assert handoff.server.access_timeout == 120
+        assert handoff.server.completion_timeout == 300
         assert len(handoff.notifiers) == 1
 
     def test_from_dict_without_scenarios_allowed(self):
@@ -267,6 +269,7 @@ class TestHandoffResult:
         result = HandoffResult(was_blocked=False)
         assert result.was_blocked is False
         assert result.timed_out is False
+        assert result.timeout_cause is None
         assert result.scenario_name is None
         assert result.trigger_reason is None
         assert result.completion_reason is None
@@ -283,15 +286,17 @@ class TestHandoffResult:
         )
         assert result.was_blocked is True
         assert result.timed_out is False
+        assert result.timeout_cause is None
         assert result.scenario_name == "login_required"
         assert result.trigger_reason == "Login form detected"
         assert result.completion_reason == "URL matched /dashboard"
         assert result.duration == 10.5
 
-    def test_timed_out(self):
+    def test_timed_out_access(self):
         result = HandoffResult(
             was_blocked=True,
             timed_out=True,
+            timeout_cause="access",
             scenario_name="login_required",
             trigger_reason="Login form detected",
             completion_reason=None,
@@ -299,7 +304,156 @@ class TestHandoffResult:
         )
         assert result.was_blocked is True
         assert result.timed_out is True
+        assert result.timeout_cause == "access"
         assert result.completion_reason is None
+
+    def test_timed_out_completion(self):
+        result = HandoffResult(
+            was_blocked=True,
+            timed_out=True,
+            timeout_cause="completion",
+            scenario_name="login_required",
+            trigger_reason="Login form detected",
+            completion_reason=None,
+            duration=1800.0,
+        )
+        assert result.timeout_cause == "completion"
+
+
+class TestResolveTimeout:
+    """`_resolve_timeout` picks between per-call and config default.
+
+    None per-call inherits the default; any other value (including
+    math.inf) overrides. Pinning the layering rule directly because
+    it shapes every call-site override semantics.
+    """
+
+    def test_per_call_none_inherits_default(self):
+        from browser_handoff.handoff import _resolve_timeout
+
+        assert _resolve_timeout(None, 600.0) == 600.0
+        assert _resolve_timeout(None, None) is None
+
+    def test_per_call_value_overrides_default(self):
+        from browser_handoff.handoff import _resolve_timeout
+
+        assert _resolve_timeout(5.0, 600.0) == 5.0
+        # Per-call wins even when it's a "disable" sentinel.
+        import math
+
+        assert _resolve_timeout(math.inf, 600.0) == math.inf
+        # Per-call wins even when the default is unbounded.
+        assert _resolve_timeout(10.0, None) == 10.0
+
+
+class TestAwaitTimeoutCause:
+    """The three-way race returning the timeout cause (or None on match).
+
+    Drives `Handoff._await_timeout_cause` with a stand-in session so the
+    decision logic can be tested without a real browser or WS.
+    """
+
+    @staticmethod
+    def _session(
+        *,
+        access_timeout: float | None,
+        completion_timeout: float | None,
+    ):
+        from browser_handoff.server import SessionPresence
+
+        class _Session:
+            pass
+
+        s = _Session()
+        s.access_timeout = access_timeout
+        s.completion_timeout = completion_timeout
+        s.access_timer_fired = False
+        s.presence = SessionPresence()
+        return s
+
+    async def test_detection_match_wins(self):
+        import asyncio
+
+        from browser_handoff import Handoff
+
+        session = self._session(access_timeout=5.0, completion_timeout=5.0)
+        completion_event = asyncio.Event()
+        session.presence.bump()  # connect immediately
+        completion_event.set()  # detection already matched
+        result = await Handoff._await_timeout_cause(session, completion_event)
+        assert result is None
+        assert session.access_timer_fired is False
+
+    async def test_access_timeout_fires_without_connect(self):
+        import asyncio
+
+        from browser_handoff import Handoff
+
+        session = self._session(access_timeout=0.05, completion_timeout=10.0)
+        completion_event = asyncio.Event()
+        # Never bump presence — operator never connects.
+        result = await Handoff._await_timeout_cause(session, completion_event)
+        assert result == "access"
+        assert session.access_timer_fired is True
+
+    async def test_completion_timeout_fires_after_connect(self):
+        import asyncio
+
+        from browser_handoff import Handoff
+
+        session = self._session(access_timeout=10.0, completion_timeout=0.05)
+        completion_event = asyncio.Event()
+        session.presence.bump()  # connected
+        result = await Handoff._await_timeout_cause(session, completion_event)
+        assert result == "completion"
+        # Access timer was retired by the connect, not fired.
+        assert session.access_timer_fired is False
+
+    async def test_none_access_timeout_disables_access_timeout_branch(self):
+        import asyncio
+
+        from browser_handoff import Handoff
+
+        # Access disabled at this layer; completion still bounded so the
+        # race can resolve. Without a connect, completion never starts —
+        # use completion_event to terminate the race.
+        session = self._session(access_timeout=None, completion_timeout=None)
+        completion_event = asyncio.Event()
+        async def trip() -> None:
+            await asyncio.sleep(0.02)
+            completion_event.set()
+
+        asyncio.create_task(trip())
+        result = await asyncio.wait_for(
+            Handoff._await_timeout_cause(session, completion_event),
+            timeout=1.0,
+        )
+        assert result is None
+
+    async def test_completion_timer_anchors_on_first_connect_only(self):
+        """Bump twice; the completion_timeout sleep should start with the
+        first connect and not reset on the second."""
+        import asyncio
+        import time
+
+        from browser_handoff import Handoff
+
+        session = self._session(access_timeout=10.0, completion_timeout=0.15)
+        completion_event = asyncio.Event()
+
+        async def bump_twice() -> None:
+            session.presence.bump()
+            await asyncio.sleep(0.05)
+            session.presence.bump()  # reconnect — must not reset
+
+        asyncio.create_task(bump_twice())
+        start = time.monotonic()
+        result = await Handoff._await_timeout_cause(session, completion_event)
+        elapsed = time.monotonic() - start
+        assert result == "completion"
+        # Should fire ~0.15s after the first bump (≈0s), not after the
+        # second (≈0.05s). Allow generous slack for scheduler jitter.
+        assert elapsed < 0.30, f"completion timer appears to have reset (elapsed={elapsed:.3f})"
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -509,7 +663,7 @@ scenarios:
         - ".otp-input"
 server:
   port: 8080
-  session_timeout: 600
+  completion_timeout: 600
 """
         handoff = Handoff.from_yaml(yaml_str)
         assert len(handoff.scenarios) == 2
@@ -551,7 +705,7 @@ scenarios:
 
 server:
   port: 8080
-  session_timeout: 300
+  completion_timeout: 300
 
 notifiers:
   - type: slack
@@ -562,7 +716,7 @@ notifiers:
         assert handoff.scenarios[0].name == "login_with_consent"
         assert handoff.scenarios[1].name == "google_oauth"
         assert handoff.server.port == 8080
-        assert handoff.server.session_timeout == 300
+        assert handoff.server.completion_timeout == 300
         assert len(handoff.notifiers) == 1
 
 
@@ -743,3 +897,37 @@ class TestStreamUrlForwarding:
         assert "stream_url" in sig.parameters
         assert sig.parameters["stream_url"].kind == inspect.Parameter.KEYWORD_ONLY
         assert sig.parameters["stream_url"].default is None
+
+
+class TestTimeoutKwargSignatures:
+    """Lock the renamed and added timeout kwargs at the call sites.
+
+    `Handoff.run(timeout=...)` was renamed to `trigger_timeout`. Both
+    entry points gained `access_timeout` and `completion_timeout`
+    overrides that default to None (= inherit ServerConfig).
+    """
+
+    def test_run_uses_trigger_timeout_not_timeout(self):
+        import inspect
+
+        sig = inspect.signature(Handoff.run)
+        assert "trigger_timeout" in sig.parameters
+        assert sig.parameters["trigger_timeout"].default == 30.0
+        # Old name must be gone — passing it should fail.
+        assert "timeout" not in sig.parameters
+
+    def test_run_has_timeout_overrides(self):
+        import inspect
+
+        sig = inspect.signature(Handoff.run)
+        for name in ("access_timeout", "completion_timeout"):
+            assert name in sig.parameters, name
+            assert sig.parameters[name].default is None
+
+    def test_wait_for_completion_has_timeout_overrides(self):
+        import inspect
+
+        sig = inspect.signature(Handoff.wait_for_completion)
+        for name in ("access_timeout", "completion_timeout"):
+            assert name in sig.parameters, name
+            assert sig.parameters[name].default is None

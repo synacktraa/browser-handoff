@@ -135,6 +135,128 @@ async def test_concurrent_handoffs_share_one_server(
         await ctx2.close()
 
 
+async def test_access_timeout_fires_without_connect(
+    browser: Browser, base_url: str
+) -> None:
+    """Operator never connects → access timer fires, result carries
+    timeout_cause='access'."""
+    port = _free_port()
+    handoff = Handoff(
+        server=ServerConfig(
+            host="127.0.0.1",
+            port=port,
+            access_timeout=0.5,
+            completion_timeout=10.0,
+        ),
+    )
+
+    ctx = await browser.new_context()
+    page = await ctx.new_page()
+    try:
+        await page.goto(f"{base_url}/login")
+        # Never bump presence; access timer should fire.
+        result = await asyncio.wait_for(
+            handoff.wait_for_completion(
+                page, on=Detection.url(path_contains=["/dashboard"]),
+            ),
+            timeout=10,
+        )
+        assert result.was_blocked is True
+        assert result.timed_out is True
+        assert result.timeout_cause == "access"
+    finally:
+        await ctx.close()
+
+
+async def test_completion_timeout_fires_after_connect(
+    browser: Browser, base_url: str
+) -> None:
+    """Operator connects but never satisfies detection → completion
+    timer fires, result carries timeout_cause='completion'."""
+    port = _free_port()
+    handoff = Handoff(
+        server=ServerConfig(
+            host="127.0.0.1",
+            port=port,
+            access_timeout=10.0,
+            completion_timeout=0.5,
+        ),
+    )
+
+    ctx = await browser.new_context()
+    page = await ctx.new_page()
+    h = None
+    try:
+        await page.goto(f"{base_url}/login")
+        complete = Detection.url(path_contains=["/dashboard"])
+        h = asyncio.create_task(handoff.wait_for_completion(page, on=complete))
+
+        # Simulate the operator opening the wrapper. Once registered,
+        # bump presence so the access timer retires and the completion
+        # timer starts. The completion timer (0.5s) then fires.
+        await _wait_until(
+            lambda: handoff.is_serving and bool(handoff._server.sessions)
+        )
+        session = next(iter(handoff._server.sessions.values()))
+        session.presence.bump()
+
+        result = await asyncio.wait_for(h, timeout=10)
+        assert result.was_blocked is True
+        assert result.timed_out is True
+        assert result.timeout_cause == "completion"
+    finally:
+        if h is not None and not h.done():
+            h.cancel()
+            await asyncio.gather(h, return_exceptions=True)
+        await ctx.close()
+
+
+async def test_completion_timer_anchors_on_first_connect(
+    browser: Browser, base_url: str
+) -> None:
+    """A reconnect (second bump) must not reset the completion timer."""
+    port = _free_port()
+    handoff = Handoff(
+        server=ServerConfig(
+            host="127.0.0.1",
+            port=port,
+            access_timeout=10.0,
+            completion_timeout=1.5,
+        ),
+    )
+
+    ctx = await browser.new_context()
+    page = await ctx.new_page()
+    h = None
+    try:
+        await page.goto(f"{base_url}/login")
+        complete = Detection.url(path_contains=["/dashboard"])
+        h = asyncio.create_task(handoff.wait_for_completion(page, on=complete))
+
+        await _wait_until(
+            lambda: handoff.is_serving and bool(handoff._server.sessions)
+        )
+        session = next(iter(handoff._server.sessions.values()))
+        start = asyncio.get_running_loop().time()
+        session.presence.bump()
+        await asyncio.sleep(0.8)
+        session.presence.bump()  # reconnect — must not reset
+
+        result = await asyncio.wait_for(h, timeout=10)
+        elapsed = asyncio.get_running_loop().time() - start
+        assert result.timeout_cause == "completion"
+        # Anchored to first bump: fires ~1.5s elapsed.
+        # Reset bug: fires ~0.8+1.5 = 2.3s elapsed.
+        # Threshold 2.0 sits midway with ~0.5s slack on each side —
+        # enough headroom for scheduler jitter on slow runners.
+        assert elapsed < 2.0, f"completion timer may have reset (elapsed={elapsed:.3f})"
+    finally:
+        if h is not None and not h.done():
+            h.cancel()
+            await asyncio.gather(h, return_exceptions=True)
+        await ctx.close()
+
+
 async def test_sequential_handoffs_restart_server_on_same_port(
     browser: Browser, base_url: str
 ) -> None:
