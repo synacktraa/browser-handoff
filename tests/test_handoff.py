@@ -53,8 +53,8 @@ class TestHandoffCreation:
         scenarios = [
             Scenario(
                 name="bad-llm-trigger",
-                trigger=Detection.llm(condition="login form visible"),
-                complete=Detection.url(path_contains=["/done"]),
+                on=Detection.llm(condition="login form visible"),
+                until=Detection.url(path_contains=["/done"]),
             ),
         ]
         with pytest.raises(TypeError, match="bad-llm-trigger"):
@@ -72,11 +72,11 @@ class TestHandoffCreation:
         scenarios = [
             Scenario(
                 name="nested-llm-trigger",
-                trigger=Detection.any([
+                on=Detection.any([
                     Detection.url(path_contains=["/login"]),
                     Detection.llm(condition="hard-to-tell visually"),
                 ]),
-                complete=Detection.url(path_contains=["/done"]),
+                until=Detection.url(path_contains=["/done"]),
             ),
         ]
         with pytest.raises(TypeError, match="nested-llm-trigger"):
@@ -88,13 +88,13 @@ class TestHandoffCreation:
             scenarios=[
                 Scenario(
                     name="login",
-                    trigger=Detection.url(path_contains=["/login"]),
-                    complete=Detection.url(path_contains=["/dashboard"]),
+                    on=Detection.url(path_contains=["/login"]),
+                    until=Detection.url(path_contains=["/dashboard"]),
                 ),
                 Scenario(
                     name="payment",
-                    trigger=Detection.element(present=["#card-number"]),
-                    complete=Detection.url(path_contains=["/confirmation"]),
+                    on=Detection.element(present=["#card-number"]),
+                    until=Detection.url(path_contains=["/confirmation"]),
                 ),
             ],
             server=ServerConfig(port=3000),
@@ -114,8 +114,8 @@ class TestHandoffCreation:
             "scenarios": [
                 {
                     "name": "challenge",
-                    "trigger": {"type": "content", "title_contains": ["Challenge"]},
-                    "complete": {"type": "url", "path_matches": ["/callback"]},
+                    "on": {"type": "content", "title_contains": ["Challenge"]},
+                    "until": {"type": "url", "path_matches": ["/callback"]},
                 },
             ],
             "server": {
@@ -147,8 +147,8 @@ class TestHandoffCreation:
             "scenarios": [
                 {
                     "name": "payment",
-                    "trigger": {"type": "element", "present": ["#card-number"]},
-                    "complete": {"type": "content", "body_contains": ["Order confirmed"]},
+                    "on": {"type": "element", "present": ["#card-number"]},
+                    "until": {"type": "content", "body_contains": ["Order confirmed"]},
                 },
             ],
         })
@@ -181,8 +181,8 @@ scenarios:
             "scenarios": [
                 {
                     "name": "test_scenario",
-                    "trigger": {"type": "content", "title_contains": ["Test"]},
-                    "complete": {"type": "url", "path_matches": ["/done"]},
+                    "on": {"type": "content", "title_contains": ["Test"]},
+                    "until": {"type": "url", "path_matches": ["/done"]},
                 },
             ],
         }))
@@ -224,8 +224,8 @@ class TestHandoffWithEnvVars:
             "scenarios": [
                 {
                     "name": "test",
-                    "trigger": {"type": "content", "title_contains": ["Test"]},
-                    "complete": {"type": "content", "body_contains": ["Done"]},
+                    "on": {"type": "content", "title_contains": ["Test"]},
+                    "until": {"type": "content", "body_contains": ["Done"]},
                 },
             ],
             "server": {
@@ -466,7 +466,7 @@ class TestComplexConfig:
             "scenarios": [
                 {
                     "name": "complex_trigger",
-                    "trigger": {
+                    "on": {
                         "type": "any",
                         "conditions": [
                             {"type": "content", "title_contains": ["Challenge"]},
@@ -479,7 +479,7 @@ class TestComplexConfig:
                             },
                         ],
                     },
-                    "complete": {
+                    "until": {
                         "type": "all",
                         "conditions": [
                             {"type": "url", "query_contains": ["code="]},
@@ -502,8 +502,8 @@ class TestComplexConfig:
             "scenarios": [
                 {
                     "name": "test",
-                    "trigger": {"type": "content", "title_contains": ["Test"]},
-                    "complete": {"type": "content", "body_contains": ["Done"]},
+                    "on": {"type": "content", "title_contains": ["Test"]},
+                    "until": {"type": "content", "body_contains": ["Done"]},
                 },
             ],
             "notifiers": [
@@ -529,47 +529,111 @@ class TestScenario:
         """Test creating a Scenario programmatically."""
         scenario = Scenario(
             name="login_required",
-            trigger=Detection.url(path_contains=["/login"]),
-            complete=Detection.url(path_contains=["/dashboard"]),
+            on=Detection.url(path_contains=["/login"]),
+            until=Detection.url(path_contains=["/dashboard"]),
         )
         assert scenario.name == "login_required"
-        assert scenario.trigger is not None
-        assert scenario.complete is not None
+        assert scenario.on is not None
+        assert scenario.until is not None
 
     def test_scenario_to_dict(self):
         """Test serializing a Scenario to dictionary."""
         scenario = Scenario(
             name="login_required",
-            trigger=Detection.url(path_contains=["/login"]),
-            complete=Detection.url(path_contains=["/dashboard"]),
+            on=Detection.url(path_contains=["/login"]),
+            until=Detection.url(path_contains=["/dashboard"]),
         )
         data = scenario.to_dict()
         assert data["name"] == "login_required"
-        assert "trigger" in data
-        assert "complete" in data
-        assert data["trigger"]["type"] == "url"
-        assert data["complete"]["type"] == "url"
+        assert "on" in data
+        assert "until" in data
+        assert data["on"]["type"] == "url"
+        assert data["until"]["type"] == "url"
 
     def test_scenario_from_dict(self):
         """Test creating a Scenario from dictionary."""
         data = {
             "name": "password_required",
-            "trigger": {"type": "element", "present": ["input[type=password]"]},
-            "complete": {"type": "element", "missing": ["input[type=password]"]},
+            "on": {"type": "element", "present": ["input[type=password]"]},
+            "until": {"type": "element", "missing": ["input[type=password]"]},
         }
         scenario = Scenario.from_dict(data)
         assert scenario.name == "password_required"
-        assert scenario.trigger is not None
-        assert scenario.complete is not None
+        assert scenario.on is not None
+        assert scenario.until is not None
 
     def test_scenario_from_dict_unnamed(self):
         """Test creating a Scenario without name defaults to 'unnamed'."""
         data = {
-            "trigger": {"type": "content", "title_contains": ["Challenge"]},
-            "complete": {"type": "content", "body_contains": ["Success"]},
+            "on": {"type": "content", "title_contains": ["Challenge"]},
+            "until": {"type": "content", "body_contains": ["Success"]},
         }
         scenario = Scenario.from_dict(data)
         assert scenario.name == "unnamed"
+
+
+class TestScenarioDeprecatedShims:
+    """Scenario(trigger=, complete=), .trigger/.complete, and the
+    trigger:/complete: dict keys are all deprecated aliases that warn
+    and forward to the new names."""
+
+    def test_trigger_kwarg_warns_and_forwards(self):
+        trig = Detection.url(path_contains=["/login"])
+        with pytest.warns(DeprecationWarning, match=r"Scenario\(trigger"):
+            s = Scenario(
+                name="s",
+                trigger=trig,
+                until=Detection.url(path_contains=["/done"]),
+            )
+        assert s.on is trig
+
+    def test_complete_kwarg_warns_and_forwards(self):
+        done = Detection.url(path_contains=["/done"])
+        with pytest.warns(DeprecationWarning, match=r"Scenario\(complete"):
+            s = Scenario(
+                name="s",
+                on=Detection.url(path_contains=["/login"]),
+                complete=done,
+            )
+        assert s.until is done
+
+    def test_trigger_attribute_warns(self):
+        s = Scenario(
+            name="s",
+            on=Detection.url(path_contains=["/login"]),
+            until=Detection.url(path_contains=["/done"]),
+        )
+        with pytest.warns(DeprecationWarning, match="Scenario.trigger"):
+            assert s.trigger is s.on
+
+    def test_complete_attribute_warns(self):
+        s = Scenario(
+            name="s",
+            on=Detection.url(path_contains=["/login"]),
+            until=Detection.url(path_contains=["/done"]),
+        )
+        with pytest.warns(DeprecationWarning, match="Scenario.complete"):
+            assert s.complete is s.until
+
+    def test_from_dict_trigger_key_warns(self):
+        data = {
+            "name": "s",
+            "trigger": {"type": "url", "path_contains": ["/login"]},
+            "until": {"type": "url", "path_contains": ["/done"]},
+        }
+        with pytest.warns(DeprecationWarning, match=r"dict key `trigger`"):
+            s = Scenario.from_dict(data)
+        assert s.on is not None
+
+    def test_from_dict_complete_key_warns(self):
+        data = {
+            "name": "s",
+            "on": {"type": "url", "path_contains": ["/login"]},
+            "complete": {"type": "url", "path_contains": ["/done"]},
+        }
+        with pytest.warns(DeprecationWarning, match=r"dict key `complete`"):
+            s = Scenario.from_dict(data)
+        assert s.until is not None
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -587,13 +651,13 @@ class TestHandoffWithScenarios:
             scenarios=[
                 Scenario(
                     name="oauth_consent",
-                    trigger=Detection.content(title_contains=["Authorize"]),
-                    complete=Detection.url(query_contains=["code="]),
+                    on=Detection.content(title_contains=["Authorize"]),
+                    until=Detection.url(query_contains=["code="]),
                 ),
                 Scenario(
                     name="login_required",
-                    trigger=Detection.url(path_contains=["/login"]),
-                    complete=Detection.url(path_contains=["/dashboard"]),
+                    on=Detection.url(path_contains=["/login"]),
+                    until=Detection.url(path_contains=["/dashboard"]),
                 ),
             ],
             server=ServerConfig(port=8080),
@@ -608,13 +672,13 @@ class TestHandoffWithScenarios:
             "scenarios": [
                 {
                     "name": "login_required",
-                    "trigger": {"type": "content", "title_contains": ["Sign In"]},
-                    "complete": {"type": "element", "missing": ["input[type=password]"]},
+                    "on": {"type": "content", "title_contains": ["Sign In"]},
+                    "until": {"type": "element", "missing": ["input[type=password]"]},
                 },
                 {
                     "name": "payment",
-                    "trigger": {"type": "element", "present": ["#card-number"]},
-                    "complete": {"type": "element", "missing": ["#card-number"]},
+                    "on": {"type": "element", "present": ["#card-number"]},
+                    "until": {"type": "element", "missing": ["#card-number"]},
                 },
             ],
             "server": {"port": 9000},
@@ -630,8 +694,8 @@ class TestHandoffWithScenarios:
             "scenarios": [
                 {
                     "name": "auth_flow",
-                    "trigger": {"type": "url", "host_equals": ["accounts.google.com"]},
-                    "complete": {"type": "url", "query_contains": ["code="]},
+                    "on": {"type": "url", "host_equals": ["accounts.google.com"]},
+                    "until": {"type": "url", "query_contains": ["code="]},
                 },
             ],
         })
@@ -732,15 +796,15 @@ class TestDeprecations:
 
     _SCENARIO = {
         "name": "login",
-        "trigger": {"type": "url", "path_contains": ["/login"]},
-        "complete": {"type": "url", "path_contains": ["/dashboard"]},
+        "on": {"type": "url", "path_contains": ["/login"]},
+        "until": {"type": "url", "path_contains": ["/dashboard"]},
     }
 
     def test_constructor_scenarios_warns(self):
         scenario = Scenario(
             name="login",
-            trigger=Detection.url(path_contains=["/login"]),
-            complete=Detection.url(path_contains=["/dashboard"]),
+            on=Detection.url(path_contains=["/login"]),
+            until=Detection.url(path_contains=["/dashboard"]),
         )
         with pytest.warns(DeprecationWarning, match="run\\(scenarios="):
             h = Handoff(scenarios=[scenario])

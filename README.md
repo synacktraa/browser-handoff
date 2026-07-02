@@ -41,8 +41,8 @@ async def main() -> None:
             scenarios=[
                 Scenario(
                     name="Heroku App Login",
-                    trigger=Detection.url(path_contains=["/login"]),
-                    complete=Detection.url(path_contains=["/secure"]),
+                    on=Detection.url(path_contains=["/login"]),
+                    until=Detection.url(path_contains=["/secure"]),
                 ),
             ],
             trigger_timeout=10,
@@ -108,8 +108,8 @@ async def main() -> None:
             scenarios=[
                 Scenario(
                     name="Heroku App Login",
-                    trigger=Detection.url(path_contains=["/login"]),
-                    complete=Detection.url(path_contains=["/secure"]),
+                    on=Detection.url(path_contains=["/login"]),
+                    until=Detection.url(path_contains=["/secure"]),
                 ),
             ],
             trigger_timeout=10,

@@ -217,8 +217,8 @@ class Handoff:
             scenarios=[
                 Scenario(
                     name="login_required",
-                    trigger=Detection.element(present=['input[type="email"]']),
-                    complete=Detection.url(path_contains=["/dashboard"]),
+                    on=Detection.element(present=['input[type="email"]']),
+                    until=Detection.url(path_contains=["/dashboard"]),
                 ),
             ],
         )
@@ -354,7 +354,7 @@ class Handoff:
         # vision-call-per-mutation hot loop on real sites. Reject early
         # with the scenario name; walk to catch combinator nesting.
         for scenario in scenarios:
-            if _detection_tree_has_llm(scenario.trigger):
+            if _detection_tree_has_llm(scenario.on):
                 raise TypeError(
                     f"Scenario {scenario.name!r} uses LLMDetection in its "
                     "trigger (possibly nested inside a combinator). "
@@ -367,7 +367,7 @@ class Handoff:
         matched_scenario: Scenario | None = None
         matched_result: DetectionResult | None = None
         detection_to_scenario: dict[int, Scenario] = {
-            id(s.trigger): s for s in scenarios
+            id(s.on): s for s in scenarios
         }
 
         async def on_trigger(detection: BaseDetection) -> None:
@@ -381,14 +381,14 @@ class Handoff:
                 trigger_event.set()
 
         cleanups: list[Any] = [
-            s.trigger.register_listeners(page, on_trigger) for s in scenarios
+            s.on.register_listeners(page, on_trigger) for s in scenarios
         ]
 
         try:
             # Initial check — page may already be in a triggered state when
             # called (e.g. caller awaited goto() then immediately ran us).
             for scenario in scenarios:
-                r = await scenario.trigger.check(page)
+                r = await scenario.on.check(page)
                 if r.matched:
                     matched_scenario = scenario
                     matched_result = r
@@ -414,7 +414,7 @@ class Handoff:
             )
             return await self.pause(
                 page,
-                matched_scenario.complete,
+                matched_scenario.until,
                 reason=matched_result.reason,
                 name=matched_scenario.name,
                 stream_url=stream_url,

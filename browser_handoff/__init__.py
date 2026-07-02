@@ -16,8 +16,8 @@ Example — let the library decide when a human is needed:
         scenarios=[
             Scenario(
                 name="login_required",
-                trigger=Detection.element(present=['input[type="email"]']),
-                complete=Detection.url(path_contains=["/dashboard"]),
+                on=Detection.element(present=['input[type="email"]']),
+                until=Detection.url(path_contains=["/dashboard"]),
             ),
         ],
     )

@@ -117,8 +117,8 @@ async def run_claude_oauth(public_base: str | None = None) -> dict[str, Any]:
             scenarios=[
                 Scenario(
                     name="Claude Login",
-                    trigger=Detection.url(path_contains=["/login"]),
-                    complete=Detection.url(path_contains=["/oauth/authorize"]),
+                    on=Detection.url(path_contains=["/login"]),
+                    until=Detection.url(path_contains=["/oauth/authorize"]),
                 ),
             ],
             # Bind 0.0.0.0 for LAN / tunnel / sandbox reachability;
