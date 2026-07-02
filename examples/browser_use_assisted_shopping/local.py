@@ -47,8 +47,7 @@ import os
 from browser_use import ActionResult, Agent, BrowserSession, ChatAnthropic, Tools
 from playwright.async_api import Browser, Page, async_playwright
 
-from browser_handoff import Handoff, ServerConfig
-from browser_handoff.detection import Detection
+from browser_handoff import Detection, Handoff, ServerConfig
 from browser_handoff.notifiers import DiscordNotifier, Notifier
 
 # Quiet bh's INFO chatter so the demo output stays readable.

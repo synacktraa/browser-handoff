@@ -23,8 +23,7 @@ import asyncio
 
 from playwright.async_api import async_playwright
 
-from browser_handoff import Handoff
-from browser_handoff.detection import Detection
+from browser_handoff import Detection, Handoff
 
 
 async def main() -> None:
@@ -60,8 +59,7 @@ A `Handoff` is a reusable transport config — the streaming server, notifiers, 
 **`h.guard(page, scenarios=[...])`** — you want the library to decide. Give it one or more `Scenario` pairs (start condition + resume condition). It watches; if a scenario fires, it hands off. If nothing fires within `trigger_timeout`, your script keeps going.
 
 ```python
-from browser_handoff import Handoff, Scenario
-from browser_handoff.detection import Detection
+from browser_handoff import Detection, Handoff, Scenario
 
 h = Handoff()
 
@@ -106,8 +104,7 @@ import asyncio
 from kernel import AsyncKernel
 from playwright.async_api import async_playwright
 
-from browser_handoff import Handoff
-from browser_handoff.detection import Detection
+from browser_handoff import Detection, Handoff
 
 
 async def main() -> None:

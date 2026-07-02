@@ -6,7 +6,7 @@ import asyncio
 
 from playwright.async_api import Page
 
-from browser_handoff.detection import Detection
+from browser_handoff import Detection
 
 
 # ---- check() match semantics --------------------------------------------

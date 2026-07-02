@@ -9,7 +9,7 @@ from browser_handoff import (
     Scenario,
     ServerConfig,
 )
-from browser_handoff.detection import Detection
+from browser_handoff import Detection
 from browser_handoff.notifiers import SlackNotifier
 
 

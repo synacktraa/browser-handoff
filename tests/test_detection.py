@@ -3,7 +3,7 @@
 import asyncio
 
 import pytest
-from browser_handoff.detection import Detection
+from browser_handoff import Detection
 from browser_handoff.detection.combinators import AllDetection, AnyDetection, NotDetection
 from browser_handoff.detection.content import ContentDetection
 from browser_handoff.detection.element import ElementDetection

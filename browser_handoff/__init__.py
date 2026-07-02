@@ -6,8 +6,7 @@ done — for OAuth, 2FA, payments, identity checks, or any flow that
 requires a human.
 
 Example — let the library decide when a human is needed:
-    from browser_handoff import Handoff, Scenario
-    from browser_handoff.detection import Detection
+    from browser_handoff import Detection, Handoff, Scenario
 
     h = Handoff()  # reusable transport config
 
@@ -35,6 +34,7 @@ Example — you already know a human is needed, so skip the trigger:
 
 from importlib.metadata import PackageNotFoundError, version
 
+from .detection import Detection
 from .handoff import Handoff, HandoffResult
 from .scenario import Scenario
 from .server import ServerConfig
@@ -46,6 +46,7 @@ except PackageNotFoundError:
     __version__ = "0.0.0+unknown"
 
 __all__ = [
+    "Detection",
     "Handoff",
     "HandoffResult",
     "Scenario",

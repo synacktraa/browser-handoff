@@ -44,8 +44,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from browser_handoff import Handoff, Scenario, ServerConfig
-from browser_handoff.detection import Detection
+from browser_handoff import Detection, Handoff, Scenario, ServerConfig
 from browser_handoff.notifiers import DiscordNotifier, Notifier
 
 # Silence library INFO chatter; the Rich panels carry every operator-visible milestone.

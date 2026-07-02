@@ -19,7 +19,7 @@ import socket
 from playwright.async_api import Browser
 
 from browser_handoff import Handoff, ServerConfig
-from browser_handoff.detection import Detection
+from browser_handoff import Detection
 
 
 def _free_port() -> int:
