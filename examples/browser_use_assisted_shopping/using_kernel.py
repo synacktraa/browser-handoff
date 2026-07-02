@@ -19,7 +19,7 @@ connect to its `cdp_ws_url`.
 Why passthrough: bh's own CDP screencast would pull every frame from
 Kernel's cloud Chrome through this local process and re-serve it to
 the operator — an unworkable WAN round-trip. Passing Kernel's
-`browser_live_view_url` to `wait_for_completion(stream_url=...)`
+`browser_live_view_url` to `pause(stream_url=...)`
 makes bh iframe that viewer in its wrapper instead, while keeping
 detection + notification + lifecycle local.
 
@@ -28,7 +28,7 @@ Architecture — one cloud Chrome shared over CDP:
   * Playwright connects to `cdp_ws_url`; the tool walks `.contexts[*]`
     on that handle to resolve the current Page.
   * browser-use connects to the SAME `cdp_ws_url` for its agent loop.
-  * `request_human_help` calls `wait_for_completion(stream_url=...)`
+  * `request_human_help` calls `pause(stream_url=...)`
     with Kernel's live-view URL; the operator opens bh's wrapper URL
     (printed / Discord) and drives the iframed viewer over WebRTC.
 
@@ -161,7 +161,7 @@ def _build_tools(
         if agent is not None:
             agent.pause()
         try:
-            result = await handoff.wait_for_completion(
+            result = await handoff.pause(
                 page,
                 on=Detection.llm(condition=done_when),
                 reason=reason,

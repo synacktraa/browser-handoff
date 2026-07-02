@@ -491,7 +491,7 @@ class TestSessionPresence:
     """The presence primitive that gates orchestration's callback.
 
     Owned by HandoffSession, bumped on each `presence` message from the
-    wrapper (and on first accept). Handoff.wait_for_completion awaits
+    wrapper (and on first accept). Handoff.pause awaits
     `wait_until_connected()` before installing detection listeners and
     reads `state` before calling detection.check — so a detection
     scheduled to fire while the operator has wandered off doesn't burn

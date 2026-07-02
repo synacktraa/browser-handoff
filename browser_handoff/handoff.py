@@ -142,7 +142,7 @@ def _detection_tree_has_llm(detection: BaseDetection) -> bool:
     Walks the three current detection shapes — leaf, single-inner
     combinator (`.condition`), and multi-inner combinator
     (`.conditions`). Used by `Handoff.run` to reject LLM triggers and
-    by `wait_for_completion` to skip the initial check for LLM `on`.
+    by `pause` to skip the initial check for LLM `on`.
     """
     # Lazy import: llm imports detection.base which imports this module.
     from .detection.llm import LLMDetection
@@ -198,7 +198,7 @@ class Handoff:
       - `run(page, scenarios=...)` — watch a page for triggers; on
         match, stream the page to a human and wait for completion.
         Use when the library should decide *when* a human is needed.
-      - `wait_for_completion(page, on=...)` — stream the page to a
+      - `pause(page, on=...)` — stream the page to a
         human now and wait until `on` matches. Use when the caller has
         already decided a human is needed (e.g. an agent tool).
 
@@ -335,7 +335,7 @@ class Handoff:
                 work budget. None inherits `ServerConfig.completion_timeout`.
             stream_url: Optional substrate viewer URL. When set, the
                 handoff runs in passthrough mode and `stream_url` is
-                forwarded to `wait_for_completion`.
+                forwarded to `pause`.
             timeout: Deprecated alias for `trigger_timeout`.
 
         Returns:
@@ -358,7 +358,7 @@ class Handoff:
             raise ValueError(
                 "run() requires at least one scenario: pass scenarios=[...] "
                 "or set them on Handoff(...). To stream without a trigger, use "
-                "wait_for_completion()."
+                "pause()."
             )
 
         # LLMDetection in a trigger tree is misuse: no operator yet, no
@@ -371,7 +371,7 @@ class Handoff:
                     f"Scenario {scenario.name!r} uses LLMDetection in its "
                     "trigger (possibly nested inside a combinator). "
                     "LLMDetection is only valid as a completion check via "
-                    "Handoff.wait_for_completion (or as Scenario.complete). "
+                    "Handoff.pause (or as Scenario.complete). "
                     "Use URL/Element/Content detections for triggers."
                 )
 
@@ -424,7 +424,7 @@ class Handoff:
                 "handoff.run: trigger matched (scenario='%s'): %s",
                 matched_scenario.name, matched_result.reason,
             )
-            return await self.wait_for_completion(
+            return await self.pause(
                 page,
                 matched_scenario.complete,
                 reason=matched_result.reason,
@@ -438,7 +438,7 @@ class Handoff:
                 with suppress(Exception):
                     cleanup()
 
-    async def wait_for_completion(
+    async def pause(
         self,
         page: "Page",
         on: BaseDetection,
@@ -632,6 +632,34 @@ class Handoff:
             with suppress(Exception):
                 await server.unregister_session(session_id)
             await self._release_server()
+
+    async def wait_for_completion(
+        self,
+        page: "Page",
+        on: BaseDetection,
+        *,
+        reason: str = "Human intervention required",
+        name: str = "handoff",
+        stream_url: str | None = None,
+        access_timeout: float | None = None,
+        completion_timeout: float | None = None,
+    ) -> "HandoffResult":
+        """Deprecated alias for :meth:`pause`."""
+        warnings.warn(
+            "Handoff.wait_for_completion() is deprecated; use "
+            "`pause()`. Will be removed in a future major release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.pause(
+            page,
+            on,
+            reason=reason,
+            name=name,
+            stream_url=stream_url,
+            access_timeout=access_timeout,
+            completion_timeout=completion_timeout,
+        )
 
     @staticmethod
     async def _await_timeout_cause(

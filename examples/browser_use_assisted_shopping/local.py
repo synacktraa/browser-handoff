@@ -21,7 +21,7 @@ Architecture — one shared Chrome over CDP:
     holds the Page objects (browser-handoff needs a Playwright Page).
   * browser-use connects to the SAME Chrome over CDP for its agent loop.
   * `request_human_help` resolves the current Page on each call and
-    awaits `handoff.wait_for_completion(...)`.
+    awaits `handoff.pause(...)`.
 
 Prereqs:
   * ANTHROPIC_API_KEY — used by both browser-use's planner and bh's
@@ -149,7 +149,7 @@ def _build_tools(
         if agent is not None:
             agent.pause()
         try:
-            result = await handoff.wait_for_completion(
+            result = await handoff.pause(
                 page,
                 on=Detection.llm(condition=done_when),
                 reason=reason,

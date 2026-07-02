@@ -874,18 +874,18 @@ class TestCaptureCropMetrics:
 
 
 class TestStreamUrlForwarding:
-    """`stream_url` is plumbed through both Handoff.wait_for_completion and
-    Handoff.run; run() is a pass-through that forwards to wait_for_completion
-    on trigger match (cropping logic lives only in wait_for_completion).
+    """`stream_url` is plumbed through both Handoff.pause and
+    Handoff.run; run() is a pass-through that forwards to pause
+    on trigger match (cropping logic lives only in pause).
     """
 
-    def test_wait_for_completion_accepts_stream_url(self):
+    def test_pause_accepts_stream_url(self):
         # Signature-level check — confirms the kwarg exists and is keyword-
         # only. Doing a real call needs a Playwright page; the integration
         # test covers that.
         import inspect
 
-        sig = inspect.signature(Handoff.wait_for_completion)
+        sig = inspect.signature(Handoff.pause)
         assert "stream_url" in sig.parameters
         assert sig.parameters["stream_url"].kind == inspect.Parameter.KEYWORD_ONLY
         assert sig.parameters["stream_url"].default is None
@@ -938,10 +938,37 @@ class TestTimeoutKwargSignatures:
             assert name in sig.parameters, name
             assert sig.parameters[name].default is None
 
-    def test_wait_for_completion_has_timeout_overrides(self):
+    def test_pause_has_timeout_overrides(self):
         import inspect
 
-        sig = inspect.signature(Handoff.wait_for_completion)
+        sig = inspect.signature(Handoff.pause)
         for name in ("access_timeout", "completion_timeout"):
             assert name in sig.parameters, name
             assert sig.parameters[name].default is None
+
+
+class TestWaitForCompletionShim:
+    """wait_for_completion is a deprecated alias for pause."""
+
+    def test_wait_for_completion_exists_as_shim(self):
+        import inspect
+
+        assert hasattr(Handoff, "wait_for_completion")
+        # Same public signature as pause so callers can flip
+        # names without touching kwargs.
+        old = inspect.signature(Handoff.wait_for_completion).parameters
+        new = inspect.signature(Handoff.pause).parameters
+        assert set(old.keys()) == set(new.keys())
+
+    def test_wait_for_completion_warns(self):
+        import asyncio
+        import contextlib
+
+        handoff = Handoff()
+        with pytest.warns(DeprecationWarning, match="wait_for_completion"):
+            with contextlib.suppress(Exception):
+                asyncio.run(
+                    handoff.wait_for_completion(
+                        object(), Detection.url(path_contains=["/x"])
+                    )
+                )

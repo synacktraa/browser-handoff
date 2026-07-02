@@ -62,7 +62,7 @@ async def test_passthrough_skips_screencast_pump(
     await page.goto(f"{base_url}/login")
 
     h_task = asyncio.create_task(
-        handoff.wait_for_completion(
+        handoff.pause(
             page,
             on=Detection.url(path_contains=["/dashboard"]),
             reason="login passthrough test",
@@ -83,7 +83,7 @@ async def test_passthrough_skips_screencast_pump(
         assert session.capture_task is None
         assert session.frame_seq == 0
     finally:
-        # Simulate an operator opening the wrapper so wait_for_completion
+        # Simulate an operator opening the wrapper so pause
         # advances past its lazy-install gate AND so the freshness check
         # in the orchestration callback passes. One bump covers both:
         # SessionPresence flips the connect event on first call. The WS
@@ -108,7 +108,7 @@ async def test_passthrough_serves_proxy_template(
     await page.goto(f"{base_url}/login")
 
     h_task = asyncio.create_task(
-        handoff.wait_for_completion(
+        handoff.pause(
             page,
             on=Detection.url(path_contains=["/dashboard"]),
             reason="proxy template test",
@@ -152,7 +152,7 @@ async def test_notify_task_expired_event_shape(
     # Pick a completion condition that won't fire on /login or /dashboard
     # so the handoff stays open until we cancel it ourselves.
     h_task = asyncio.create_task(
-        handoff.wait_for_completion(
+        handoff.pause(
             page,
             on=Detection.url(path_contains=["/this-route-does-not-exist"]),
             reason="expired-event test",
