@@ -35,9 +35,9 @@ class TestHandoffCreation:
         object stands in for the Playwright page here."""
         import asyncio
 
-        handoff = Handoff()
+        h = Handoff()
         with pytest.raises(ValueError, match="requires at least one scenario"):
-            asyncio.run(handoff.guard(object()))
+            asyncio.run(h.guard(object()))
 
     def test_guard_rejects_llm_in_trigger(self):
         """Triggers must not use LLMDetection — wrong prompt shape (no
@@ -49,7 +49,7 @@ class TestHandoffCreation:
 
         pytest.importorskip("litellm")
 
-        handoff = Handoff()
+        h = Handoff()
         scenarios = [
             Scenario(
                 name="bad-llm-trigger",
@@ -58,7 +58,7 @@ class TestHandoffCreation:
             ),
         ]
         with pytest.raises(TypeError, match="bad-llm-trigger"):
-            asyncio.run(handoff.guard(object(), scenarios=scenarios))
+            asyncio.run(h.guard(object(), scenarios=scenarios))
 
     def test_guard_rejects_llm_nested_in_combinator(self):
         """The walk catches combinator nesting too — most likely accidental
@@ -68,7 +68,7 @@ class TestHandoffCreation:
 
         pytest.importorskip("litellm")
 
-        handoff = Handoff()
+        h = Handoff()
         scenarios = [
             Scenario(
                 name="nested-llm-trigger",
@@ -80,11 +80,11 @@ class TestHandoffCreation:
             ),
         ]
         with pytest.raises(TypeError, match="nested-llm-trigger"):
-            asyncio.run(handoff.guard(object(), scenarios=scenarios))
+            asyncio.run(h.guard(object(), scenarios=scenarios))
 
     def test_programmatic_creation(self):
         """Test creating Handoff programmatically."""
-        handoff = Handoff(
+        h = Handoff(
             scenarios=[
                 Scenario(
                     name="login",
@@ -102,11 +102,11 @@ class TestHandoffCreation:
                 SlackNotifier(webhook_url="https://hooks.slack.com/test"),
             ],
         )
-        assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "login"
-        assert handoff.scenarios[1].name == "payment"
-        assert handoff.server.port == 3000
-        assert len(handoff.notifiers) == 1
+        assert len(h.scenarios) == 2
+        assert h.scenarios[0].name == "login"
+        assert h.scenarios[1].name == "payment"
+        assert h.server.port == 3000
+        assert len(h.notifiers) == 1
 
     def test_from_dict(self):
         """Test creating Handoff from dictionary."""
@@ -127,19 +127,19 @@ class TestHandoffCreation:
                 {"type": "slack", "webhook_url": "https://test.com/webhook"},
             ],
         }
-        handoff = Handoff.from_dict(config)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "challenge"
-        assert handoff.server.port == 8080
-        assert handoff.server.access_timeout == 120
-        assert handoff.server.completion_timeout == 300
-        assert len(handoff.notifiers) == 1
+        h = Handoff.from_dict(config)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "challenge"
+        assert h.server.port == 8080
+        assert h.server.access_timeout == 120
+        assert h.server.completion_timeout == 300
+        assert len(h.notifiers) == 1
 
     def test_from_dict_without_scenarios_allowed(self):
         """from_dict no longer requires scenarios — an empty config yields a
         reusable Handoff whose scenarios are supplied later to run()."""
-        handoff = Handoff.from_dict({})
-        assert handoff.scenarios == []
+        h = Handoff.from_dict({})
+        assert h.scenarios == []
 
     def test_from_json(self):
         """Test creating Handoff from JSON string."""
@@ -152,9 +152,9 @@ class TestHandoffCreation:
                 },
             ],
         })
-        handoff = Handoff.from_json(json_str)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "payment"
+        h = Handoff.from_json(json_str)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "payment"
 
     def test_from_yaml(self):
         """Test creating Handoff from YAML string."""
@@ -170,9 +170,9 @@ scenarios:
       host_equals:
         - localhost
 """
-        handoff = Handoff.from_yaml(yaml_str)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "security_check"
+        h = Handoff.from_yaml(yaml_str)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "security_check"
 
     def test_from_file_json(self, tmp_path):
         """Test loading from JSON file."""
@@ -186,9 +186,9 @@ scenarios:
                 },
             ],
         }))
-        handoff = Handoff.from_file(config_file)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "test_scenario"
+        h = Handoff.from_file(config_file)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "test_scenario"
 
     def test_from_file_yaml(self, tmp_path):
         """Test loading from YAML file."""
@@ -205,9 +205,9 @@ scenarios:
       present:
         - "#success"
 """)
-        handoff = Handoff.from_file(config_file)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "blocker"
+        h = Handoff.from_file(config_file)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "blocker"
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -234,8 +234,8 @@ class TestHandoffWithEnvVars:
             },
         }))
 
-        handoff = Handoff.from_file(config_file)
-        assert handoff.server.public_base == "https://proxy.example.com"
+        h = Handoff.from_file(config_file)
+        assert h.server.public_base == "https://proxy.example.com"
 
     def test_env_var_in_notifiers(self, monkeypatch, tmp_path):
         """Test env var interpolation in notifier config."""
@@ -257,9 +257,9 @@ notifiers:
   - type: slack
     webhook_url: ${SLACK_WEBHOOK}
 """)
-        handoff = Handoff.from_file(config_file)
-        assert len(handoff.notifiers) == 1
-        assert handoff.notifiers[0].webhook_url == "https://hooks.slack.com/secret"
+        h = Handoff.from_file(config_file)
+        assert len(h.notifiers) == 1
+        assert h.notifiers[0].webhook_url == "https://hooks.slack.com/secret"
 
 
 class TestHandoffResult:
@@ -492,9 +492,9 @@ class TestComplexConfig:
                 },
             ],
         }
-        handoff = Handoff.from_dict(config)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "complex_trigger"
+        h = Handoff.from_dict(config)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "complex_trigger"
 
     def test_multiple_notifiers(self):
         """Test loading config with multiple notifiers."""
@@ -518,8 +518,8 @@ class TestComplexConfig:
                 },
             ],
         }
-        handoff = Handoff.from_dict(config)
-        assert len(handoff.notifiers) == 3
+        h = Handoff.from_dict(config)
+        assert len(h.notifiers) == 3
 
 
 class TestScenario:
@@ -583,7 +583,7 @@ class TestHandoffWithScenarios:
 
     def test_handoff_with_multiple_scenarios(self):
         """Test creating Handoff with multiple scenarios."""
-        handoff = Handoff(
+        h = Handoff(
             scenarios=[
                 Scenario(
                     name="oauth_consent",
@@ -598,9 +598,9 @@ class TestHandoffWithScenarios:
             ],
             server=ServerConfig(port=8080),
         )
-        assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "oauth_consent"
-        assert handoff.scenarios[1].name == "login_required"
+        assert len(h.scenarios) == 2
+        assert h.scenarios[0].name == "oauth_consent"
+        assert h.scenarios[1].name == "login_required"
 
     def test_handoff_with_scenarios_from_dict(self):
         """Test creating Handoff with scenarios from dictionary."""
@@ -619,10 +619,10 @@ class TestHandoffWithScenarios:
             ],
             "server": {"port": 9000},
         }
-        handoff = Handoff.from_dict(config)
-        assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "login_required"
-        assert handoff.scenarios[1].name == "payment"
+        h = Handoff.from_dict(config)
+        assert len(h.scenarios) == 2
+        assert h.scenarios[0].name == "login_required"
+        assert h.scenarios[1].name == "payment"
 
     def test_handoff_with_scenarios_from_json(self):
         """Test creating Handoff with scenarios from JSON string."""
@@ -635,9 +635,9 @@ class TestHandoffWithScenarios:
                 },
             ],
         })
-        handoff = Handoff.from_json(json_str)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "auth_flow"
+        h = Handoff.from_json(json_str)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "auth_flow"
 
     def test_handoff_with_scenarios_from_yaml(self):
         """Test creating Handoff with scenarios from YAML string."""
@@ -665,11 +665,11 @@ server:
   port: 8080
   completion_timeout: 600
 """
-        handoff = Handoff.from_yaml(yaml_str)
-        assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "login_required"
-        assert handoff.scenarios[1].name == "mfa_required"
-        assert handoff.server.port == 8080
+        h = Handoff.from_yaml(yaml_str)
+        assert len(h.scenarios) == 2
+        assert h.scenarios[0].name == "login_required"
+        assert h.scenarios[1].name == "mfa_required"
+        assert h.server.port == 8080
 
     def test_handoff_with_scenarios_from_file(self, tmp_path):
         """Test loading Handoff with scenarios from file."""
@@ -711,13 +711,13 @@ notifiers:
   - type: slack
     webhook_url: https://hooks.slack.com/test
 """)
-        handoff = Handoff.from_file(config_file)
-        assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "login_with_consent"
-        assert handoff.scenarios[1].name == "google_oauth"
-        assert handoff.server.port == 8080
-        assert handoff.server.completion_timeout == 300
-        assert len(handoff.notifiers) == 1
+        h = Handoff.from_file(config_file)
+        assert len(h.scenarios) == 2
+        assert h.scenarios[0].name == "login_with_consent"
+        assert h.scenarios[1].name == "google_oauth"
+        assert h.server.port == 8080
+        assert h.server.completion_timeout == 300
+        assert len(h.notifiers) == 1
 
 
 class TestDeprecations:
@@ -743,8 +743,8 @@ class TestDeprecations:
             complete=Detection.url(path_contains=["/dashboard"]),
         )
         with pytest.warns(DeprecationWarning, match="run\\(scenarios="):
-            handoff = Handoff(scenarios=[scenario])
-        assert handoff.scenarios == [scenario]
+            h = Handoff(scenarios=[scenario])
+        assert h.scenarios == [scenario]
 
     def test_constructor_without_scenarios_does_not_warn(self):
         import warnings
@@ -756,8 +756,8 @@ class TestDeprecations:
 
     def test_from_dict_warns(self):
         with pytest.warns(DeprecationWarning, match="from_dict"):
-            handoff = Handoff.from_dict({"scenarios": [self._SCENARIO]})
-        assert handoff.scenarios[0].name == "login"
+            h = Handoff.from_dict({"scenarios": [self._SCENARIO]})
+        assert h.scenarios[0].name == "login"
 
     def test_from_json_warns(self):
         with pytest.warns(DeprecationWarning, match="from_json"):
@@ -949,11 +949,11 @@ class TestWaitForCompletionShim:
         import asyncio
         import contextlib
 
-        handoff = Handoff()
+        h = Handoff()
         with pytest.warns(DeprecationWarning, match="wait_for_completion"):
             with contextlib.suppress(Exception):
                 asyncio.run(
-                    handoff.wait_for_completion(
+                    h.wait_for_completion(
                         object(), Detection.url(path_contains=["/x"])
                     )
                 )
@@ -970,10 +970,10 @@ class TestRunShim:
         import asyncio
         import contextlib
 
-        handoff = Handoff()
+        h = Handoff()
         with pytest.warns(DeprecationWarning, match=r"Handoff\.run"):
             with contextlib.suppress(Exception):
-                asyncio.run(handoff.run(object()))
+                asyncio.run(h.run(object()))
 
     def test_run_timeout_kwarg_warns(self):
         # Both the method-name deprecation and the timeout-kwarg
@@ -982,10 +982,10 @@ class TestRunShim:
         import contextlib
         import warnings
 
-        handoff = Handoff()
+        h = Handoff()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             with contextlib.suppress(Exception):
-                asyncio.run(handoff.run(object(), timeout=1.0))
+                asyncio.run(h.run(object(), timeout=1.0))
         messages = [str(w.message) for w in caught]
         assert any("run(timeout" in m for m in messages), messages

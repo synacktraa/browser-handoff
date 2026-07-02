@@ -9,9 +9,9 @@ Example — let the library decide when a human is needed:
     from browser_handoff import Handoff, Scenario
     from browser_handoff.detection import Detection
 
-    handoff = Handoff()  # reusable transport config
+    h = Handoff()  # reusable transport config
 
-    result = await handoff.guard(
+    result = await h.guard(
         page,
         scenarios=[
             Scenario(
@@ -26,7 +26,7 @@ Example — let the library decide when a human is needed:
     await bot_logic(page)
 
 Example — you already know a human is needed, so skip the trigger:
-    await handoff.wait_for_completion(
+    await h.pause(
         page,
         on=Detection.url(path_contains=["/payment_done"]),
         reason="Payment page reached",

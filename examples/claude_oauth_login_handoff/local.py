@@ -113,7 +113,7 @@ async def run_claude_oauth(public_base: str | None = None) -> dict[str, Any]:
                 DiscordNotifier(webhook_url=webhook, username="ccauth Handoff")
             )
 
-        handoff = Handoff(
+        h = Handoff(
             scenarios=[
                 Scenario(
                     name="Claude Login",
@@ -148,7 +148,7 @@ async def run_claude_oauth(public_base: str | None = None) -> dict[str, Any]:
                     # Fresh profile → claude.ai bounces /oauth/authorize → /login.
                     # The Login scenario fires, the human signs in, and run()
                     # returns once they land back on /oauth/authorize.
-                    result = await handoff.guard(page, trigger_timeout=30)
+                    result = await h.guard(page, trigger_timeout=30)
                     if result.was_blocked:
                         if result.timed_out:
                             console.print(

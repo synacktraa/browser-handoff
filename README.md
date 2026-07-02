@@ -28,7 +28,7 @@ from browser_handoff.detection import Detection
 
 
 async def main() -> None:
-    handoff = Handoff()  # reusable: holds server + notifier config, nothing page-specific
+    h = Handoff()  # reusable: holds server + notifier config, nothing page-specific
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -36,7 +36,7 @@ async def main() -> None:
         await page.goto("https://the-internet.herokuapp.com/login")
 
         # Watch the page; hand off to a human when a trigger fires.
-        result = await handoff.guard(
+        result = await h.guard(
             page,
             scenarios=[
                 Scenario(
@@ -45,7 +45,7 @@ async def main() -> None:
                     complete=Detection.url(path_contains=["/secure"]),
                 ),
             ],
-            timeout=10,
+            trigger_timeout=10,
         )
         if result.was_blocked and not result.timed_out:
             print(f"Human completed: {result.scenario_name} in {result.duration:.1f}s")
@@ -62,12 +62,12 @@ asyncio.run(main())
 
 A `Handoff` holds your transport config — the streaming server and notifiers — and is reusable across pages and runs. You decide *what* to watch for per call, so the same `Handoff` serves any number of scenarios.
 
-**Let the library detect the moment** with `handoff.guard(page, scenarios=[...])`. A `Scenario` is a pair: a `trigger` that says "stop, a human is needed" and a `complete` that says "OK, they're done." `guard` watches every scenario's trigger. If none fires within `trigger_timeout` seconds, it returns `HandoffResult(was_blocked=False)` and your script keeps going. If one fires, it starts a local streaming server, surfaces the URL (printed to logs and pushed to your notifiers), and waits until that scenario's `complete` matches — or until one of the handoff timers fires (`access_timeout` if the operator never opens the link, `completion_timeout` if they open it but don't finish). On timeout the result has `timed_out=True` and `timeout_cause` set to `"access"` or `"completion"`. It never raises on timeout; check the result.
+**Let the library detect the moment** with `h.guard(page, scenarios=[...])`. A `Scenario` is a pair: a `trigger` that says "stop, a human is needed" and a `complete` that says "OK, they're done." `guard` watches every scenario's trigger. If none fires within `trigger_timeout` seconds, it returns `HandoffResult(was_blocked=False)` and your script keeps going. If one fires, it starts a local streaming server, surfaces the URL (printed to logs and pushed to your notifiers), and waits until that scenario's `complete` matches — or until one of the handoff timers fires (`access_timeout` if the operator never opens the link, `completion_timeout` if they open it but don't finish). On timeout the result has `timed_out=True` and `timeout_cause` set to `"access"` or `"completion"`. It never raises on timeout; check the result.
 
-**Already know a human is needed?** Skip trigger detection and stream right away with `handoff.pause(page, on=...)`. This is the right call when something upstream already decided — e.g. an AI agent navigated to the payment page itself — so watching for a trigger would be redundant:
+**Already know a human is needed?** Skip trigger detection and stream right away with `h.pause(page, on=...)`. This is the right call when something upstream already decided — e.g. an AI agent navigated to the payment page itself — so watching for a trigger would be redundant:
 
 ```python
-await handoff.pause(
+await h.pause(
     page,
     on=Detection.url(path_contains=["/payment_done"]),
     reason="Payment page reached",
@@ -93,7 +93,7 @@ from browser_handoff.detection import Detection
 
 
 async def main() -> None:
-    handoff = Handoff()
+    h = Handoff()
     kernel = AsyncKernel()
     kernel_browser = await kernel.browsers.create()
 
@@ -103,7 +103,7 @@ async def main() -> None:
         page = (browser.contexts[0] or await browser.new_context()).pages[0]
         await page.goto("https://the-internet.herokuapp.com/login")
 
-        result = await handoff.guard(
+        result = await h.guard(
             page,
             scenarios=[
                 Scenario(
@@ -112,7 +112,7 @@ async def main() -> None:
                     complete=Detection.url(path_contains=["/secure"]),
                 ),
             ],
-            timeout=10,
+            trigger_timeout=10,
             stream_url=kernel_browser.browser_live_view_url,  # ← passthrough
         )
         if result.was_blocked and not result.timed_out:
@@ -132,7 +132,7 @@ What changes when `stream_url` is set:
 - Window maximization at handoff start gives the crop math a clean, deterministic rect.
 - LLMDetection installs the same stealth in-page observer it uses in streaming mode (non-enumerable window stamp + capture/passive listeners on deliberate input — `mousedown` / `keydown` / `wheel` / `scroll` / `touchstart` / `input` / `paste`), with no detectable JS surface beyond a single non-enumerable random-named integer. Only installed after the operator opens the wrapper URL, so anyone with just the substrate viewer URL can't drive vision calls.
 
-`stream_url` works on both entry points — `handoff.pause(stream_url=...)` and `handoff.guard(stream_url=...)`. Everything else (detection contracts, notifiers, completion semantics) is identical to streaming mode.
+`stream_url` works on both entry points — `h.pause(stream_url=...)` and `h.guard(stream_url=...)`. Everything else (detection contracts, notifiers, completion semantics) is identical to streaming mode.
 
 ## Scope: what this is *not*
 

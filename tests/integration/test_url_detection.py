@@ -110,7 +110,7 @@ async def test_listener_cleanup_actually_removes(page: Page, base_url: str) -> N
 
     Pre-fix, the registered lambda and the function passed to
     remove_listener were different objects, so cleanup was a silent no-op
-    and listeners stacked across handoff.guard() invocations.
+    and listeners stacked across h.guard() invocations.
     """
     detection = Detection.url(path_contains=["/login"])
     calls: list = []

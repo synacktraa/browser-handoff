@@ -210,9 +210,9 @@ class Handoff:
     finishes. Concurrent handoffs run as distinct sessions on one port.
 
     Example:
-        handoff = Handoff(notifiers=[DiscordNotifier(...)])
+        h = Handoff(notifiers=[DiscordNotifier(...)])
 
-        result = await handoff.guard(
+        result = await h.guard(
             page,
             scenarios=[
                 Scenario(

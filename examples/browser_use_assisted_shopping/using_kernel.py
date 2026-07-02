@@ -88,7 +88,7 @@ def _resolve_current_page(browser: Browser) -> Page | None:
 
 
 def _build_tools(
-    handoff: Handoff,
+    h: Handoff,
     browser: Browser,
     stream_url: str,
     agent_ref: dict[str, "Agent | None"],
@@ -161,7 +161,7 @@ def _build_tools(
         if agent is not None:
             agent.pause()
         try:
-            result = await handoff.pause(
+            result = await h.pause(
                 page,
                 on=Detection.llm(condition=done_when),
                 reason=reason,
@@ -200,7 +200,7 @@ async def main() -> None:
             DiscordNotifier(webhook_url=webhook, username="Shopping Agent")
         )
 
-    handoff = Handoff(
+    h = Handoff(
         server=ServerConfig(host="0.0.0.0", port=STREAMING_PORT),
         notifiers=notifiers,
     )
@@ -223,7 +223,7 @@ async def main() -> None:
             # Populated after Agent(...) so the tool closure can pause/
             # resume the agent without a circular dependency.
             agent_ref: dict[str, Agent | None] = {"agent": None}
-            tools = _build_tools(handoff, browser, live_view_url, agent_ref)
+            tools = _build_tools(h, browser, live_view_url, agent_ref)
             browser_session = BrowserSession(cdp_url=cdp_url)
             agent = Agent(
                 task=TASK,

@@ -21,7 +21,7 @@ Architecture — one shared Chrome over CDP:
     holds the Page objects (browser-handoff needs a Playwright Page).
   * browser-use connects to the SAME Chrome over CDP for its agent loop.
   * `request_human_help` resolves the current Page on each call and
-    awaits `handoff.pause(...)`.
+    awaits `h.pause(...)`.
 
 Prereqs:
   * ANTHROPIC_API_KEY — used by both browser-use's planner and bh's
@@ -78,7 +78,7 @@ def _resolve_current_page(browser: Browser) -> Page | None:
 
 
 def _build_tools(
-    handoff: Handoff,
+    h: Handoff,
     browser: Browser,
     agent_ref: dict[str, "Agent | None"],
 ) -> Tools:
@@ -149,7 +149,7 @@ def _build_tools(
         if agent is not None:
             agent.pause()
         try:
-            result = await handoff.pause(
+            result = await h.pause(
                 page,
                 on=Detection.llm(condition=done_when),
                 reason=reason,
@@ -184,7 +184,7 @@ async def main() -> None:
             DiscordNotifier(webhook_url=webhook, username="Shopping Agent")
         )
 
-    handoff = Handoff(
+    h = Handoff(
         server=ServerConfig(host="0.0.0.0", port=STREAMING_PORT),
         notifiers=notifiers,
     )
@@ -211,7 +211,7 @@ async def main() -> None:
             # Populated after Agent(...) so the tool closure can pause/
             # resume the agent without a circular dependency.
             agent_ref: dict[str, Agent | None] = {"agent": None}
-            tools = _build_tools(handoff, browser, agent_ref)
+            tools = _build_tools(h, browser, agent_ref)
             browser_session = BrowserSession(cdp_url=f"http://127.0.0.1:{CDP_PORT}")
             agent = Agent(
                 task=TASK,
