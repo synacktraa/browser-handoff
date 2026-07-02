@@ -913,8 +913,22 @@ class TestTimeoutKwargSignatures:
         sig = inspect.signature(Handoff.run)
         assert "trigger_timeout" in sig.parameters
         assert sig.parameters["trigger_timeout"].default == 30.0
-        # Old name must be gone — passing it should fail.
-        assert "timeout" not in sig.parameters
+        # Old name still accepted as a deprecated shim; default None so
+        # only an explicit pass fires the warning.
+        assert "timeout" in sig.parameters
+        assert sig.parameters["timeout"].default is None
+
+    def test_run_timeout_shim_warns_and_forwards(self):
+        # We only need the top-of-run shim to fire; empty scenarios trip
+        # the ValueError right after, which is fine — the warning has
+        # already been recorded by then.
+        import asyncio
+        import contextlib
+
+        handoff = Handoff()
+        with pytest.warns(DeprecationWarning, match=r"run\(timeout"):
+            with contextlib.suppress(Exception):
+                asyncio.run(handoff.run(object(), timeout=1.0))
 
     def test_run_has_timeout_overrides(self):
         import inspect

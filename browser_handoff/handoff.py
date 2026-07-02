@@ -316,6 +316,7 @@ class Handoff:
         access_timeout: float | None = None,
         completion_timeout: float | None = None,
         stream_url: str | None = None,
+        timeout: float | None = None,
     ) -> "HandoffResult":
         """Watch for triggers; on match, run a handoff and await completion.
 
@@ -335,12 +336,23 @@ class Handoff:
             stream_url: Optional substrate viewer URL. When set, the
                 handoff runs in passthrough mode and `stream_url` is
                 forwarded to `wait_for_completion`.
+            timeout: Deprecated alias for `trigger_timeout`.
 
         Returns:
             HandoffResult describing what happened. Never raises on
             handoff-phase timeout — check `result.timed_out` and
             `result.timeout_cause`.
         """
+        if timeout is not None:
+            warnings.warn(
+                "Handoff.run(timeout=...) is deprecated; use "
+                "`trigger_timeout=...`. Will be removed in a future "
+                "major release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            trigger_timeout = timeout
+
         scenarios = scenarios if scenarios is not None else self.scenarios
         if not scenarios:
             raise ValueError(
