@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +30,10 @@ class ServerConfig:
         jpeg_quality: JPEG quality for screencast frames (1-100).
         every_nth_frame: Capture 1 of every N frames Chrome produces;
             higher values reduce CPU/bandwidth at the cost of smoothness.
+
+    Deprecated:
+        session_timeout: previously the single knob for total session
+            lifetime; forwarded to `completion_timeout` with a warning.
     """
 
     host: str = "127.0.0.1"
@@ -36,8 +41,24 @@ class ServerConfig:
     public_base: str | None = None
     access_timeout: float | None = 600.0
     completion_timeout: float | None = 1800.0
+    # None sentinel — __post_init__ distinguishes "not passed" from an
+    # explicit value and forwards to completion_timeout in the latter case.
+    session_timeout: float | None = None
     jpeg_quality: int = 75
     every_nth_frame: int = 1
+
+    def __post_init__(self) -> None:
+        # Frozen dataclass — assign through object.__setattr__.
+        if self.session_timeout is not None:
+            warnings.warn(
+                "ServerConfig.session_timeout is deprecated; the value is "
+                "being used as `completion_timeout` (post-connect work "
+                "budget). Use `access_timeout` + `completion_timeout` "
+                "directly. Will be removed in a future major release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            object.__setattr__(self, "completion_timeout", self.session_timeout)
 
     def get_base_url(self) -> str:
         """Return the base URL for stream URLs.
@@ -74,4 +95,7 @@ class ServerConfig:
             kwargs["access_timeout"] = data["access_timeout"]
         if "completion_timeout" in data:
             kwargs["completion_timeout"] = data["completion_timeout"]
+        # Deprecated: forwards to completion_timeout via __post_init__.
+        if "session_timeout" in data:
+            kwargs["session_timeout"] = data["session_timeout"]
         return cls(**kwargs)

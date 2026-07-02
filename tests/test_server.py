@@ -64,11 +64,17 @@ class TestServerConfig:
         assert config.access_timeout is None
         assert config.completion_timeout is None
 
-    def test_old_session_timeout_rejected(self):
-        # Clean break — the deprecated knob is gone; the dataclass
-        # raises immediately so misuse fails at construction.
-        with pytest.raises(TypeError):
-            ServerConfig(session_timeout=300.0)
+    def test_session_timeout_forwards_with_deprecation(self):
+        # Backwards-compat shim: session_timeout still accepted, warns,
+        # and its value becomes the new completion_timeout.
+        with pytest.warns(DeprecationWarning, match="session_timeout"):
+            config = ServerConfig(session_timeout=300.0)
+        assert config.completion_timeout == 300.0
+
+    def test_session_timeout_via_from_dict(self):
+        with pytest.warns(DeprecationWarning, match="session_timeout"):
+            config = ServerConfig.from_dict({"session_timeout": 450.0})
+        assert config.completion_timeout == 450.0
 
     def test_get_base_url_with_public_base(self):
         """Test get_base_url with public_base set."""
