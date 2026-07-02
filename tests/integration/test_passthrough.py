@@ -25,7 +25,7 @@ import pytest
 from playwright.async_api import Browser
 
 from browser_handoff import Handoff, ServerConfig
-from browser_handoff.detection import Detection
+from browser_handoff import Detection
 
 
 def _free_port() -> int:
@@ -55,24 +55,24 @@ async def test_passthrough_skips_screencast_pump(
     confirms the inverse — pump runs without stream_url.
     """
     port = _free_port()
-    handoff = Handoff(server=ServerConfig(host="127.0.0.1", port=port))
+    h = Handoff(server=ServerConfig(host="127.0.0.1", port=port))
 
     ctx = await browser.new_context()
     page = await ctx.new_page()
     await page.goto(f"{base_url}/login")
 
     h_task = asyncio.create_task(
-        handoff.wait_for_completion(
+        h.pause(
             page,
-            on=Detection.url(path_contains=["/dashboard"]),
+            until=Detection.url(path_contains=["/dashboard"]),
             reason="login passthrough test",
             stream_url="https://dummy.substrate.example/viewer?t=abc",
         )
     )
     try:
         # Wait for the session to register so we can inspect it.
-        await _wait_until(lambda: bool(handoff._server and handoff._server.sessions))
-        server = handoff._server
+        await _wait_until(lambda: bool(h._server and h._server.sessions))
+        server = h._server
         assert server is not None
         sessions = list(server.sessions.values())
         assert len(sessions) == 1
@@ -83,7 +83,7 @@ async def test_passthrough_skips_screencast_pump(
         assert session.capture_task is None
         assert session.frame_seq == 0
     finally:
-        # Simulate an operator opening the wrapper so wait_for_completion
+        # Simulate an operator opening the wrapper so pause
         # advances past its lazy-install gate AND so the freshness check
         # in the orchestration callback passes. One bump covers both:
         # SessionPresence flips the connect event on first call. The WS
@@ -101,23 +101,23 @@ async def test_passthrough_serves_proxy_template(
 ) -> None:
     """GET /?t=<token> returns the proxy template, not intervention.html."""
     port = _free_port()
-    handoff = Handoff(server=ServerConfig(host="127.0.0.1", port=port))
+    h = Handoff(server=ServerConfig(host="127.0.0.1", port=port))
 
     ctx = await browser.new_context()
     page = await ctx.new_page()
     await page.goto(f"{base_url}/login")
 
     h_task = asyncio.create_task(
-        handoff.wait_for_completion(
+        h.pause(
             page,
-            on=Detection.url(path_contains=["/dashboard"]),
+            until=Detection.url(path_contains=["/dashboard"]),
             reason="proxy template test",
             stream_url="https://dummy.substrate.example/viewer?t=xyz",
         )
     )
     try:
-        await _wait_until(lambda: bool(handoff._server and handoff._server.sessions))
-        server = handoff._server
+        await _wait_until(lambda: bool(h._server and h._server.sessions))
+        server = h._server
         session = next(iter(server.sessions.values()))
 
         # Render via the server's helper directly — same path the HTTP
@@ -143,7 +143,7 @@ async def test_notify_task_expired_event_shape(
 ) -> None:
     """Server-side notify_task_expired pushes the right JSON to subscribers."""
     port = _free_port()
-    handoff = Handoff(server=ServerConfig(host="127.0.0.1", port=port))
+    h = Handoff(server=ServerConfig(host="127.0.0.1", port=port))
 
     ctx = await browser.new_context()
     page = await ctx.new_page()
@@ -152,16 +152,16 @@ async def test_notify_task_expired_event_shape(
     # Pick a completion condition that won't fire on /login or /dashboard
     # so the handoff stays open until we cancel it ourselves.
     h_task = asyncio.create_task(
-        handoff.wait_for_completion(
+        h.pause(
             page,
-            on=Detection.url(path_contains=["/this-route-does-not-exist"]),
+            until=Detection.url(path_contains=["/this-route-does-not-exist"]),
             reason="expired-event test",
             stream_url="https://dummy/viewer",
         )
     )
     try:
-        await _wait_until(lambda: bool(handoff._server and handoff._server.sessions))
-        server = handoff._server
+        await _wait_until(lambda: bool(h._server and h._server.sessions))
+        server = h._server
         session = next(iter(server.sessions.values()))
 
         sent: list[dict] = []

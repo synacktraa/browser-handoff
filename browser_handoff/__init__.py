@@ -6,18 +6,17 @@ done — for OAuth, 2FA, payments, identity checks, or any flow that
 requires a human.
 
 Example — let the library decide when a human is needed:
-    from browser_handoff import Handoff, Scenario
-    from browser_handoff.detection import Detection
+    from browser_handoff import Detection, Handoff, Scenario
 
-    handoff = Handoff()  # reusable transport config
+    h = Handoff()  # reusable transport config
 
-    result = await handoff.run(
+    result = await h.guard(
         page,
         scenarios=[
             Scenario(
                 name="login_required",
-                trigger=Detection.element(present=['input[type="email"]']),
-                complete=Detection.url(path_contains=["/dashboard"]),
+                on=Detection.element(present=['input[type="email"]']),
+                until=Detection.url(path_contains=["/dashboard"]),
             ),
         ],
     )
@@ -26,15 +25,16 @@ Example — let the library decide when a human is needed:
     await bot_logic(page)
 
 Example — you already know a human is needed, so skip the trigger:
-    await handoff.wait_for_completion(
+    await h.pause(
         page,
-        on=Detection.url(path_contains=["/payment_done"]),
+        until=Detection.url(path_contains=["/payment_done"]),
         reason="Payment page reached",
     )
 """
 
 from importlib.metadata import PackageNotFoundError, version
 
+from .detection import Detection
 from .handoff import Handoff, HandoffResult
 from .scenario import Scenario
 from .server import ServerConfig
@@ -46,6 +46,7 @@ except PackageNotFoundError:
     __version__ = "0.0.0+unknown"
 
 __all__ = [
+    "Detection",
     "Handoff",
     "HandoffResult",
     "Scenario",

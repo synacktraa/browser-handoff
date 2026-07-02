@@ -352,11 +352,45 @@ class StreamingServer:
                 await websocket.close()
                 return
 
+            # Access-timer guard: a late operator clicking past
+            # access_timeout must not get a live session. Close with
+            # 1008 + a known reason so the wrapper renders the expired
+            # card instead of the generic ended card.
+            if session_state.access_timer_fired:
+                await websocket.close(code=1008, reason="access_timeout_expired")
+                return
+
             session_state.websockets.append(websocket)
+            # First connect anchors the completion deadline against
+            # wall-clock so subsequent reconnects see the same banner
+            # countdown. Set BEFORE bump() so observers reading the
+            # deadline off a connected session always see a value.
+            if (
+                session_state.completion_deadline_ts is None
+                and session_state.completion_timeout is not None
+            ):
+                session_state.completion_deadline_ts = (
+                    time.time() + session_state.completion_timeout
+                )
             # One bump on accept flips both presence signals at once:
             # the connect gate for lazy install AND the freshness
             # timestamp the orchestration callback reads.
             session_state.presence.bump()
+
+            # Push completion deadline so the wrapper's countdown banner
+            # can render local time-remaining against an absolute epoch
+            # (drift-safe across reconnects). Omitted when there's no
+            # bound — wrapper hides the banner.
+            deadline_ms = (
+                int(session_state.completion_deadline_ts * 1000)
+                if session_state.completion_deadline_ts is not None
+                else None
+            )
+            payload: dict[str, Any] = {"type": "session_state"}
+            if deadline_ms is not None:
+                payload["completion_deadline_ms"] = deadline_ms
+            with suppress(Exception):
+                await websocket.send_json(payload)
 
             if session_state.is_passthrough:
                 try:
@@ -500,6 +534,8 @@ class StreamingServer:
         viewport_size: dict[str, int] | None = None,
         stream_url: str | None = None,
         crop_metrics: dict[str, int] | None = None,
+        access_timeout: float | None = None,
+        completion_timeout: float | None = None,
     ) -> HandoffSession:
         """Register a new Page for streaming.
 
@@ -515,6 +551,12 @@ class StreamingServer:
             crop_metrics: Six ints (screen_w/h, page_x/y, page_w/h) used
                 to crop the iframe in passthrough mode. Only meaningful
                 with `stream_url`.
+            access_timeout: Resolved bound for this session's pre-connect
+                wait. Stored on the session for the access-deadline task
+                to read.
+            completion_timeout: Resolved bound for this session's
+                post-connect work. Stored on the session; the WS handler
+                turns it into a wall-clock deadline on first connect.
         """
         cdp = await context.new_cdp_session(page)
         await cdp.send("Page.enable")
@@ -529,10 +571,17 @@ class StreamingServer:
             viewport_size=viewport_size or DEFAULT_VIEWPORT.copy(),
             stream_url=stream_url,
             crop_metrics=crop_metrics,
+            access_timeout=access_timeout,
+            completion_timeout=completion_timeout,
         )
-        # Token lifetime is bounded by the handoff's session_timeout —
-        # leaked links die with the handoff.
-        session.expires_at = time.time() + self.config.session_timeout
+        # Token-resolution cap: worst-case session lifetime is
+        # access + completion. If either layer is unbounded, the token
+        # has no wall-clock expiry — orchestration's unregister still
+        # drops it on handoff end.
+        if access_timeout is not None and completion_timeout is not None:
+            session.expires_at = time.time() + access_timeout + completion_timeout
+        else:
+            session.expires_at = None
         self.sessions[session_id] = session
         self._token_to_session[session.access_token] = session_id
 

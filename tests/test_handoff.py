@@ -9,7 +9,7 @@ from browser_handoff import (
     Scenario,
     ServerConfig,
 )
-from browser_handoff.detection import Detection
+from browser_handoff import Detection
 from browser_handoff.notifiers import SlackNotifier
 
 
@@ -29,17 +29,17 @@ class TestHandoffCreation:
         assert Handoff().scenarios == []
         assert Handoff(scenarios=[]).scenarios == []
 
-    def test_run_requires_scenarios(self):
-        """run() raises if no scenarios are passed and none are set on the
+    def test_guard_requires_scenarios(self):
+        """guard() raises if no scenarios are passed and none are set on the
         instance. Validation happens before the page is touched, so a bare
         object stands in for the Playwright page here."""
         import asyncio
 
-        handoff = Handoff()
+        h = Handoff()
         with pytest.raises(ValueError, match="requires at least one scenario"):
-            asyncio.run(handoff.run(object()))
+            asyncio.run(h.guard(object()))
 
-    def test_run_rejects_llm_in_trigger(self):
+    def test_guard_rejects_llm_in_trigger(self):
         """Triggers must not use LLMDetection — wrong prompt shape (no
         operator-facing reason), wrong activity signal (no operator yet),
         no first-event gate. Reject early at the scenario level so the
@@ -49,18 +49,18 @@ class TestHandoffCreation:
 
         pytest.importorskip("litellm")
 
-        handoff = Handoff()
+        h = Handoff()
         scenarios = [
             Scenario(
                 name="bad-llm-trigger",
-                trigger=Detection.llm(condition="login form visible"),
-                complete=Detection.url(path_contains=["/done"]),
+                on=Detection.llm(condition="login form visible"),
+                until=Detection.url(path_contains=["/done"]),
             ),
         ]
         with pytest.raises(TypeError, match="bad-llm-trigger"):
-            asyncio.run(handoff.run(object(), scenarios=scenarios))
+            asyncio.run(h.guard(object(), scenarios=scenarios))
 
-    def test_run_rejects_llm_nested_in_combinator(self):
+    def test_guard_rejects_llm_nested_in_combinator(self):
         """The walk catches combinator nesting too — most likely accidental
         misuse since AnyOf/AllOf hide the LLMDetection in plain sight.
         """
@@ -68,33 +68,33 @@ class TestHandoffCreation:
 
         pytest.importorskip("litellm")
 
-        handoff = Handoff()
+        h = Handoff()
         scenarios = [
             Scenario(
                 name="nested-llm-trigger",
-                trigger=Detection.any([
+                on=Detection.any([
                     Detection.url(path_contains=["/login"]),
                     Detection.llm(condition="hard-to-tell visually"),
                 ]),
-                complete=Detection.url(path_contains=["/done"]),
+                until=Detection.url(path_contains=["/done"]),
             ),
         ]
         with pytest.raises(TypeError, match="nested-llm-trigger"):
-            asyncio.run(handoff.run(object(), scenarios=scenarios))
+            asyncio.run(h.guard(object(), scenarios=scenarios))
 
     def test_programmatic_creation(self):
         """Test creating Handoff programmatically."""
-        handoff = Handoff(
+        h = Handoff(
             scenarios=[
                 Scenario(
                     name="login",
-                    trigger=Detection.url(path_contains=["/login"]),
-                    complete=Detection.url(path_contains=["/dashboard"]),
+                    on=Detection.url(path_contains=["/login"]),
+                    until=Detection.url(path_contains=["/dashboard"]),
                 ),
                 Scenario(
                     name="payment",
-                    trigger=Detection.element(present=["#card-number"]),
-                    complete=Detection.url(path_contains=["/confirmation"]),
+                    on=Detection.element(present=["#card-number"]),
+                    until=Detection.url(path_contains=["/confirmation"]),
                 ),
             ],
             server=ServerConfig(port=3000),
@@ -102,11 +102,11 @@ class TestHandoffCreation:
                 SlackNotifier(webhook_url="https://hooks.slack.com/test"),
             ],
         )
-        assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "login"
-        assert handoff.scenarios[1].name == "payment"
-        assert handoff.server.port == 3000
-        assert len(handoff.notifiers) == 1
+        assert len(h.scenarios) == 2
+        assert h.scenarios[0].name == "login"
+        assert h.scenarios[1].name == "payment"
+        assert h.server.port == 3000
+        assert len(h.notifiers) == 1
 
     def test_from_dict(self):
         """Test creating Handoff from dictionary."""
@@ -114,30 +114,32 @@ class TestHandoffCreation:
             "scenarios": [
                 {
                     "name": "challenge",
-                    "trigger": {"type": "content", "title_contains": ["Challenge"]},
-                    "complete": {"type": "url", "path_matches": ["/callback"]},
+                    "on": {"type": "content", "title_contains": ["Challenge"]},
+                    "until": {"type": "url", "path_matches": ["/callback"]},
                 },
             ],
             "server": {
                 "port": 8080,
-                "session_timeout": 300,
+                "access_timeout": 120,
+                "completion_timeout": 300,
             },
             "notifiers": [
                 {"type": "slack", "webhook_url": "https://test.com/webhook"},
             ],
         }
-        handoff = Handoff.from_dict(config)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "challenge"
-        assert handoff.server.port == 8080
-        assert handoff.server.session_timeout == 300
-        assert len(handoff.notifiers) == 1
+        h = Handoff.from_dict(config)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "challenge"
+        assert h.server.port == 8080
+        assert h.server.access_timeout == 120
+        assert h.server.completion_timeout == 300
+        assert len(h.notifiers) == 1
 
     def test_from_dict_without_scenarios_allowed(self):
         """from_dict no longer requires scenarios — an empty config yields a
         reusable Handoff whose scenarios are supplied later to run()."""
-        handoff = Handoff.from_dict({})
-        assert handoff.scenarios == []
+        h = Handoff.from_dict({})
+        assert h.scenarios == []
 
     def test_from_json(self):
         """Test creating Handoff from JSON string."""
@@ -145,14 +147,14 @@ class TestHandoffCreation:
             "scenarios": [
                 {
                     "name": "payment",
-                    "trigger": {"type": "element", "present": ["#card-number"]},
-                    "complete": {"type": "content", "body_contains": ["Order confirmed"]},
+                    "on": {"type": "element", "present": ["#card-number"]},
+                    "until": {"type": "content", "body_contains": ["Order confirmed"]},
                 },
             ],
         })
-        handoff = Handoff.from_json(json_str)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "payment"
+        h = Handoff.from_json(json_str)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "payment"
 
     def test_from_yaml(self):
         """Test creating Handoff from YAML string."""
@@ -168,9 +170,9 @@ scenarios:
       host_equals:
         - localhost
 """
-        handoff = Handoff.from_yaml(yaml_str)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "security_check"
+        h = Handoff.from_yaml(yaml_str)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "security_check"
 
     def test_from_file_json(self, tmp_path):
         """Test loading from JSON file."""
@@ -179,14 +181,14 @@ scenarios:
             "scenarios": [
                 {
                     "name": "test_scenario",
-                    "trigger": {"type": "content", "title_contains": ["Test"]},
-                    "complete": {"type": "url", "path_matches": ["/done"]},
+                    "on": {"type": "content", "title_contains": ["Test"]},
+                    "until": {"type": "url", "path_matches": ["/done"]},
                 },
             ],
         }))
-        handoff = Handoff.from_file(config_file)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "test_scenario"
+        h = Handoff.from_file(config_file)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "test_scenario"
 
     def test_from_file_yaml(self, tmp_path):
         """Test loading from YAML file."""
@@ -203,9 +205,9 @@ scenarios:
       present:
         - "#success"
 """)
-        handoff = Handoff.from_file(config_file)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "blocker"
+        h = Handoff.from_file(config_file)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "blocker"
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -222,8 +224,8 @@ class TestHandoffWithEnvVars:
             "scenarios": [
                 {
                     "name": "test",
-                    "trigger": {"type": "content", "title_contains": ["Test"]},
-                    "complete": {"type": "content", "body_contains": ["Done"]},
+                    "on": {"type": "content", "title_contains": ["Test"]},
+                    "until": {"type": "content", "body_contains": ["Done"]},
                 },
             ],
             "server": {
@@ -232,8 +234,8 @@ class TestHandoffWithEnvVars:
             },
         }))
 
-        handoff = Handoff.from_file(config_file)
-        assert handoff.server.public_base == "https://proxy.example.com"
+        h = Handoff.from_file(config_file)
+        assert h.server.public_base == "https://proxy.example.com"
 
     def test_env_var_in_notifiers(self, monkeypatch, tmp_path):
         """Test env var interpolation in notifier config."""
@@ -255,9 +257,9 @@ notifiers:
   - type: slack
     webhook_url: ${SLACK_WEBHOOK}
 """)
-        handoff = Handoff.from_file(config_file)
-        assert len(handoff.notifiers) == 1
-        assert handoff.notifiers[0].webhook_url == "https://hooks.slack.com/secret"
+        h = Handoff.from_file(config_file)
+        assert len(h.notifiers) == 1
+        assert h.notifiers[0].webhook_url == "https://hooks.slack.com/secret"
 
 
 class TestHandoffResult:
@@ -267,6 +269,7 @@ class TestHandoffResult:
         result = HandoffResult(was_blocked=False)
         assert result.was_blocked is False
         assert result.timed_out is False
+        assert result.timeout_cause is None
         assert result.scenario_name is None
         assert result.trigger_reason is None
         assert result.completion_reason is None
@@ -283,15 +286,17 @@ class TestHandoffResult:
         )
         assert result.was_blocked is True
         assert result.timed_out is False
+        assert result.timeout_cause is None
         assert result.scenario_name == "login_required"
         assert result.trigger_reason == "Login form detected"
         assert result.completion_reason == "URL matched /dashboard"
         assert result.duration == 10.5
 
-    def test_timed_out(self):
+    def test_timed_out_access(self):
         result = HandoffResult(
             was_blocked=True,
             timed_out=True,
+            timeout_cause="access",
             scenario_name="login_required",
             trigger_reason="Login form detected",
             completion_reason=None,
@@ -299,7 +304,156 @@ class TestHandoffResult:
         )
         assert result.was_blocked is True
         assert result.timed_out is True
+        assert result.timeout_cause == "access"
         assert result.completion_reason is None
+
+    def test_timed_out_completion(self):
+        result = HandoffResult(
+            was_blocked=True,
+            timed_out=True,
+            timeout_cause="completion",
+            scenario_name="login_required",
+            trigger_reason="Login form detected",
+            completion_reason=None,
+            duration=1800.0,
+        )
+        assert result.timeout_cause == "completion"
+
+
+class TestResolveTimeout:
+    """`_resolve_timeout` picks between per-call and config default.
+
+    None per-call inherits the default; any other value (including
+    math.inf) overrides. Pinning the layering rule directly because
+    it shapes every call-site override semantics.
+    """
+
+    def test_per_call_none_inherits_default(self):
+        from browser_handoff.handoff import _resolve_timeout
+
+        assert _resolve_timeout(None, 600.0) == 600.0
+        assert _resolve_timeout(None, None) is None
+
+    def test_per_call_value_overrides_default(self):
+        from browser_handoff.handoff import _resolve_timeout
+
+        assert _resolve_timeout(5.0, 600.0) == 5.0
+        # Per-call wins even when it's a "disable" sentinel.
+        import math
+
+        assert _resolve_timeout(math.inf, 600.0) == math.inf
+        # Per-call wins even when the default is unbounded.
+        assert _resolve_timeout(10.0, None) == 10.0
+
+
+class TestAwaitTimeoutCause:
+    """The three-way race returning the timeout cause (or None on match).
+
+    Drives `Handoff._await_timeout_cause` with a stand-in session so the
+    decision logic can be tested without a real browser or WS.
+    """
+
+    @staticmethod
+    def _session(
+        *,
+        access_timeout: float | None,
+        completion_timeout: float | None,
+    ):
+        from browser_handoff.server import SessionPresence
+
+        class _Session:
+            pass
+
+        s = _Session()
+        s.access_timeout = access_timeout
+        s.completion_timeout = completion_timeout
+        s.access_timer_fired = False
+        s.presence = SessionPresence()
+        return s
+
+    async def test_detection_match_wins(self):
+        import asyncio
+
+        from browser_handoff import Handoff
+
+        session = self._session(access_timeout=5.0, completion_timeout=5.0)
+        completion_event = asyncio.Event()
+        session.presence.bump()  # connect immediately
+        completion_event.set()  # detection already matched
+        result = await Handoff._await_timeout_cause(session, completion_event)
+        assert result is None
+        assert session.access_timer_fired is False
+
+    async def test_access_timeout_fires_without_connect(self):
+        import asyncio
+
+        from browser_handoff import Handoff
+
+        session = self._session(access_timeout=0.05, completion_timeout=10.0)
+        completion_event = asyncio.Event()
+        # Never bump presence — operator never connects.
+        result = await Handoff._await_timeout_cause(session, completion_event)
+        assert result == "access"
+        assert session.access_timer_fired is True
+
+    async def test_completion_timeout_fires_after_connect(self):
+        import asyncio
+
+        from browser_handoff import Handoff
+
+        session = self._session(access_timeout=10.0, completion_timeout=0.05)
+        completion_event = asyncio.Event()
+        session.presence.bump()  # connected
+        result = await Handoff._await_timeout_cause(session, completion_event)
+        assert result == "completion"
+        # Access timer was retired by the connect, not fired.
+        assert session.access_timer_fired is False
+
+    async def test_none_access_timeout_disables_access_timeout_branch(self):
+        import asyncio
+
+        from browser_handoff import Handoff
+
+        # Access disabled at this layer; completion still bounded so the
+        # race can resolve. Without a connect, completion never starts —
+        # use completion_event to terminate the race.
+        session = self._session(access_timeout=None, completion_timeout=None)
+        completion_event = asyncio.Event()
+        async def trip() -> None:
+            await asyncio.sleep(0.02)
+            completion_event.set()
+
+        asyncio.create_task(trip())
+        result = await asyncio.wait_for(
+            Handoff._await_timeout_cause(session, completion_event),
+            timeout=1.0,
+        )
+        assert result is None
+
+    async def test_completion_timer_anchors_on_first_connect_only(self):
+        """Bump twice; the completion_timeout sleep should start with the
+        first connect and not reset on the second."""
+        import asyncio
+        import time
+
+        from browser_handoff import Handoff
+
+        session = self._session(access_timeout=10.0, completion_timeout=0.15)
+        completion_event = asyncio.Event()
+
+        async def bump_twice() -> None:
+            session.presence.bump()
+            await asyncio.sleep(0.05)
+            session.presence.bump()  # reconnect — must not reset
+
+        asyncio.create_task(bump_twice())
+        start = time.monotonic()
+        result = await Handoff._await_timeout_cause(session, completion_event)
+        elapsed = time.monotonic() - start
+        assert result == "completion"
+        # Should fire ~0.15s after the first bump (≈0s), not after the
+        # second (≈0.05s). Allow generous slack for scheduler jitter.
+        assert elapsed < 0.30, f"completion timer appears to have reset (elapsed={elapsed:.3f})"
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -312,7 +466,7 @@ class TestComplexConfig:
             "scenarios": [
                 {
                     "name": "complex_trigger",
-                    "trigger": {
+                    "on": {
                         "type": "any",
                         "conditions": [
                             {"type": "content", "title_contains": ["Challenge"]},
@@ -325,7 +479,7 @@ class TestComplexConfig:
                             },
                         ],
                     },
-                    "complete": {
+                    "until": {
                         "type": "all",
                         "conditions": [
                             {"type": "url", "query_contains": ["code="]},
@@ -338,9 +492,9 @@ class TestComplexConfig:
                 },
             ],
         }
-        handoff = Handoff.from_dict(config)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "complex_trigger"
+        h = Handoff.from_dict(config)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "complex_trigger"
 
     def test_multiple_notifiers(self):
         """Test loading config with multiple notifiers."""
@@ -348,8 +502,8 @@ class TestComplexConfig:
             "scenarios": [
                 {
                     "name": "test",
-                    "trigger": {"type": "content", "title_contains": ["Test"]},
-                    "complete": {"type": "content", "body_contains": ["Done"]},
+                    "on": {"type": "content", "title_contains": ["Test"]},
+                    "until": {"type": "content", "body_contains": ["Done"]},
                 },
             ],
             "notifiers": [
@@ -364,8 +518,8 @@ class TestComplexConfig:
                 },
             ],
         }
-        handoff = Handoff.from_dict(config)
-        assert len(handoff.notifiers) == 3
+        h = Handoff.from_dict(config)
+        assert len(h.notifiers) == 3
 
 
 class TestScenario:
@@ -375,47 +529,111 @@ class TestScenario:
         """Test creating a Scenario programmatically."""
         scenario = Scenario(
             name="login_required",
-            trigger=Detection.url(path_contains=["/login"]),
-            complete=Detection.url(path_contains=["/dashboard"]),
+            on=Detection.url(path_contains=["/login"]),
+            until=Detection.url(path_contains=["/dashboard"]),
         )
         assert scenario.name == "login_required"
-        assert scenario.trigger is not None
-        assert scenario.complete is not None
+        assert scenario.on is not None
+        assert scenario.until is not None
 
     def test_scenario_to_dict(self):
         """Test serializing a Scenario to dictionary."""
         scenario = Scenario(
             name="login_required",
-            trigger=Detection.url(path_contains=["/login"]),
-            complete=Detection.url(path_contains=["/dashboard"]),
+            on=Detection.url(path_contains=["/login"]),
+            until=Detection.url(path_contains=["/dashboard"]),
         )
         data = scenario.to_dict()
         assert data["name"] == "login_required"
-        assert "trigger" in data
-        assert "complete" in data
-        assert data["trigger"]["type"] == "url"
-        assert data["complete"]["type"] == "url"
+        assert "on" in data
+        assert "until" in data
+        assert data["on"]["type"] == "url"
+        assert data["until"]["type"] == "url"
 
     def test_scenario_from_dict(self):
         """Test creating a Scenario from dictionary."""
         data = {
             "name": "password_required",
-            "trigger": {"type": "element", "present": ["input[type=password]"]},
-            "complete": {"type": "element", "missing": ["input[type=password]"]},
+            "on": {"type": "element", "present": ["input[type=password]"]},
+            "until": {"type": "element", "missing": ["input[type=password]"]},
         }
         scenario = Scenario.from_dict(data)
         assert scenario.name == "password_required"
-        assert scenario.trigger is not None
-        assert scenario.complete is not None
+        assert scenario.on is not None
+        assert scenario.until is not None
 
     def test_scenario_from_dict_unnamed(self):
         """Test creating a Scenario without name defaults to 'unnamed'."""
         data = {
-            "trigger": {"type": "content", "title_contains": ["Challenge"]},
-            "complete": {"type": "content", "body_contains": ["Success"]},
+            "on": {"type": "content", "title_contains": ["Challenge"]},
+            "until": {"type": "content", "body_contains": ["Success"]},
         }
         scenario = Scenario.from_dict(data)
         assert scenario.name == "unnamed"
+
+
+class TestScenarioDeprecatedShims:
+    """Scenario(trigger=, complete=), .trigger/.complete, and the
+    trigger:/complete: dict keys are all deprecated aliases that warn
+    and forward to the new names."""
+
+    def test_trigger_kwarg_warns_and_forwards(self):
+        trig = Detection.url(path_contains=["/login"])
+        with pytest.warns(DeprecationWarning, match=r"Scenario\(trigger"):
+            s = Scenario(
+                name="s",
+                trigger=trig,
+                until=Detection.url(path_contains=["/done"]),
+            )
+        assert s.on is trig
+
+    def test_complete_kwarg_warns_and_forwards(self):
+        done = Detection.url(path_contains=["/done"])
+        with pytest.warns(DeprecationWarning, match=r"Scenario\(complete"):
+            s = Scenario(
+                name="s",
+                on=Detection.url(path_contains=["/login"]),
+                complete=done,
+            )
+        assert s.until is done
+
+    def test_trigger_attribute_warns(self):
+        s = Scenario(
+            name="s",
+            on=Detection.url(path_contains=["/login"]),
+            until=Detection.url(path_contains=["/done"]),
+        )
+        with pytest.warns(DeprecationWarning, match="Scenario.trigger"):
+            assert s.trigger is s.on
+
+    def test_complete_attribute_warns(self):
+        s = Scenario(
+            name="s",
+            on=Detection.url(path_contains=["/login"]),
+            until=Detection.url(path_contains=["/done"]),
+        )
+        with pytest.warns(DeprecationWarning, match="Scenario.complete"):
+            assert s.complete is s.until
+
+    def test_from_dict_trigger_key_warns(self):
+        data = {
+            "name": "s",
+            "trigger": {"type": "url", "path_contains": ["/login"]},
+            "until": {"type": "url", "path_contains": ["/done"]},
+        }
+        with pytest.warns(DeprecationWarning, match=r"dict key `trigger`"):
+            s = Scenario.from_dict(data)
+        assert s.on is not None
+
+    def test_from_dict_complete_key_warns(self):
+        data = {
+            "name": "s",
+            "on": {"type": "url", "path_contains": ["/login"]},
+            "complete": {"type": "url", "path_contains": ["/done"]},
+        }
+        with pytest.warns(DeprecationWarning, match=r"dict key `complete`"):
+            s = Scenario.from_dict(data)
+        assert s.until is not None
 
 
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -429,24 +647,24 @@ class TestHandoffWithScenarios:
 
     def test_handoff_with_multiple_scenarios(self):
         """Test creating Handoff with multiple scenarios."""
-        handoff = Handoff(
+        h = Handoff(
             scenarios=[
                 Scenario(
                     name="oauth_consent",
-                    trigger=Detection.content(title_contains=["Authorize"]),
-                    complete=Detection.url(query_contains=["code="]),
+                    on=Detection.content(title_contains=["Authorize"]),
+                    until=Detection.url(query_contains=["code="]),
                 ),
                 Scenario(
                     name="login_required",
-                    trigger=Detection.url(path_contains=["/login"]),
-                    complete=Detection.url(path_contains=["/dashboard"]),
+                    on=Detection.url(path_contains=["/login"]),
+                    until=Detection.url(path_contains=["/dashboard"]),
                 ),
             ],
             server=ServerConfig(port=8080),
         )
-        assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "oauth_consent"
-        assert handoff.scenarios[1].name == "login_required"
+        assert len(h.scenarios) == 2
+        assert h.scenarios[0].name == "oauth_consent"
+        assert h.scenarios[1].name == "login_required"
 
     def test_handoff_with_scenarios_from_dict(self):
         """Test creating Handoff with scenarios from dictionary."""
@@ -454,21 +672,21 @@ class TestHandoffWithScenarios:
             "scenarios": [
                 {
                     "name": "login_required",
-                    "trigger": {"type": "content", "title_contains": ["Sign In"]},
-                    "complete": {"type": "element", "missing": ["input[type=password]"]},
+                    "on": {"type": "content", "title_contains": ["Sign In"]},
+                    "until": {"type": "element", "missing": ["input[type=password]"]},
                 },
                 {
                     "name": "payment",
-                    "trigger": {"type": "element", "present": ["#card-number"]},
-                    "complete": {"type": "element", "missing": ["#card-number"]},
+                    "on": {"type": "element", "present": ["#card-number"]},
+                    "until": {"type": "element", "missing": ["#card-number"]},
                 },
             ],
             "server": {"port": 9000},
         }
-        handoff = Handoff.from_dict(config)
-        assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "login_required"
-        assert handoff.scenarios[1].name == "payment"
+        h = Handoff.from_dict(config)
+        assert len(h.scenarios) == 2
+        assert h.scenarios[0].name == "login_required"
+        assert h.scenarios[1].name == "payment"
 
     def test_handoff_with_scenarios_from_json(self):
         """Test creating Handoff with scenarios from JSON string."""
@@ -476,14 +694,14 @@ class TestHandoffWithScenarios:
             "scenarios": [
                 {
                     "name": "auth_flow",
-                    "trigger": {"type": "url", "host_equals": ["accounts.google.com"]},
-                    "complete": {"type": "url", "query_contains": ["code="]},
+                    "on": {"type": "url", "host_equals": ["accounts.google.com"]},
+                    "until": {"type": "url", "query_contains": ["code="]},
                 },
             ],
         })
-        handoff = Handoff.from_json(json_str)
-        assert len(handoff.scenarios) == 1
-        assert handoff.scenarios[0].name == "auth_flow"
+        h = Handoff.from_json(json_str)
+        assert len(h.scenarios) == 1
+        assert h.scenarios[0].name == "auth_flow"
 
     def test_handoff_with_scenarios_from_yaml(self):
         """Test creating Handoff with scenarios from YAML string."""
@@ -509,13 +727,13 @@ scenarios:
         - ".otp-input"
 server:
   port: 8080
-  session_timeout: 600
+  completion_timeout: 600
 """
-        handoff = Handoff.from_yaml(yaml_str)
-        assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "login_required"
-        assert handoff.scenarios[1].name == "mfa_required"
-        assert handoff.server.port == 8080
+        h = Handoff.from_yaml(yaml_str)
+        assert len(h.scenarios) == 2
+        assert h.scenarios[0].name == "login_required"
+        assert h.scenarios[1].name == "mfa_required"
+        assert h.server.port == 8080
 
     def test_handoff_with_scenarios_from_file(self, tmp_path):
         """Test loading Handoff with scenarios from file."""
@@ -551,19 +769,19 @@ scenarios:
 
 server:
   port: 8080
-  session_timeout: 300
+  completion_timeout: 300
 
 notifiers:
   - type: slack
     webhook_url: https://hooks.slack.com/test
 """)
-        handoff = Handoff.from_file(config_file)
-        assert len(handoff.scenarios) == 2
-        assert handoff.scenarios[0].name == "login_with_consent"
-        assert handoff.scenarios[1].name == "google_oauth"
-        assert handoff.server.port == 8080
-        assert handoff.server.session_timeout == 300
-        assert len(handoff.notifiers) == 1
+        h = Handoff.from_file(config_file)
+        assert len(h.scenarios) == 2
+        assert h.scenarios[0].name == "login_with_consent"
+        assert h.scenarios[1].name == "google_oauth"
+        assert h.server.port == 8080
+        assert h.server.completion_timeout == 300
+        assert len(h.notifiers) == 1
 
 
 class TestDeprecations:
@@ -578,19 +796,19 @@ class TestDeprecations:
 
     _SCENARIO = {
         "name": "login",
-        "trigger": {"type": "url", "path_contains": ["/login"]},
-        "complete": {"type": "url", "path_contains": ["/dashboard"]},
+        "on": {"type": "url", "path_contains": ["/login"]},
+        "until": {"type": "url", "path_contains": ["/dashboard"]},
     }
 
     def test_constructor_scenarios_warns(self):
         scenario = Scenario(
             name="login",
-            trigger=Detection.url(path_contains=["/login"]),
-            complete=Detection.url(path_contains=["/dashboard"]),
+            on=Detection.url(path_contains=["/login"]),
+            until=Detection.url(path_contains=["/dashboard"]),
         )
         with pytest.warns(DeprecationWarning, match="run\\(scenarios="):
-            handoff = Handoff(scenarios=[scenario])
-        assert handoff.scenarios == [scenario]
+            h = Handoff(scenarios=[scenario])
+        assert h.scenarios == [scenario]
 
     def test_constructor_without_scenarios_does_not_warn(self):
         import warnings
@@ -602,8 +820,8 @@ class TestDeprecations:
 
     def test_from_dict_warns(self):
         with pytest.warns(DeprecationWarning, match="from_dict"):
-            handoff = Handoff.from_dict({"scenarios": [self._SCENARIO]})
-        assert handoff.scenarios[0].name == "login"
+            h = Handoff.from_dict({"scenarios": [self._SCENARIO]})
+        assert h.scenarios[0].name == "login"
 
     def test_from_json_warns(self):
         with pytest.warns(DeprecationWarning, match="from_json"):
@@ -720,26 +938,120 @@ class TestCaptureCropMetrics:
 
 
 class TestStreamUrlForwarding:
-    """`stream_url` is plumbed through both Handoff.wait_for_completion and
-    Handoff.run; run() is a pass-through that forwards to wait_for_completion
-    on trigger match (cropping logic lives only in wait_for_completion).
+    """`stream_url` is plumbed through both Handoff.pause and
+    Handoff.guard; guard() is a pass-through that forwards to pause
+    on trigger match (cropping logic lives only in pause).
     """
 
-    def test_wait_for_completion_accepts_stream_url(self):
+    def test_pause_accepts_stream_url(self):
         # Signature-level check — confirms the kwarg exists and is keyword-
         # only. Doing a real call needs a Playwright page; the integration
         # test covers that.
         import inspect
 
-        sig = inspect.signature(Handoff.wait_for_completion)
+        sig = inspect.signature(Handoff.pause)
         assert "stream_url" in sig.parameters
         assert sig.parameters["stream_url"].kind == inspect.Parameter.KEYWORD_ONLY
         assert sig.parameters["stream_url"].default is None
 
-    def test_run_accepts_stream_url(self):
+    def test_guard_accepts_stream_url(self):
         import inspect
 
-        sig = inspect.signature(Handoff.run)
+        sig = inspect.signature(Handoff.guard)
         assert "stream_url" in sig.parameters
         assert sig.parameters["stream_url"].kind == inspect.Parameter.KEYWORD_ONLY
         assert sig.parameters["stream_url"].default is None
+
+
+class TestTimeoutKwargSignatures:
+    """Lock the timeout kwargs on the current entry points.
+
+    Both entry points expose `access_timeout` and `completion_timeout`
+    overrides that default to None (= inherit ServerConfig).
+    """
+
+    def test_guard_uses_trigger_timeout(self):
+        import inspect
+
+        sig = inspect.signature(Handoff.guard)
+        assert "trigger_timeout" in sig.parameters
+        assert sig.parameters["trigger_timeout"].default == 30.0
+        # `timeout` isn't on guard; it lives on the run() shim only.
+        assert "timeout" not in sig.parameters
+
+    def test_guard_has_timeout_overrides(self):
+        import inspect
+
+        sig = inspect.signature(Handoff.guard)
+        for name in ("access_timeout", "completion_timeout"):
+            assert name in sig.parameters, name
+            assert sig.parameters[name].default is None
+
+    def test_pause_has_timeout_overrides(self):
+        import inspect
+
+        sig = inspect.signature(Handoff.pause)
+        for name in ("access_timeout", "completion_timeout"):
+            assert name in sig.parameters, name
+            assert sig.parameters[name].default is None
+
+
+class TestWaitForCompletionShim:
+    """wait_for_completion is a deprecated alias for pause."""
+
+    def test_wait_for_completion_exists_as_shim(self):
+        import inspect
+
+        assert hasattr(Handoff, "wait_for_completion")
+        # Same kwargs as pause except the second positional arg is
+        # `on` (v0.6 name) rather than `until` (new pause parameter).
+        old = inspect.signature(Handoff.wait_for_completion).parameters
+        new = inspect.signature(Handoff.pause).parameters
+        assert set(old.keys()) - {"on"} == set(new.keys()) - {"until"}
+        assert "on" in old
+        assert "until" in new
+
+    def test_wait_for_completion_warns(self):
+        import asyncio
+        import contextlib
+
+        h = Handoff()
+        with pytest.warns(DeprecationWarning, match="wait_for_completion"):
+            with contextlib.suppress(Exception):
+                asyncio.run(
+                    h.wait_for_completion(
+                        object(), Detection.url(path_contains=["/x"])
+                    )
+                )
+
+
+class TestRunShim:
+    """run() is a deprecated alias for guard(). The shim also carries the
+    older `timeout=` kwarg for callers still on the v0.6 signature."""
+
+    def test_run_exists_as_shim(self):
+        assert hasattr(Handoff, "run")
+
+    def test_run_warns_and_forwards(self):
+        import asyncio
+        import contextlib
+
+        h = Handoff()
+        with pytest.warns(DeprecationWarning, match=r"Handoff\.run"):
+            with contextlib.suppress(Exception):
+                asyncio.run(h.run(object()))
+
+    def test_run_timeout_kwarg_warns(self):
+        # Both the method-name deprecation and the timeout-kwarg
+        # deprecation fire; filter to the timeout-specific message.
+        import asyncio
+        import contextlib
+        import warnings
+
+        h = Handoff()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with contextlib.suppress(Exception):
+                asyncio.run(h.run(object(), timeout=1.0))
+        messages = [str(w.message) for w in caught]
+        assert any("run(timeout" in m for m in messages), messages

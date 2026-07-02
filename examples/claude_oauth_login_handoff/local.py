@@ -44,8 +44,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from browser_handoff import Handoff, Scenario, ServerConfig
-from browser_handoff.detection import Detection
+from browser_handoff import Detection, Handoff, Scenario, ServerConfig
 from browser_handoff.notifiers import DiscordNotifier, Notifier
 
 # Silence library INFO chatter; the Rich panels carry every operator-visible milestone.
@@ -113,12 +112,12 @@ async def run_claude_oauth(public_base: str | None = None) -> dict[str, Any]:
                 DiscordNotifier(webhook_url=webhook, username="ccauth Handoff")
             )
 
-        handoff = Handoff(
+        h = Handoff(
             scenarios=[
                 Scenario(
                     name="Claude Login",
-                    trigger=Detection.url(path_contains=["/login"]),
-                    complete=Detection.url(path_contains=["/oauth/authorize"]),
+                    on=Detection.url(path_contains=["/login"]),
+                    until=Detection.url(path_contains=["/oauth/authorize"]),
                 ),
             ],
             # Bind 0.0.0.0 for LAN / tunnel / sandbox reachability;
@@ -148,15 +147,15 @@ async def run_claude_oauth(public_base: str | None = None) -> dict[str, Any]:
                     # Fresh profile → claude.ai bounces /oauth/authorize → /login.
                     # The Login scenario fires, the human signs in, and run()
                     # returns once they land back on /oauth/authorize.
-                    result = await handoff.run(page, timeout=30)
+                    result = await h.guard(page, trigger_timeout=30)
                     if result.was_blocked:
                         if result.timed_out:
                             console.print(
                                 "[red]✗ Human did not finish login in time[/red]"
                             )
                             raise TimeoutError(
-                                f"Human did not finish login within "
-                                f"{handoff.server.completion_timeout:.0f}s"
+                                f"Human did not finish login "
+                                f"(timeout_cause={result.timeout_cause})"
                             )
                         console.print(
                             f"[green]✓[/green] Login completed "

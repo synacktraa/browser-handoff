@@ -38,7 +38,8 @@ class TestServerConfig:
         assert config.host == "127.0.0.1"
         assert config.port == 8080
         assert config.public_base is None
-        assert config.session_timeout == 600.0
+        assert config.access_timeout == 600.0
+        assert config.completion_timeout == 1800.0
         assert config.jpeg_quality == 75
         assert config.every_nth_frame == 1
 
@@ -48,12 +49,32 @@ class TestServerConfig:
             host="localhost",
             port=3000,
             public_base="https://proxy.example.com",
-            session_timeout=300.0,
+            access_timeout=120.0,
+            completion_timeout=300.0,
         )
         assert config.host == "localhost"
         assert config.port == 3000
         assert config.public_base == "https://proxy.example.com"
-        assert config.session_timeout == 300.0
+        assert config.access_timeout == 120.0
+        assert config.completion_timeout == 300.0
+
+    def test_timeout_layers_accept_none(self):
+        # None at the config layer means truly no bound at that layer.
+        config = ServerConfig(access_timeout=None, completion_timeout=None)
+        assert config.access_timeout is None
+        assert config.completion_timeout is None
+
+    def test_session_timeout_forwards_with_deprecation(self):
+        # Backwards-compat shim: session_timeout still accepted, warns,
+        # and its value becomes the new completion_timeout.
+        with pytest.warns(DeprecationWarning, match="session_timeout"):
+            config = ServerConfig(session_timeout=300.0)
+        assert config.completion_timeout == 300.0
+
+    def test_session_timeout_via_from_dict(self):
+        with pytest.warns(DeprecationWarning, match="session_timeout"):
+            config = ServerConfig.from_dict({"session_timeout": 450.0})
+        assert config.completion_timeout == 450.0
 
     def test_get_base_url_with_public_base(self):
         """Test get_base_url with public_base set."""
@@ -81,14 +102,16 @@ class TestServerConfig:
             host="0.0.0.0",
             port=8080,
             public_base="https://example.com",
-            session_timeout=120.0,
+            access_timeout=120.0,
+            completion_timeout=240.0,
         )
         data = config.to_dict()
         assert data == {
             "host": "0.0.0.0",
             "port": 8080,
             "public_base": "https://example.com",
-            "session_timeout": 120.0,
+            "access_timeout": 120.0,
+            "completion_timeout": 240.0,
             "jpeg_quality": 75,
             "every_nth_frame": 1,
         }
@@ -99,13 +122,15 @@ class TestServerConfig:
             "host": "127.0.0.1",
             "port": 9000,
             "public_base": "https://proxy.test.com",
-            "session_timeout": 60.0,
+            "access_timeout": 30.0,
+            "completion_timeout": 60.0,
         }
         config = ServerConfig.from_dict(data)
         assert config.host == "127.0.0.1"
         assert config.port == 9000
         assert config.public_base == "https://proxy.test.com"
-        assert config.session_timeout == 60.0
+        assert config.access_timeout == 30.0
+        assert config.completion_timeout == 60.0
 
     def test_from_dict_defaults(self):
         """Test from_dict with missing values uses defaults."""
@@ -113,7 +138,8 @@ class TestServerConfig:
         assert config.host == "127.0.0.1"
         assert config.port == 8080
         assert config.public_base is None
-        assert config.session_timeout == 600.0
+        assert config.access_timeout == 600.0
+        assert config.completion_timeout == 1800.0
 
     def test_from_dict_partial(self):
         """Test from_dict with partial values."""
@@ -242,52 +268,6 @@ class TestAccessToken:
             legacy = server.get_stream_url(session.session_id)
         assert legacy == canonical
         assert any(issubclass(w.category, DeprecationWarning) for w in caught)
-
-
-class TestSessionTimeoutDeprecation:
-    """`completion_timeout` is renamed to `session_timeout` (deprecated alias).
-
-    The value bounds the whole session/token lifetime now, not just the
-    completion wait, so the name follows the meaning. The old name keeps
-    working (with a warning when set) for one major cycle.
-    """
-
-    def test_session_timeout_is_canonical(self):
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")  # any deprecation here would fail
-            assert ServerConfig().session_timeout == 600.0
-            assert ServerConfig(session_timeout=300.0).session_timeout == 300.0
-
-    def test_completion_timeout_still_readable_without_warning(self):
-        # Reading the alias on a config built the new way must not warn and
-        # must mirror session_timeout (old code keeps working).
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            assert ServerConfig(session_timeout=120.0).completion_timeout == 120.0
-
-    def test_passing_completion_timeout_warns_and_applies(self):
-        with pytest.warns(DeprecationWarning, match="session_timeout"):
-            config = ServerConfig(completion_timeout=42.0)
-        assert config.session_timeout == 42.0
-        assert config.completion_timeout == 42.0  # alias mirrors it
-
-    def test_to_dict_uses_new_name(self):
-        data = ServerConfig(session_timeout=300.0).to_dict()
-        assert data["session_timeout"] == 300.0
-        assert "completion_timeout" not in data
-
-    def test_from_dict_new_name(self):
-        config = ServerConfig.from_dict({"session_timeout": 200.0})
-        assert config.session_timeout == 200.0
-
-    def test_from_dict_old_name_warns(self):
-        with pytest.warns(DeprecationWarning, match="session_timeout"):
-            config = ServerConfig.from_dict({"completion_timeout": 200.0})
-        assert config.session_timeout == 200.0
 
 
 class TestPassthroughSession:
@@ -511,7 +491,7 @@ class TestSessionPresence:
     """The presence primitive that gates orchestration's callback.
 
     Owned by HandoffSession, bumped on each `presence` message from the
-    wrapper (and on first accept). Handoff.wait_for_completion awaits
+    wrapper (and on first accept). Handoff.pause awaits
     `wait_until_connected()` before installing detection listeners and
     reads `state` before calling detection.check — so a detection
     scheduled to fire while the operator has wandered off doesn't burn

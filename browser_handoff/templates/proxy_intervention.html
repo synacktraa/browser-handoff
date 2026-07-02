@@ -411,6 +411,32 @@
         50%      { opacity: 0.4; }
       }
 
+      /* Completion-deadline countdown. Hidden until the server pushes a
+         deadline; flips to warn in the last 60s. */
+      .countdown-pill {
+        display: none;
+        align-items: center;
+        gap: 7px;
+        height: 26px;
+        padding: 0 10px;
+        background: rgba(255, 255, 255, 0.035);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        color: var(--text-dim);
+        flex-shrink: 0;
+        text-transform: uppercase;
+        letter-spacing: 1.2px;
+      }
+      .countdown-pill.visible { display: inline-flex; }
+      .countdown-pill.warn {
+        color: var(--amber);
+        border-color: rgba(255, 149, 0, 0.4);
+        background: rgba(255, 149, 0, 0.08);
+      }
+
       /* Stage container: hosts the cropped iframe of the substrate viewer.
          Two CSS profiles depending on whether we have crop metrics:
            - With crop_metrics: container at *page* aspect; iframe extends
@@ -747,6 +773,10 @@
           />
         </div>
 
+        <div class="countdown-pill" id="countdown-pill">
+          <span id="countdown-value">--:--</span>
+        </div>
+
         <div class="connection-pill connecting" id="connection-pill">
           <span class="conn-dot"></span>
           <span class="conn-label" id="connection-label">Connecting</span>
@@ -868,6 +898,8 @@
       const reasonDropdown = document.getElementById('reason-dropdown');
       const connectionPill = document.getElementById('connection-pill');
       const connectionLabel = document.getElementById('connection-label');
+      const countdownPill = document.getElementById('countdown-pill');
+      const countdownValue = document.getElementById('countdown-value');
 
       // Show more / Show less for long reasons (see intervention.html
       // for the shared pattern).
@@ -981,6 +1013,33 @@
       function markTerminal() {
         isTerminal = true;
         connectionPill.style.display = 'none';
+        countdownPill.style.display = 'none';
+        if (countdownTimer) clearInterval(countdownTimer);
+      }
+
+      // Completion-deadline countdown. Wall-clock anchored so reconnect
+      // doesn't reset the visible time. Past zero, the server's expiry
+      // path takes over and renders the expired card.
+      let countdownTimer = null;
+      function startCountdown(deadlineMs) {
+        if (countdownTimer) clearInterval(countdownTimer);
+        countdownPill.classList.add('visible');
+        const tick = () => {
+          if (isTerminal) {
+            clearInterval(countdownTimer);
+            return;
+          }
+          const remaining = Math.max(0, deadlineMs - Date.now());
+          const totalSec = Math.ceil(remaining / 1000);
+          const m = Math.floor(totalSec / 60);
+          const s = totalSec % 60;
+          countdownValue.textContent =
+            String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+          countdownPill.classList.toggle('warn', remaining > 0 && remaining <= 60000);
+          if (remaining <= 0) clearInterval(countdownTimer);
+        };
+        tick();
+        countdownTimer = setInterval(tick, 1000);
       }
 
       ws = new WebSocket(WS_URL);
@@ -997,6 +1056,10 @@
         try { message = JSON.parse(event.data); } catch { return; }
         if (message.type === 'ready') {
           setConnectionState('live');
+        } else if (message.type === 'session_state') {
+          if (typeof message.completion_deadline_ms === 'number') {
+            startCountdown(message.completion_deadline_ms);
+          }
         } else if (message.type === 'url_changed') {
           setUrl(message.url);
         } else if (message.type === 'task_completed') {
@@ -1015,8 +1078,14 @@
         showEndedOverlay();
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (isTerminal) return;
+        // Late-click rejection from the server's access-timer guard:
+        // surface the expired card instead of the generic ended one.
+        if (event && event.code === 1008 && event.reason === 'access_timeout_expired') {
+          showExpiredOverlay();
+          return;
+        }
         // No clean end event landed before close → the server is gone.
         // Surface the terminal card immediately instead of waiting on
         // a "Reconnecting" sweep that never reconnects.

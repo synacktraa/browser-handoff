@@ -114,6 +114,21 @@ class HandoffSession:
     # iframe to just the page content. None when not in passthrough mode
     # or when the JS evaluate returned degenerate values.
     crop_metrics: dict[str, int] | None = None
+    # Per-session resolved timeouts. None at either layer means "no
+    # bound at this layer." access_timeout fires before first connect;
+    # completion_timeout fires after.
+    access_timeout: float | None = None
+    completion_timeout: float | None = None
+    # Set by the access-deadline task right before it returns. The WS
+    # upgrade handler reads this to reject late operator clicks with
+    # 1008. First-connect-gated, not wall-clock: a connect-then-drop
+    # before access_timeout retires the timer and leaves this False.
+    access_timer_fired: bool = False
+    # Wall-clock epoch (time.time) at which completion_timeout fires.
+    # Anchored on first WS connect so reconnects see the same deadline;
+    # the wrapper's countdown banner reads this via the session_state
+    # WS message. None when completion_timeout is None or no connect yet.
+    completion_deadline_ts: float | None = None
 
     @property
     def is_passthrough(self) -> bool:

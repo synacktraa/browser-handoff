@@ -1,6 +1,6 @@
 [project]
 name = "browser-handoff"
-version = "0.6.1"
+version = "0.7.0"
 description = "Pause browser automation, hand the page to a human, resume when they're done."
 readme = "README.md"
 license = "Apache-2.0"
@@ -34,7 +34,7 @@ dependencies = [
     "jinja2>=3.1",
     "pyyaml>=6.0",
     "rich>=13",
-    "requests>=2.34.1",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]

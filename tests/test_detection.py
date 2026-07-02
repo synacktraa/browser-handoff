@@ -3,7 +3,7 @@
 import asyncio
 
 import pytest
-from browser_handoff.detection import Detection
+from browser_handoff import Detection
 from browser_handoff.detection.combinators import AllDetection, AnyDetection, NotDetection
 from browser_handoff.detection.content import ContentDetection
 from browser_handoff.detection.element import ElementDetection
@@ -281,7 +281,7 @@ class TestCombinators:
 # ---- Combinator listener callback wiring --------------------------------
 #
 # register_listeners must pass the COMBINATOR up via callback, not the
-# child whose listener actually fired. wait_for_completion runs
+# child whose listener actually fired. pause runs
 # `detection.check(page)` on whatever the callback hands it — so a naive
 # pass-through bypasses AND/OR/NOT semantics entirely (matching the
 # child alone is enough to fire the completion event regardless of the
@@ -325,7 +325,7 @@ class _ManualTriggerDetection:
 
 class TestCombinatorListenerWiring:
     """Combinator listeners must invoke the user callback with self, not the
-    child detection. Otherwise wait_for_completion's check() bypasses the
+    child detection. Otherwise pause's check() bypasses the
     combinator's logic."""
 
     async def _capture(self, detection):
@@ -340,7 +340,7 @@ class TestCombinatorListenerWiring:
     async def test_not_inverts_child_event(self):
         # Child reports matched=True, but NOT must invert it before
         # completion fires. Failure mode (pre-fix): the callback gets the
-        # child, wait_for_completion runs child.check → matched=True →
+        # child, pause runs child.check → matched=True →
         # completion fires immediately. The user hit this on /signup.
         from browser_handoff.detection.base import DetectionResult
 

@@ -16,7 +16,7 @@ import os
 import pytest
 from playwright.async_api import Page
 
-from browser_handoff.detection import Detection
+from browser_handoff import Detection
 
 _LLM_ID = os.environ.get("LLM_ID")
 _LLM_API_KEY = os.environ.get("LLM_API_KEY")

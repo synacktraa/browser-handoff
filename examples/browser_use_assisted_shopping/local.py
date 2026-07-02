@@ -21,7 +21,7 @@ Architecture — one shared Chrome over CDP:
     holds the Page objects (browser-handoff needs a Playwright Page).
   * browser-use connects to the SAME Chrome over CDP for its agent loop.
   * `request_human_help` resolves the current Page on each call and
-    awaits `handoff.wait_for_completion(...)`.
+    awaits `h.pause(...)`.
 
 Prereqs:
   * ANTHROPIC_API_KEY — used by both browser-use's planner and bh's
@@ -47,8 +47,7 @@ import os
 from browser_use import ActionResult, Agent, BrowserSession, ChatAnthropic, Tools
 from playwright.async_api import Browser, Page, async_playwright
 
-from browser_handoff import Handoff, ServerConfig
-from browser_handoff.detection import Detection
+from browser_handoff import Detection, Handoff, ServerConfig
 from browser_handoff.notifiers import DiscordNotifier, Notifier
 
 # Quiet bh's INFO chatter so the demo output stays readable.
@@ -78,7 +77,7 @@ def _resolve_current_page(browser: Browser) -> Page | None:
 
 
 def _build_tools(
-    handoff: Handoff,
+    h: Handoff,
     browser: Browser,
     agent_ref: dict[str, "Agent | None"],
 ) -> Tools:
@@ -142,16 +141,16 @@ def _build_tools(
 
         print(f"\n-> Handoff requested: {reason}\n   done_when: {done_when}\n")
         # Pause the agent while the human works — else browser-use's
-        # step_timeout races the human's session_timeout and the
+        # step_timeout races the human's completion_timeout and the
         # shorter one wins, cancelling the tool call mid-handoff.
         # try/finally guarantees resume on timeout or error.
         agent = agent_ref["agent"]
         if agent is not None:
             agent.pause()
         try:
-            result = await handoff.wait_for_completion(
+            result = await h.pause(
                 page,
-                on=Detection.llm(condition=done_when),
+                until=Detection.llm(condition=done_when),
                 reason=reason,
                 name="shopping-handoff",
             )
@@ -184,7 +183,7 @@ async def main() -> None:
             DiscordNotifier(webhook_url=webhook, username="Shopping Agent")
         )
 
-    handoff = Handoff(
+    h = Handoff(
         server=ServerConfig(host="0.0.0.0", port=STREAMING_PORT),
         notifiers=notifiers,
     )
@@ -211,7 +210,7 @@ async def main() -> None:
             # Populated after Agent(...) so the tool closure can pause/
             # resume the agent without a circular dependency.
             agent_ref: dict[str, Agent | None] = {"agent": None}
-            tools = _build_tools(handoff, browser, agent_ref)
+            tools = _build_tools(h, browser, agent_ref)
             browser_session = BrowserSession(cdp_url=f"http://127.0.0.1:{CDP_PORT}")
             agent = Agent(
                 task=TASK,

@@ -13,7 +13,7 @@ import asyncio
 
 from playwright.async_api import Page
 
-from browser_handoff.detection import Detection
+from browser_handoff import Detection
 
 
 # The Python side polls the activity stamp every ~100ms. Always wait at

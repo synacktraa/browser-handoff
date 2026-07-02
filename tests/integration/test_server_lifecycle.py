@@ -19,7 +19,7 @@ import socket
 from playwright.async_api import Browser
 
 from browser_handoff import Handoff, ServerConfig
-from browser_handoff.detection import Detection
+from browser_handoff import Detection
 
 
 def _free_port() -> int:
@@ -51,7 +51,7 @@ async def test_concurrent_handoffs_share_one_server(
     """Two overlapping handoffs on one Handoff stream on the same port with
     distinct session ids, then the server tears down once both finish."""
     port = _free_port()
-    handoff = Handoff(server=ServerConfig(host="127.0.0.1", port=port))
+    h = Handoff(server=ServerConfig(host="127.0.0.1", port=port))
 
     # Independent contexts/pages, each starting away from the completion URL so
     # the handoff actually waits (rather than completing on the entry check).
@@ -68,26 +68,26 @@ async def test_concurrent_handoffs_share_one_server(
 
         # Fire both handoffs concurrently on the SAME Handoff instance.
         h1 = asyncio.create_task(
-            handoff.wait_for_completion(page1, on=complete, name="one")
+            h.pause(page1, until=complete, name="one")
         )
         h2 = asyncio.create_task(
-            handoff.wait_for_completion(page2, on=complete, name="two")
+            h.pause(page2, until=complete, name="two")
         )
 
         # Wait until *both* sessions are actually registered on the shared
         # server. (Gate on the sessions dict, not _session_count — the count
         # is bumped on acquire, before register_session populates the dict.)
         await _wait_until(
-            lambda: handoff._server is not None
-            and len(handoff._server.sessions) == 2
+            lambda: h._server is not None
+            and len(h._server.sessions) == 2
         )
 
-        assert handoff.is_serving, "shared server should be running"
-        assert handoff.live_session_count == 2, "two live handoffs expected"
+        assert h.is_serving, "shared server should be running"
+        assert h.live_session_count == 2, "two live handoffs expected"
 
         # Inspect sessions directly: the "distinct sessions on one shared
         # server" invariant is what's under test and has no public accessor.
-        sessions = list(handoff._server.sessions.values())
+        sessions = list(h._server.sessions.values())
         assert len(sessions) == 2, f"expected 2 sessions, got {len(sessions)}"
         tokens = [s.access_token for s in sessions]
         assert len(set(tokens)) == 2, "tokens must be unique per session"
@@ -120,7 +120,7 @@ async def test_concurrent_handoffs_share_one_server(
 
         # Last session out → server torn down, ready to lazily restart.
         await _wait_until(
-            lambda: not handoff.is_serving and handoff.live_session_count == 0
+            lambda: not h.is_serving and h.live_session_count == 0
         )
     finally:
         # On a mid-test failure, cancel any still-running handoff and let its
@@ -133,6 +133,128 @@ async def test_concurrent_handoffs_share_one_server(
             await asyncio.gather(*pending, return_exceptions=True)
         await ctx1.close()
         await ctx2.close()
+
+
+async def test_access_timeout_fires_without_connect(
+    browser: Browser, base_url: str
+) -> None:
+    """Operator never connects → access timer fires, result carries
+    timeout_cause='access'."""
+    port = _free_port()
+    h = Handoff(
+        server=ServerConfig(
+            host="127.0.0.1",
+            port=port,
+            access_timeout=0.5,
+            completion_timeout=10.0,
+        ),
+    )
+
+    ctx = await browser.new_context()
+    page = await ctx.new_page()
+    try:
+        await page.goto(f"{base_url}/login")
+        # Never bump presence; access timer should fire.
+        result = await asyncio.wait_for(
+            h.pause(
+                page, until=Detection.url(path_contains=["/dashboard"]),
+            ),
+            timeout=10,
+        )
+        assert result.was_blocked is True
+        assert result.timed_out is True
+        assert result.timeout_cause == "access"
+    finally:
+        await ctx.close()
+
+
+async def test_completion_timeout_fires_after_connect(
+    browser: Browser, base_url: str
+) -> None:
+    """Operator connects but never satisfies detection → completion
+    timer fires, result carries timeout_cause='completion'."""
+    port = _free_port()
+    h = Handoff(
+        server=ServerConfig(
+            host="127.0.0.1",
+            port=port,
+            access_timeout=10.0,
+            completion_timeout=0.5,
+        ),
+    )
+
+    ctx = await browser.new_context()
+    page = await ctx.new_page()
+    task = None
+    try:
+        await page.goto(f"{base_url}/login")
+        complete = Detection.url(path_contains=["/dashboard"])
+        task = asyncio.create_task(h.pause(page, until=complete))
+
+        # Simulate the operator opening the wrapper. Once registered,
+        # bump presence so the access timer retires and the completion
+        # timer starts. The completion timer (0.5s) then fires.
+        await _wait_until(
+            lambda: h.is_serving and bool(h._server.sessions)
+        )
+        session = next(iter(h._server.sessions.values()))
+        session.presence.bump()
+
+        result = await asyncio.wait_for(task, timeout=10)
+        assert result.was_blocked is True
+        assert result.timed_out is True
+        assert result.timeout_cause == "completion"
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await ctx.close()
+
+
+async def test_completion_timer_anchors_on_first_connect(
+    browser: Browser, base_url: str
+) -> None:
+    """A reconnect (second bump) must not reset the completion timer."""
+    port = _free_port()
+    h = Handoff(
+        server=ServerConfig(
+            host="127.0.0.1",
+            port=port,
+            access_timeout=10.0,
+            completion_timeout=1.5,
+        ),
+    )
+
+    ctx = await browser.new_context()
+    page = await ctx.new_page()
+    task = None
+    try:
+        await page.goto(f"{base_url}/login")
+        complete = Detection.url(path_contains=["/dashboard"])
+        task = asyncio.create_task(h.pause(page, until=complete))
+
+        await _wait_until(
+            lambda: h.is_serving and bool(h._server.sessions)
+        )
+        session = next(iter(h._server.sessions.values()))
+        start = asyncio.get_running_loop().time()
+        session.presence.bump()
+        await asyncio.sleep(0.8)
+        session.presence.bump()  # reconnect — must not reset
+
+        result = await asyncio.wait_for(task, timeout=10)
+        elapsed = asyncio.get_running_loop().time() - start
+        assert result.timeout_cause == "completion"
+        # Anchored to first bump: fires ~1.5s elapsed.
+        # Reset bug: fires ~0.8+1.5 = 2.3s elapsed.
+        # Threshold 2.0 sits midway with ~0.5s slack on each side —
+        # enough headroom for scheduler jitter on slow runners.
+        assert elapsed < 2.0, f"completion timer may have reset (elapsed={elapsed:.3f})"
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await ctx.close()
 
 
 async def test_sequential_handoffs_restart_server_on_same_port(
@@ -148,46 +270,46 @@ async def test_sequential_handoffs_restart_server_on_same_port(
     holds one (frozen) ServerConfig, so a successful restart necessarily reuses
     the same port."""
     port = _free_port()
-    handoff = Handoff(server=ServerConfig(host="127.0.0.1", port=port))
+    h = Handoff(server=ServerConfig(host="127.0.0.1", port=port))
 
     ctx = await browser.new_context()
     page = await ctx.new_page()
-    h = None
+    task = None
     try:
         complete = Detection.url(path_contains=["/dashboard"])
 
         async def run_one_handoff() -> None:
             """Drive a single handoff to completion, asserting the server comes
             up for it and tears down afterward."""
-            nonlocal h
+            nonlocal task
             await page.goto(f"{base_url}/login")
-            h = asyncio.create_task(handoff.wait_for_completion(page, on=complete))
+            task = asyncio.create_task(h.pause(page, until=complete))
 
-            # Server starts lazily for this handoff. Gate on the sessions
+            # Server starts lazily for this h. Gate on the sessions
             # dict (not live_session_count) — _acquire_server bumps the
             # count before register_session populates the dict, so the
             # count flipping is not yet safe to dereference.
             await _wait_until(
-                lambda: handoff.is_serving
-                and bool(handoff._server.sessions)
+                lambda: h.is_serving
+                and bool(h._server.sessions)
             )
-            assert handoff.live_session_count == 1
+            assert h.live_session_count == 1
 
             # Simulate the operator opening the wrapper. One bump flips
-            # the connect gate (so wait_for_completion registers the URL
+            # the connect gate (so pause registers the URL
             # listener) AND records the freshness timestamp. The WS
             # handler does this on first accept; bypassing it directly is
             # fine here since the assertion is about server lifecycle.
-            session = next(iter(handoff._server.sessions.values()))
+            session = next(iter(h._server.sessions.values()))
             session.presence.bump()
 
             # Complete it and confirm the server is fully gone afterward.
             await asyncio.sleep(0.3)  # let the completion listener arm
             await page.goto(f"{base_url}/dashboard")
-            result = await asyncio.wait_for(h, timeout=10)
+            result = await asyncio.wait_for(task, timeout=10)
             assert result.was_blocked and not result.timed_out
             await _wait_until(
-                lambda: not handoff.is_serving and handoff.live_session_count == 0
+                lambda: not h.is_serving and h.live_session_count == 0
             )
 
         # First handoff: server starts, runs, stops.
@@ -197,7 +319,7 @@ async def test_sequential_handoffs_restart_server_on_same_port(
         # task lingering), this re-acquire would hang or fail.
         await run_one_handoff()
     finally:
-        if h is not None and not h.done():
-            h.cancel()
-            await asyncio.gather(h, return_exceptions=True)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await ctx.close()
