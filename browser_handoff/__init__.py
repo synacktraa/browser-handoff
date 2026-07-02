@@ -28,7 +28,7 @@ Example — let the library decide when a human is needed:
 Example — you already know a human is needed, so skip the trigger:
     await h.pause(
         page,
-        on=Detection.url(path_contains=["/payment_done"]),
+        until=Detection.url(path_contains=["/payment_done"]),
         reason="Payment page reached",
     )
 """

@@ -64,7 +64,7 @@ async def test_passthrough_skips_screencast_pump(
     h_task = asyncio.create_task(
         h.pause(
             page,
-            on=Detection.url(path_contains=["/dashboard"]),
+            until=Detection.url(path_contains=["/dashboard"]),
             reason="login passthrough test",
             stream_url="https://dummy.substrate.example/viewer?t=abc",
         )
@@ -110,7 +110,7 @@ async def test_passthrough_serves_proxy_template(
     h_task = asyncio.create_task(
         h.pause(
             page,
-            on=Detection.url(path_contains=["/dashboard"]),
+            until=Detection.url(path_contains=["/dashboard"]),
             reason="proxy template test",
             stream_url="https://dummy.substrate.example/viewer?t=xyz",
         )
@@ -154,7 +154,7 @@ async def test_notify_task_expired_event_shape(
     h_task = asyncio.create_task(
         h.pause(
             page,
-            on=Detection.url(path_contains=["/this-route-does-not-exist"]),
+            until=Detection.url(path_contains=["/this-route-does-not-exist"]),
             reason="expired-event test",
             stream_url="https://dummy/viewer",
         )

@@ -163,7 +163,7 @@ def _build_tools(
         try:
             result = await h.pause(
                 page,
-                on=Detection.llm(condition=done_when),
+                until=Detection.llm(condition=done_when),
                 reason=reason,
                 name="shopping-handoff",
                 # Passthrough — bh iframes Kernel's live-view URL

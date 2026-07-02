@@ -64,12 +64,12 @@ A `Handoff` holds your transport config — the streaming server and notifiers �
 
 **Let the library detect the moment** with `h.guard(page, scenarios=[...])`. A `Scenario` is a pair: a `trigger` that says "stop, a human is needed" and a `complete` that says "OK, they're done." `guard` watches every scenario's trigger. If none fires within `trigger_timeout` seconds, it returns `HandoffResult(was_blocked=False)` and your script keeps going. If one fires, it starts a local streaming server, surfaces the URL (printed to logs and pushed to your notifiers), and waits until that scenario's `complete` matches — or until one of the handoff timers fires (`access_timeout` if the operator never opens the link, `completion_timeout` if they open it but don't finish). On timeout the result has `timed_out=True` and `timeout_cause` set to `"access"` or `"completion"`. It never raises on timeout; check the result.
 
-**Already know a human is needed?** Skip trigger detection and stream right away with `h.pause(page, on=...)`. This is the right call when something upstream already decided — e.g. an AI agent navigated to the payment page itself — so watching for a trigger would be redundant:
+**Already know a human is needed?** Skip trigger detection and stream right away with `h.pause(page, until=...)`. This is the right call when something upstream already decided — e.g. an AI agent navigated to the payment page itself — so watching for a trigger would be redundant:
 
 ```python
 await h.pause(
     page,
-    on=Detection.url(path_contains=["/payment_done"]),
+    until=Detection.url(path_contains=["/payment_done"]),
     reason="Payment page reached",
 )
 ```

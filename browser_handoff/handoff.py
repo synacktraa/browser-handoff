@@ -198,9 +198,9 @@ class Handoff:
       - `guard(page, scenarios=...)` — watch a page for triggers; on
         match, stream the page to a human and wait for completion.
         Use when the library should decide *when* a human is needed.
-      - `pause(page, on=...)` — stream the page to a
-        human now and wait until `on` matches. Use when the caller has
-        already decided a human is needed (e.g. an agent tool).
+      - `pause(page, until=...)` — stream the page to a
+        human now and pause until `until` matches. Use when the caller
+        has already decided a human is needed (e.g. an agent tool).
 
     Pass scenarios per-call to `guard`. The `scenarios` constructor arg
     is deprecated.
@@ -470,7 +470,7 @@ class Handoff:
     async def pause(
         self,
         page: "Page",
-        on: BaseDetection,
+        until: BaseDetection,
         *,
         reason: str = "Human intervention required",
         name: str = "handoff",
@@ -478,14 +478,14 @@ class Handoff:
         access_timeout: float | None = None,
         completion_timeout: float | None = None,
     ) -> "HandoffResult":
-        """Stream the page to a human *now* and wait until `on` matches.
+        """Stream the page to a human *now* and pause until `until` matches.
 
         Skips trigger detection — use when the caller has already
-        decided a human is needed. `run()` funnels here on trigger match.
+        decided a human is needed. `guard()` funnels here on trigger match.
 
         Args:
             page: Playwright page to stream.
-            on: Completion detection; the handoff returns the moment it
+            until: Resume condition; the handoff returns the moment it
                 matches (or on entry if the page already satisfies it).
             reason: Operator-facing explanation shown in the wrapper and
                 notifications.
@@ -585,11 +585,11 @@ class Handoff:
             await self._send_notifications(reason, operator_url)
 
             # Already complete? (E.g. page raced past completion before
-            # listeners are set up.) Skip the initial probe when `on` is
-            # LLM-shaped — vision calls before the wrapper loads are
+            # listeners are set up.) Skip the initial probe when `until`
+            # is LLM-shaped — vision calls before the wrapper loads are
             # wasted; only cheap non-LLM checks run here.
-            if not _detection_tree_has_llm(on):
-                initial = await on.check(page, reason=reason)
+            if not _detection_tree_has_llm(until):
+                initial = await until.check(page, reason=reason)
                 if initial.matched:
                     completion_reason = initial.reason
                     completion_event.set()
@@ -605,7 +605,7 @@ class Handoff:
                 if completion_event.is_set():
                     return
                 listener_cleanups.append(
-                    on.register_listeners(page, on_completion_detected)
+                    until.register_listeners(page, on_completion_detected)
                 )
 
             listener_install_task = asyncio.create_task(

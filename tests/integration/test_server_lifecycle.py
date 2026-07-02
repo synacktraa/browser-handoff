@@ -68,10 +68,10 @@ async def test_concurrent_handoffs_share_one_server(
 
         # Fire both handoffs concurrently on the SAME Handoff instance.
         h1 = asyncio.create_task(
-            h.pause(page1, on=complete, name="one")
+            h.pause(page1, until=complete, name="one")
         )
         h2 = asyncio.create_task(
-            h.pause(page2, on=complete, name="two")
+            h.pause(page2, until=complete, name="two")
         )
 
         # Wait until *both* sessions are actually registered on the shared
@@ -157,7 +157,7 @@ async def test_access_timeout_fires_without_connect(
         # Never bump presence; access timer should fire.
         result = await asyncio.wait_for(
             h.pause(
-                page, on=Detection.url(path_contains=["/dashboard"]),
+                page, until=Detection.url(path_contains=["/dashboard"]),
             ),
             timeout=10,
         )
@@ -189,7 +189,7 @@ async def test_completion_timeout_fires_after_connect(
     try:
         await page.goto(f"{base_url}/login")
         complete = Detection.url(path_contains=["/dashboard"])
-        h = asyncio.create_task(h.pause(page, on=complete))
+        h = asyncio.create_task(h.pause(page, until=complete))
 
         # Simulate the operator opening the wrapper. Once registered,
         # bump presence so the access timer retires and the completion
@@ -231,7 +231,7 @@ async def test_completion_timer_anchors_on_first_connect(
     try:
         await page.goto(f"{base_url}/login")
         complete = Detection.url(path_contains=["/dashboard"])
-        h = asyncio.create_task(h.pause(page, on=complete))
+        h = asyncio.create_task(h.pause(page, until=complete))
 
         await _wait_until(
             lambda: h.is_serving and bool(h._server.sessions)
@@ -283,7 +283,7 @@ async def test_sequential_handoffs_restart_server_on_same_port(
             up for it and tears down afterward."""
             nonlocal h
             await page.goto(f"{base_url}/login")
-            h = asyncio.create_task(h.pause(page, on=complete))
+            h = asyncio.create_task(h.pause(page, until=complete))
 
             # Server starts lazily for this h. Gate on the sessions
             # dict (not live_session_count) — _acquire_server bumps the
