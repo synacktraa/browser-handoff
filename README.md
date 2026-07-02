@@ -16,7 +16,7 @@ LLM-based detection (optional): `pip install browser-handoff[llm]`
 
 Opens a login page, streams it to a human, and resumes when they sign in.
 
-[![Demo — login handoff](./.github/assets/heroku-app-login-handoff-thumbnail.png)](./.github/assets/30-second-example.mp4)
+[![Demo — login handoff](./.github/assets/heroku-app-login-handoff-thumbnail.png)](https://github.com/user-attachments/assets/e2990cc6-44c1-48c4-b9df-85b2e091e09f)
 
 ```python
 import asyncio
