@@ -141,7 +141,7 @@ def _detection_tree_has_llm(detection: BaseDetection) -> bool:
 
     Walks the three current detection shapes — leaf, single-inner
     combinator (`.condition`), and multi-inner combinator
-    (`.conditions`). Used by `Handoff.run` to reject LLM triggers and
+    (`.conditions`). Used by `Handoff.guard` to reject LLM triggers and
     by `pause` to skip the initial check for LLM `on`.
     """
     # Lazy import: llm imports detection.base which imports this module.
@@ -158,7 +158,7 @@ def _detection_tree_has_llm(detection: BaseDetection) -> bool:
 
 @dataclass
 class HandoffResult:
-    """Outcome of a Handoff.run() call.
+    """Outcome of a Handoff.guard() / Handoff.pause() call.
 
     Three terminal states:
       - was_blocked=False                  → no trigger fired within trigger_timeout
@@ -195,14 +195,14 @@ class Handoff:
     Holds the transport config (server, notifiers, viewport) and is
     shared across many pages/runs. Two entry points:
 
-      - `run(page, scenarios=...)` — watch a page for triggers; on
+      - `guard(page, scenarios=...)` — watch a page for triggers; on
         match, stream the page to a human and wait for completion.
         Use when the library should decide *when* a human is needed.
       - `pause(page, on=...)` — stream the page to a
         human now and wait until `on` matches. Use when the caller has
         already decided a human is needed (e.g. an agent tool).
 
-    Pass scenarios per-call to `run`. The `scenarios` constructor arg
+    Pass scenarios per-call to `guard`. The `scenarios` constructor arg
     is deprecated.
 
     The streaming server is shared across all handoffs on this instance
@@ -212,7 +212,7 @@ class Handoff:
     Example:
         handoff = Handoff(notifiers=[DiscordNotifier(...)])
 
-        result = await handoff.run(
+        result = await handoff.guard(
             page,
             scenarios=[
                 Scenario(
@@ -307,7 +307,7 @@ class Handoff:
         """Whether the shared streaming server is currently running."""
         return self._server is not None
 
-    async def run(
+    async def guard(
         self,
         page: "Page",
         *,
@@ -316,9 +316,8 @@ class Handoff:
         access_timeout: float | None = None,
         completion_timeout: float | None = None,
         stream_url: str | None = None,
-        timeout: float | None = None,
     ) -> "HandoffResult":
-        """Watch for triggers; on match, run a handoff and await completion.
+        """Guard a page with scenarios; hand off on trigger match.
 
         Registers listeners on every scenario's trigger and waits for
         one to fire (within `trigger_timeout`) or for it to elapse.
@@ -336,27 +335,16 @@ class Handoff:
             stream_url: Optional substrate viewer URL. When set, the
                 handoff runs in passthrough mode and `stream_url` is
                 forwarded to `pause`.
-            timeout: Deprecated alias for `trigger_timeout`.
 
         Returns:
             HandoffResult describing what happened. Never raises on
             handoff-phase timeout — check `result.timed_out` and
             `result.timeout_cause`.
         """
-        if timeout is not None:
-            warnings.warn(
-                "Handoff.run(timeout=...) is deprecated; use "
-                "`trigger_timeout=...`. Will be removed in a future "
-                "major release.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            trigger_timeout = timeout
-
         scenarios = scenarios if scenarios is not None else self.scenarios
         if not scenarios:
             raise ValueError(
-                "run() requires at least one scenario: pass scenarios=[...] "
+                "guard() requires at least one scenario: pass scenarios=[...] "
                 "or set them on Handoff(...). To stream without a trigger, use "
                 "pause()."
             )
@@ -415,13 +403,13 @@ class Handoff:
 
             if matched_scenario is None or matched_result is None:
                 logger.info(
-                    "handoff.run: no trigger matched within %.1fs (page url=%s)",
+                    "handoff.guard: no trigger matched within %.1fs (page url=%s)",
                     trigger_timeout, page.url,
                 )
                 return HandoffResult(was_blocked=False)
 
             logger.info(
-                "handoff.run: trigger matched (scenario='%s'): %s",
+                "handoff.guard: trigger matched (scenario='%s'): %s",
                 matched_scenario.name, matched_result.reason,
             )
             return await self.pause(
@@ -437,6 +425,47 @@ class Handoff:
             for cleanup in cleanups:
                 with suppress(Exception):
                     cleanup()
+
+    async def run(
+        self,
+        page: "Page",
+        *,
+        scenarios: list[Scenario] | None = None,
+        trigger_timeout: float = 30.0,
+        access_timeout: float | None = None,
+        completion_timeout: float | None = None,
+        stream_url: str | None = None,
+        timeout: float | None = None,
+    ) -> "HandoffResult":
+        """Deprecated alias for :meth:`guard`.
+
+        Also accepts the deprecated `timeout=` kwarg — v0.6 called this
+        method with `timeout=`, so the shim forwards it to
+        `trigger_timeout` with a separate warning.
+        """
+        warnings.warn(
+            "Handoff.run() is deprecated; use `guard()`. Will be "
+            "removed in a future major release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if timeout is not None:
+            warnings.warn(
+                "Handoff.run(timeout=...) is deprecated; use "
+                "`guard(trigger_timeout=...)`. Will be removed in a "
+                "future major release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            trigger_timeout = timeout
+        return await self.guard(
+            page,
+            scenarios=scenarios,
+            trigger_timeout=trigger_timeout,
+            access_timeout=access_timeout,
+            completion_timeout=completion_timeout,
+            stream_url=stream_url,
+        )
 
     async def pause(
         self,

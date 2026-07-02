@@ -11,7 +11,7 @@ Example — let the library decide when a human is needed:
 
     handoff = Handoff()  # reusable transport config
 
-    result = await handoff.run(
+    result = await handoff.guard(
         page,
         scenarios=[
             Scenario(

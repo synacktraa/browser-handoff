@@ -29,17 +29,17 @@ class TestHandoffCreation:
         assert Handoff().scenarios == []
         assert Handoff(scenarios=[]).scenarios == []
 
-    def test_run_requires_scenarios(self):
-        """run() raises if no scenarios are passed and none are set on the
+    def test_guard_requires_scenarios(self):
+        """guard() raises if no scenarios are passed and none are set on the
         instance. Validation happens before the page is touched, so a bare
         object stands in for the Playwright page here."""
         import asyncio
 
         handoff = Handoff()
         with pytest.raises(ValueError, match="requires at least one scenario"):
-            asyncio.run(handoff.run(object()))
+            asyncio.run(handoff.guard(object()))
 
-    def test_run_rejects_llm_in_trigger(self):
+    def test_guard_rejects_llm_in_trigger(self):
         """Triggers must not use LLMDetection — wrong prompt shape (no
         operator-facing reason), wrong activity signal (no operator yet),
         no first-event gate. Reject early at the scenario level so the
@@ -58,9 +58,9 @@ class TestHandoffCreation:
             ),
         ]
         with pytest.raises(TypeError, match="bad-llm-trigger"):
-            asyncio.run(handoff.run(object(), scenarios=scenarios))
+            asyncio.run(handoff.guard(object(), scenarios=scenarios))
 
-    def test_run_rejects_llm_nested_in_combinator(self):
+    def test_guard_rejects_llm_nested_in_combinator(self):
         """The walk catches combinator nesting too — most likely accidental
         misuse since AnyOf/AllOf hide the LLMDetection in plain sight.
         """
@@ -80,7 +80,7 @@ class TestHandoffCreation:
             ),
         ]
         with pytest.raises(TypeError, match="nested-llm-trigger"):
-            asyncio.run(handoff.run(object(), scenarios=scenarios))
+            asyncio.run(handoff.guard(object(), scenarios=scenarios))
 
     def test_programmatic_creation(self):
         """Test creating Handoff programmatically."""
@@ -875,7 +875,7 @@ class TestCaptureCropMetrics:
 
 class TestStreamUrlForwarding:
     """`stream_url` is plumbed through both Handoff.pause and
-    Handoff.run; run() is a pass-through that forwards to pause
+    Handoff.guard; guard() is a pass-through that forwards to pause
     on trigger match (cropping logic lives only in pause).
     """
 
@@ -890,50 +890,35 @@ class TestStreamUrlForwarding:
         assert sig.parameters["stream_url"].kind == inspect.Parameter.KEYWORD_ONLY
         assert sig.parameters["stream_url"].default is None
 
-    def test_run_accepts_stream_url(self):
+    def test_guard_accepts_stream_url(self):
         import inspect
 
-        sig = inspect.signature(Handoff.run)
+        sig = inspect.signature(Handoff.guard)
         assert "stream_url" in sig.parameters
         assert sig.parameters["stream_url"].kind == inspect.Parameter.KEYWORD_ONLY
         assert sig.parameters["stream_url"].default is None
 
 
 class TestTimeoutKwargSignatures:
-    """Lock the renamed and added timeout kwargs at the call sites.
+    """Lock the timeout kwargs on the current entry points.
 
-    `Handoff.run(timeout=...)` was renamed to `trigger_timeout`. Both
-    entry points gained `access_timeout` and `completion_timeout`
+    Both entry points expose `access_timeout` and `completion_timeout`
     overrides that default to None (= inherit ServerConfig).
     """
 
-    def test_run_uses_trigger_timeout_not_timeout(self):
+    def test_guard_uses_trigger_timeout(self):
         import inspect
 
-        sig = inspect.signature(Handoff.run)
+        sig = inspect.signature(Handoff.guard)
         assert "trigger_timeout" in sig.parameters
         assert sig.parameters["trigger_timeout"].default == 30.0
-        # Old name still accepted as a deprecated shim; default None so
-        # only an explicit pass fires the warning.
-        assert "timeout" in sig.parameters
-        assert sig.parameters["timeout"].default is None
+        # `timeout` isn't on guard; it lives on the run() shim only.
+        assert "timeout" not in sig.parameters
 
-    def test_run_timeout_shim_warns_and_forwards(self):
-        # We only need the top-of-run shim to fire; empty scenarios trip
-        # the ValueError right after, which is fine — the warning has
-        # already been recorded by then.
-        import asyncio
-        import contextlib
-
-        handoff = Handoff()
-        with pytest.warns(DeprecationWarning, match=r"run\(timeout"):
-            with contextlib.suppress(Exception):
-                asyncio.run(handoff.run(object(), timeout=1.0))
-
-    def test_run_has_timeout_overrides(self):
+    def test_guard_has_timeout_overrides(self):
         import inspect
 
-        sig = inspect.signature(Handoff.run)
+        sig = inspect.signature(Handoff.guard)
         for name in ("access_timeout", "completion_timeout"):
             assert name in sig.parameters, name
             assert sig.parameters[name].default is None
@@ -972,3 +957,35 @@ class TestWaitForCompletionShim:
                         object(), Detection.url(path_contains=["/x"])
                     )
                 )
+
+
+class TestRunShim:
+    """run() is a deprecated alias for guard(). The shim also carries the
+    older `timeout=` kwarg for callers still on the v0.6 signature."""
+
+    def test_run_exists_as_shim(self):
+        assert hasattr(Handoff, "run")
+
+    def test_run_warns_and_forwards(self):
+        import asyncio
+        import contextlib
+
+        handoff = Handoff()
+        with pytest.warns(DeprecationWarning, match=r"Handoff\.run"):
+            with contextlib.suppress(Exception):
+                asyncio.run(handoff.run(object()))
+
+    def test_run_timeout_kwarg_warns(self):
+        # Both the method-name deprecation and the timeout-kwarg
+        # deprecation fire; filter to the timeout-specific message.
+        import asyncio
+        import contextlib
+        import warnings
+
+        handoff = Handoff()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with contextlib.suppress(Exception):
+                asyncio.run(handoff.run(object(), timeout=1.0))
+        messages = [str(w.message) for w in caught]
+        assert any("run(timeout" in m for m in messages), messages
