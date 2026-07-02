@@ -939,11 +939,13 @@ class TestWaitForCompletionShim:
         import inspect
 
         assert hasattr(Handoff, "wait_for_completion")
-        # Same public signature as pause so callers can flip
-        # names without touching kwargs.
+        # Same kwargs as pause except the second positional arg is
+        # `on` (v0.6 name) rather than `until` (new pause parameter).
         old = inspect.signature(Handoff.wait_for_completion).parameters
         new = inspect.signature(Handoff.pause).parameters
-        assert set(old.keys()) == set(new.keys())
+        assert set(old.keys()) - {"on"} == set(new.keys()) - {"until"}
+        assert "on" in old
+        assert "until" in new
 
     def test_wait_for_completion_warns(self):
         import asyncio

@@ -185,11 +185,11 @@ async def test_completion_timeout_fires_after_connect(
 
     ctx = await browser.new_context()
     page = await ctx.new_page()
-    h = None
+    task = None
     try:
         await page.goto(f"{base_url}/login")
         complete = Detection.url(path_contains=["/dashboard"])
-        h = asyncio.create_task(h.pause(page, until=complete))
+        task = asyncio.create_task(h.pause(page, until=complete))
 
         # Simulate the operator opening the wrapper. Once registered,
         # bump presence so the access timer retires and the completion
@@ -200,14 +200,14 @@ async def test_completion_timeout_fires_after_connect(
         session = next(iter(h._server.sessions.values()))
         session.presence.bump()
 
-        result = await asyncio.wait_for(h, timeout=10)
+        result = await asyncio.wait_for(task, timeout=10)
         assert result.was_blocked is True
         assert result.timed_out is True
         assert result.timeout_cause == "completion"
     finally:
-        if h is not None and not h.done():
-            h.cancel()
-            await asyncio.gather(h, return_exceptions=True)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await ctx.close()
 
 
@@ -227,11 +227,11 @@ async def test_completion_timer_anchors_on_first_connect(
 
     ctx = await browser.new_context()
     page = await ctx.new_page()
-    h = None
+    task = None
     try:
         await page.goto(f"{base_url}/login")
         complete = Detection.url(path_contains=["/dashboard"])
-        h = asyncio.create_task(h.pause(page, until=complete))
+        task = asyncio.create_task(h.pause(page, until=complete))
 
         await _wait_until(
             lambda: h.is_serving and bool(h._server.sessions)
@@ -242,7 +242,7 @@ async def test_completion_timer_anchors_on_first_connect(
         await asyncio.sleep(0.8)
         session.presence.bump()  # reconnect — must not reset
 
-        result = await asyncio.wait_for(h, timeout=10)
+        result = await asyncio.wait_for(task, timeout=10)
         elapsed = asyncio.get_running_loop().time() - start
         assert result.timeout_cause == "completion"
         # Anchored to first bump: fires ~1.5s elapsed.
@@ -251,9 +251,9 @@ async def test_completion_timer_anchors_on_first_connect(
         # enough headroom for scheduler jitter on slow runners.
         assert elapsed < 2.0, f"completion timer may have reset (elapsed={elapsed:.3f})"
     finally:
-        if h is not None and not h.done():
-            h.cancel()
-            await asyncio.gather(h, return_exceptions=True)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await ctx.close()
 
 
@@ -274,16 +274,16 @@ async def test_sequential_handoffs_restart_server_on_same_port(
 
     ctx = await browser.new_context()
     page = await ctx.new_page()
-    h = None
+    task = None
     try:
         complete = Detection.url(path_contains=["/dashboard"])
 
         async def run_one_handoff() -> None:
             """Drive a single handoff to completion, asserting the server comes
             up for it and tears down afterward."""
-            nonlocal h
+            nonlocal task
             await page.goto(f"{base_url}/login")
-            h = asyncio.create_task(h.pause(page, until=complete))
+            task = asyncio.create_task(h.pause(page, until=complete))
 
             # Server starts lazily for this h. Gate on the sessions
             # dict (not live_session_count) — _acquire_server bumps the
@@ -306,7 +306,7 @@ async def test_sequential_handoffs_restart_server_on_same_port(
             # Complete it and confirm the server is fully gone afterward.
             await asyncio.sleep(0.3)  # let the completion listener arm
             await page.goto(f"{base_url}/dashboard")
-            result = await asyncio.wait_for(h, timeout=10)
+            result = await asyncio.wait_for(task, timeout=10)
             assert result.was_blocked and not result.timed_out
             await _wait_until(
                 lambda: not h.is_serving and h.live_session_count == 0
@@ -319,7 +319,7 @@ async def test_sequential_handoffs_restart_server_on_same_port(
         # task lingering), this re-acquire would hang or fail.
         await run_one_handoff()
     finally:
-        if h is not None and not h.done():
-            h.cancel()
-            await asyncio.gather(h, return_exceptions=True)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await ctx.close()
