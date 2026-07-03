@@ -4,6 +4,10 @@ Pause your browser automation, hand the page to a human, resume when they're don
 
 When your script or agent hits something only a human should do — login, 2FA, OAuth consent, payment, identity check — `browser-handoff` streams the live browser to an operator over the web, waits for them to finish, then gives control back to your code.
 
+[![Demo — browser-use shopping agent × Kernel](./.github/assets/browser-use-shopping-handoff-onkernel-thumbnail.png)](https://github.com/user-attachments/assets/1e4a5e17-d792-45b1-852e-fd2b4ce15715)
+
+> A [`browser-use`](https://github.com/browser-use/browser-use) shopping agent × [Kernel](https://onkernel.com) cloud browser — the agent decides when it needs human assistance. Refer: [`examples/browser_use_assisted_shopping/using_kernel.py`](examples/browser_use_assisted_shopping/using_kernel.py).
+
 ## Install
 
 ```bash
