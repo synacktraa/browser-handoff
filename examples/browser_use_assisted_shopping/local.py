@@ -150,7 +150,10 @@ def _build_tools(
         try:
             result = await h.pause(
                 page,
-                until=Detection.llm(condition=done_when),
+                until=Detection.llm(
+                    model="anthropic/claude-sonnet-4-6",
+                    condition=done_when,
+                ),
                 reason=reason,
                 name="shopping-handoff",
             )
@@ -214,7 +217,7 @@ async def main() -> None:
             browser_session = BrowserSession(cdp_url=f"http://127.0.0.1:{CDP_PORT}")
             agent = Agent(
                 task=TASK,
-                llm=ChatAnthropic(model="claude-sonnet-4-5"),
+                llm=ChatAnthropic(model="claude-sonnet-4-6"),
                 browser_session=browser_session,
                 tools=tools,
             )
