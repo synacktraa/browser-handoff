@@ -25,7 +25,7 @@ from .session import DEFAULT_VIEWPORT, HandoffSession
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, CDPSession, Page
 
-TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
+TEMPLATE_DIR = Path(__file__).parent / "templates"
 jinja_env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=True)
 
 # Suppress the native right-click menu — it's an OS-level overlay the
@@ -691,7 +691,7 @@ class StreamingServer:
                     elif msg_type == "presence":
                         # ~2s heartbeat while the tab is visible.
                         session.presence.bump()
-                    # Other types are silently ignored — streaming-mode
+                    # Other types are silently ignored — screencast-mode
                     # messages (mouse/keyboard/…) don't apply here.
         except Exception as e:
             logger.error(f"passthrough WebSocket error: {e}")
@@ -1085,7 +1085,7 @@ class StreamingServer:
     ) -> str | None:
         """Snapshot the page as a base64 JPEG data URL for session-end events.
 
-        Only meaningful in passthrough mode — streaming mode keeps its
+        Only meaningful in passthrough mode — screencast mode keeps its
         last screencast frame on display. Returns None on any failure.
         """
         if not session.is_passthrough:
@@ -1119,9 +1119,9 @@ class StreamingServer:
     async def notify_task_expired(self, session_id: str) -> None:
         """Push a task_expired event — the human didn't finish in time.
 
-        Distinct from cancellation: this is the timeout path. The proxy
-        template swaps the iframe out for the captured screenshot;
-        streaming-mode UI ignores this event.
+        Distinct from cancellation: this is the timeout path. The
+        passthrough template swaps the iframe out for the captured
+        screenshot; screencast-mode UI ignores this event.
         """
         await self._broadcast_session_end(session_id, "task_expired")
 
@@ -1148,13 +1148,13 @@ class StreamingServer:
     def _get_html_client(self, session_id: str, reason: str) -> str:
         """Render the operator HTML for a session.
 
-        Passthrough sessions get `proxy_intervention.html` (iframes the
-        substrate viewer + crops via crop_metrics); streaming sessions
-        get `intervention.html` (the screencast viewer).
+        Passthrough sessions get `passthrough-mode.html` (iframes the
+        substrate viewer + crops via crop_metrics); screencast sessions
+        get `screencast-mode.html` (the CDP-screencast viewer).
         """
         session = self.sessions[session_id]
         if session.is_passthrough:
-            template = jinja_env.get_template("proxy_intervention.html")
+            template = jinja_env.get_template("passthrough-mode.html")
             return template.render(
                 access_token=session.access_token,
                 reason=reason,
@@ -1164,7 +1164,7 @@ class StreamingServer:
                 stream_url=session.stream_url,
                 crop_metrics=session.crop_metrics,
             )
-        template = jinja_env.get_template("intervention.html")
+        template = jinja_env.get_template("screencast-mode.html")
         return template.render(
             access_token=session.access_token,
             reason=reason,
@@ -1186,18 +1186,6 @@ class StreamingServer:
         base_url = self.config.get_base_url()
         token = self.sessions[session_id].access_token
         return f"{base_url}/?t={token}"
-
-    def get_stream_url(self, session_id: str) -> str:
-        """Deprecated alias for :meth:`get_operator_url`. Removed in v0.7."""
-        import warnings
-
-        warnings.warn(
-            "get_stream_url() is deprecated; use get_operator_url() instead. "
-            "Will be removed in v0.7.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.get_operator_url(session_id)
 
     async def start(self) -> None:
         """Bind the port and serve until `stop()` is called."""

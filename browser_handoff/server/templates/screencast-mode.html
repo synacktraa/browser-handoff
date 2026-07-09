@@ -1172,7 +1172,7 @@
       function applyLatencyState(state) {
         // Two states: 'connecting' (no frame yet) and 'connected' (RTT
         // values flow). Any disconnect goes straight to showEndedOverlay
-        // — streaming mode doesn't reconnect.
+        // — screencast mode doesn't reconnect.
         if (isCompleted) return;
         latencyPill.classList.remove('warn', 'bad', 'connecting');
         if (state === 'connecting') {

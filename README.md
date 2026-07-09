@@ -96,7 +96,7 @@ On timeout the result has `timed_out=True` and `timeout_cause` names the timer t
 
 ## Passthrough mode (cloud substrates)
 
-When the page lives in a cloud browser substrate (Kernel, Browserbase, Steel, Cua, …) and `browser-handoff` runs on your machine, streaming mode relays every frame and every operator input through your local process — each interaction round-trips over the WAN between your machine and the substrate. Frames tolerate it; input doesn't. Observed input latency against a Kernel cloud browser in streaming mode was ~30 seconds per keystroke — unusable for filling out a form.
+When the page lives in a cloud browser substrate (Kernel, Browserbase, Steel, Cua, …) and `browser-handoff` runs on your machine, screencast mode relays every frame and every operator input through your local process — each interaction round-trips over the WAN between your machine and the substrate. Frames tolerate it; input doesn't. Observed input latency against a Kernel cloud browser in screencast mode was ~30 seconds per keystroke — unusable for filling out a form.
 
 Most substrates already ship their own first-class viewer. Passthrough mode delegates streaming and input to that viewer while `browser-handoff` keeps the detection, notification, and lifecycle responsibilities.
 

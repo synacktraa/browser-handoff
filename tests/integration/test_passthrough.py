@@ -4,9 +4,9 @@ These spin up real Playwright + StreamingServer and verify the passthrough
 plumbing end-to-end:
 
   - The CDP screencast task is NOT started when stream_url is set.
-  - GET /?t=<token> serves the proxy template (not the streaming one).
+  - GET /?t=<token> serves the passthrough template (not the screencast one).
   - The status WebSocket dispatches to the passthrough handler.
-  - notify_task_expired delivers an event the proxy template can react to.
+  - notify_task_expired delivers an event the passthrough template can react to.
 
 In-page activity observation moved into LLMDetection's unified watcher
 after the v0.6 refactor — the stealth observer and bump behavior are
@@ -51,7 +51,7 @@ async def test_passthrough_skips_screencast_pump(
     """When stream_url is set, register_session must not schedule capture_task.
 
     The session's frame_seq stays at 0 (no frames produced) and capture_task
-    remains None. Streaming-mode comparison test in test_screencast_input.py
+    remains None. Screencast-mode comparison test in test_screencast_input.py
     confirms the inverse — pump runs without stream_url.
     """
     port = _free_port()
@@ -96,10 +96,10 @@ async def test_passthrough_skips_screencast_pump(
         await ctx.close()
 
 
-async def test_passthrough_serves_proxy_template(
+async def test_passthrough_serves_passthrough_template(
     browser: Browser, base_url: str
 ) -> None:
-    """GET /?t=<token> returns the proxy template, not intervention.html."""
+    """GET /?t=<token> returns passthrough-mode.html, not screencast-mode.html."""
     port = _free_port()
     h = Handoff(server=ServerConfig(host="127.0.0.1", port=port))
 
@@ -111,7 +111,7 @@ async def test_passthrough_serves_proxy_template(
         h.pause(
             page,
             until=Detection.url(path_contains=["/dashboard"]),
-            reason="proxy template test",
+            reason="passthrough template test",
             stream_url="https://dummy.substrate.example/viewer?t=xyz",
         )
     )
@@ -124,10 +124,10 @@ async def test_passthrough_serves_proxy_template(
         # route uses (templates are static once the session is registered).
         # Avoids a second HTTP-client dep just to verify the response body.
         html = server._get_html_client(session.session_id, session.reason)
-        # Proxy-only markers; would not appear in intervention.html.
+        # Passthrough-only markers; would not appear in screencast-mode.html.
         assert "substrate-iframe" in html
         assert "fallback-screenshot" in html
-        assert "proxy template test" in html
+        assert "passthrough template test" in html
     finally:
         # Simulate operator opening the wrapper. One bump flips the
         # connect gate AND records the freshness timestamp.

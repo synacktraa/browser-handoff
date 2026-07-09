@@ -901,7 +901,7 @@
       const countdownPill = document.getElementById('countdown-pill');
       const countdownValue = document.getElementById('countdown-value');
 
-      // Show more / Show less for long reasons (see intervention.html
+      // Show more / Show less for long reasons (see screencast-mode.html
       // for the shared pattern).
       function checkReasonOverflow() {
         const overflows = headerReasonEl.scrollWidth > headerReasonEl.clientWidth + 1;
@@ -946,7 +946,7 @@
       // url_changed, task_completed, task_expired, task_cancelled);
       // client sends reload + presence. No auto-reconnect — any close
       // without a prior bh-driven end event goes straight to the
-      // ended-overlay card (same terminal UX as streaming mode).
+      // ended-overlay card (same terminal UX as screencast mode).
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const WS_URL = `${wsProtocol}//${window.location.host}/ws?t=${ACCESS_TOKEN}`;
       let ws = null;

@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
 
-# Read the page's rect on the substrate's display so the proxy template
-# can crop the iframe to just the page area (the substrate streams the
+# Read the page's rect on the substrate's display so the passthrough
+# template can crop the iframe to just the page area (the substrate streams the
 # whole desktop). page_y accounts for browser chrome via
 # `outerHeight - innerHeight`; page_x mirrors that in case of symmetric
 # window borders.
@@ -97,7 +97,7 @@ async def _capture_crop_metrics(
 
     Returns None when the evaluate raises, the page reports zero dims
     even after retries, or the substrate mocks screen dims (headless).
-    On None, the proxy template falls back to a non-cropped iframe.
+    On None, the passthrough template falls back to a non-cropped iframe.
     """
     await _maximize_substrate_window(page)
 
@@ -553,7 +553,7 @@ class Handoff:
             except Exception as e:
                 logger.info(f"Could not get viewport: {e}, using default: {viewport_size}")
 
-            # Page-rect-on-display metrics for the proxy template's
+            # Page-rect-on-display metrics for the passthrough template's
             # iframe crop. Only used in passthrough mode.
             crop_metrics: dict[str, int] | None = None
             if stream_url is not None:
@@ -601,8 +601,20 @@ class Handoff:
             timeout_cause: Literal["access", "completion"] | None = None
 
             async def install_listeners_after_connect() -> None:
+                nonlocal completion_reason
                 await session.presence.wait_until_connected()
                 if completion_event.is_set():
+                    return
+                # Race defense: state may have been reached between the
+                # initial probe (T0) and first-connect. Listeners only
+                # fire on new events, so any transition that already
+                # happened would be missed. Re-probe here — now with LLM
+                # included, since the wrapper has loaded and vision
+                # calls are no longer wasted.
+                arrival = await until.check(page, reason=session.reason)
+                if arrival.matched:
+                    completion_reason = arrival.reason
+                    completion_event.set()
                     return
                 listener_cleanups.append(
                     until.register_listeners(page, on_completion_detected)
