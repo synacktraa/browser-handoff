@@ -110,8 +110,8 @@ class HandoffSession:
     # bh still owns detection + notification + lifecycle.
     stream_url: str | None = None
     # Page rect on the substrate's display (six ints: screen_w/h,
-    # page_x/y, page_w/h). Used by the proxy template's CSS to crop the
-    # iframe to just the page content. None when not in passthrough mode
+    # page_x/y, page_w/h). Used by the passthrough template's CSS to crop
+    # the iframe to just the page content. None when not in passthrough mode
     # or when the JS evaluate returned degenerate values.
     crop_metrics: dict[str, int] | None = None
     # Per-session resolved timeouts. None at either layer means "no

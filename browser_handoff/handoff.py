@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
 
-# Read the page's rect on the substrate's display so the proxy template
-# can crop the iframe to just the page area (the substrate streams the
+# Read the page's rect on the substrate's display so the passthrough
+# template can crop the iframe to just the page area (the substrate streams the
 # whole desktop). page_y accounts for browser chrome via
 # `outerHeight - innerHeight`; page_x mirrors that in case of symmetric
 # window borders.
@@ -97,7 +97,7 @@ async def _capture_crop_metrics(
 
     Returns None when the evaluate raises, the page reports zero dims
     even after retries, or the substrate mocks screen dims (headless).
-    On None, the proxy template falls back to a non-cropped iframe.
+    On None, the passthrough template falls back to a non-cropped iframe.
     """
     await _maximize_substrate_window(page)
 
@@ -553,7 +553,7 @@ class Handoff:
             except Exception as e:
                 logger.info(f"Could not get viewport: {e}, using default: {viewport_size}")
 
-            # Page-rect-on-display metrics for the proxy template's
+            # Page-rect-on-display metrics for the passthrough template's
             # iframe crop. Only used in passthrough mode.
             crop_metrics: dict[str, int] | None = None
             if stream_url is not None:

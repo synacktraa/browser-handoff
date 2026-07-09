@@ -333,17 +333,17 @@ class TestTemplateSelection:
         server._token_to_session[session.access_token] = session.session_id
         return session
 
-    def test_streaming_session_renders_intervention_template(self):
+    def test_screencast_session_renders_screencast_mode_template(self):
         server = StreamingServer()
         self._register(server)
         html = server._get_html_client("test", "please log in")
-        # intervention.html ships the streaming-mode features that the
-        # proxy template intentionally omits.
+        # screencast-mode.html ships the screencast-mode features that
+        # the passthrough template intentionally omits.
         assert "Browser Handoff" in html
         assert "please log in" in html
         assert "stream-container" in html  # streaming-only element id
 
-    def test_passthrough_session_renders_proxy_template(self):
+    def test_passthrough_session_renders_passthrough_mode_template(self):
         server = StreamingServer()
         crop = {
             "screen_w": 1920, "screen_h": 1080,
@@ -357,10 +357,10 @@ class TestTemplateSelection:
         )
         html = server._get_html_client("test", "please sign in")
         assert "please sign in" in html
-        # Proxy-only markers: the substrate iframe and the fallback
+        # Passthrough-only markers: the substrate iframe and the fallback
         # screenshot used when the bh session ends without completion
         # (substrate's WebRTC stream would otherwise keep running in the
-        # iframe). Neither exists in intervention.html.
+        # iframe). Neither exists in screencast-mode.html.
         assert "substrate-iframe" in html
         assert "fallback-screenshot" in html
         # Crop metrics threaded into the CSS via Jinja.
