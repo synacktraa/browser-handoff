@@ -1187,18 +1187,6 @@ class StreamingServer:
         token = self.sessions[session_id].access_token
         return f"{base_url}/?t={token}"
 
-    def get_stream_url(self, session_id: str) -> str:
-        """Deprecated alias for :meth:`get_operator_url`. Removed in v0.7."""
-        import warnings
-
-        warnings.warn(
-            "get_stream_url() is deprecated; use get_operator_url() instead. "
-            "Will be removed in v0.7.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.get_operator_url(session_id)
-
     async def start(self) -> None:
         """Bind the port and serve until `stop()` is called."""
         config = uvicorn.Config(

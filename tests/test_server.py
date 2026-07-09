@@ -257,19 +257,6 @@ class TestAccessToken:
         assert f"?t={session.access_token}" in url
         assert "?session=" not in url  # the id is no longer the URL gate
 
-    def test_get_stream_url_is_deprecated_alias(self):
-        import warnings
-
-        server = StreamingServer()
-        session = self._register(server, expires_at=time.time() + 60)
-        canonical = server.get_operator_url(session.session_id)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            legacy = server.get_stream_url(session.session_id)
-        assert legacy == canonical
-        assert any(issubclass(w.category, DeprecationWarning) for w in caught)
-
-
 class TestPassthroughSession:
     """HandoffSession.is_passthrough is derived from stream_url.
 
