@@ -985,6 +985,18 @@
         completionReasonText.textContent = reason || '';
         completionTimestamp.textContent = nowTimeText();
         completionOverlay.classList.add('show');
+        // Defocus the iframe immediately so any pending keystrokes stop
+        // hitting the substrate the moment the card appears. Keep the
+        // iframe visible for the fade-in so the page fades under the
+        // overlay rather than snapping to black, then blank it so the
+        // substrate bh no longer owns can't be interacted with even if
+        // the operator programmatically refocuses.
+        if (document.activeElement && document.activeElement.blur) {
+          document.activeElement.blur();
+        }
+        setTimeout(() => {
+          try { iframe.src = 'about:blank'; } catch (_) {}
+        }, 350);
         markTerminal();
       }
 

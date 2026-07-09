@@ -1350,6 +1350,19 @@
         completionReasonText.textContent = reason || '';
         completionTimestamp.textContent = nowTimeText();
         completionOverlay.classList.add('show');
+        // Keep the last frame visible for the fade-in so the page fades
+        // under the overlay rather than snapping to black, then drop it
+        // — mirrors the iframe-blank behavior in passthrough mode.
+        // Removing has-frame flips visibility hidden (no broken-image
+        // flash) and revoking the object URL releases the last blob.
+        setTimeout(() => {
+          stream.classList.remove('has-frame');
+          stream.removeAttribute('src');
+          if (currentObjectUrl) {
+            URL.revokeObjectURL(currentObjectUrl);
+            currentObjectUrl = null;
+          }
+        }, 350);
         markEnded();
       }
 
