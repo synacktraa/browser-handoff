@@ -601,8 +601,20 @@ class Handoff:
             timeout_cause: Literal["access", "completion"] | None = None
 
             async def install_listeners_after_connect() -> None:
+                nonlocal completion_reason
                 await session.presence.wait_until_connected()
                 if completion_event.is_set():
+                    return
+                # Race defense: state may have been reached between the
+                # initial probe (T0) and first-connect. Listeners only
+                # fire on new events, so any transition that already
+                # happened would be missed. Re-probe here — now with LLM
+                # included, since the wrapper has loaded and vision
+                # calls are no longer wasted.
+                arrival = await until.check(page, reason=session.reason)
+                if arrival.matched:
+                    completion_reason = arrival.reason
+                    completion_event.set()
                     return
                 listener_cleanups.append(
                     until.register_listeners(page, on_completion_detected)
